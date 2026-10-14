@@ -1,0 +1,1700 @@
+5S SaaS Application
+Digital Workplace Organisation, Audit & Continuous Improvement Platform
+Product: 5S SaaS Platform
+Version: 1.0
+Deployment Model: Multi-Tenant SaaS
+Platforms: Web + Mobile / PWA
+Target Customers: Manufacturing, Warehousing, Logistics, Food Processing, Garments, Automotive, Engineering, Pharma, Healthcare, Offices and Service Operations
+BUSINESS REQUIREMENTS DOCUMENT
+1. EXECUTIVE SUMMARY
+The proposed application is a cloud-based, multi-tenant SaaS platform for managing the complete lifecycle of workplace organisation and 5S implementation.
+The solution should go significantly beyond conventional checklist-based 5S audit applications.
+The platform shall enable organisations to:
+•Digitally define workplace standards.
+•Establish area-wise ownership and accountability.
+•Conduct 5S audits using mobile devices.
+•Capture photographic and other evidence.
+•Identify and track abnormalities.
+•Manage Red Tags.
+•Assign corrective and preventive actions.
+•Monitor action closure.
+•Establish visual workplace standards.
+•Compare present workplace conditions with approved standards.
+•Analyse recurring issues.
+•Track 5S maturity.
+•Benchmark areas, departments and plants.
+•Recognise high-performing teams.
+•Sustain 5S through systematic governance.
+•Use AI to assist auditors, managers and leadership.
+•Provide management with conversational and predictive insights.
+The long-term objective is to position the application not merely as a 5S Audit Tool, but as a: Workplace Organisation & Operational Discipline Platform
+The solution shall support organisations ranging from single-factory SMEs to enterprises operating hundreds of sites.
+2. BUSINESS BACKGROUND
+5S initiatives commonly fail after the initial implementation phase because organisations struggle with:
+•sustaining workplace standards;
+•lack of clear area ownership;
+•inconsistent audit practices;
+•subjective scoring;
+•ineffective action follow-up;
+•repeat observations;
+•inadequate visual standards;
+•lack of management visibility;
+•excessive dependence on Excel, paper and photographs;
+•weak accountability;
+•limited employee involvement;
+•lack of cross-location benchmarking;
+•inadequate trend analysis;
+•failure to identify deterioration early.
+Most existing systems digitise the audit form but do not address the complete lifecycle required to sustain workplace discipline.
+The proposed SaaS application intends to close this gap.
+3. PRODUCT VISION
+To create a digital platform that enables organisations to:
+Define the Standard → Maintain the Standard → Detect Deviations → Correct Deviations → Sustain Improvement
+The platform should gradually evolve from:
+Digital 5S Management
+to
+AI-assisted Workplace Organisation
+and eventually into:
+Operational Discipline Intelligence.
+4. BUSINESS OBJECTIVES
+The primary business objectives are:
+BO-01: Digitise the complete 5S lifecycle.
+BO-02: Eliminate dependency on paper-based and spreadsheet-based 5S audits.
+BO-03: Create a standardised approach to 5S across multiple locations.
+BO-04: Improve ownership and accountability for workplace conditions.
+BO-05: Reduce audit preparation and reporting time.
+BO-06: Improve action closure rates.
+BO-07: Reduce recurrence of 5S observations.
+BO-08: Create visual workplace standards.
+BO-09: Provide management with real-time visibility.
+BO-10: Enable benchmarking across areas, departments and plants.
+BO-11: Support scalable deployment across organisations.
+BO-12: Provide AI-assisted analysis without making the system dependent on AI.
+BO-13: Create a commercially scalable subscription-based SaaS product.
+5. PRODUCT PRINCIPLES
+The application shall follow the following principles:
+5.1 Mobile First - Most operational activities shall be executable using smartphones or tablets.
+5.2 Minimum Data Entry- Auditors and shop-floor users should not be required to enter excessive text.
+Preference shall be given to:
+•tap;
+•select;
+•photograph;
+•scan;
+•speak;
+•approve.
+5.3 Evidence Driven - Observations should preferably be supported by evidence.
+5.4 Accountability Driven
+Every relevant:
+•area;
+•standard;
+•audit;
+•observation;
+•action
+shall have ownership.
+5.5 Configuration Before Customisation
+Customers should configure:
+•scoring;
+•audit frequency;
+•escalation;
+•terminology;
+•organisational structure;
+•workflows
+without development.
+5.6 AI as Assistance
+AI shall recommend and assist.
+AI should not autonomously close actions, certify areas or change compliance records without authorised human approval.
+6. TARGET CUSTOMER SEGMENTS
+The platform should support:
+Manufacturing
+•Automotive
+•Engineering
+•Garments
+•Electronics
+•FMCG
+•Food processing
+•Pharma
+•Chemicals
+•Packaging
+Warehousing
+•Distribution centres
+•Finished goods warehouses
+•Raw material stores
+•E-commerce fulfilment
+Infrastructure
+•Workshops
+•Construction stores
+•Project sites
+•Equipment yards
+Healthcare
+•Hospitals
+•Laboratories
+•Pharmacies
+Service Environments
+•Offices
+•Data centres
+•Educational institutions
+•Retail facilities
+7. 5S FRAMEWORK
+The system shall support the conventional 5S methodology:
+S1 – Sort: Identify unnecessary items and remove them.
+S2 – Set in Order: Organise necessary items for safe and efficient usage.
+S3 – Shine: Maintain cleanliness and identify abnormalities.
+S4 – Standardise: Define standards for maintaining S1–S3.
+S5 – Sustain: Establish discipline and continuously maintain standards.
+Customers should optionally be able to extend the framework to:
+•6S – Safety
+8. ORGANISATIONAL HIERARCHY
+The system shall support configurable hierarchical structures.
+Typical structure:
+Organisation
+↓
+Business Unit
+↓
+Country
+↓
+Region
+↓
+Plant / Site
+↓
+Department
+↓
+Area
+↓
+Zone
+↓
+Workstation / Equipment
+Customers may use fewer or additional levels.
+Every auditable unit shall have a unique identifier.
+9. USER PERSONAS
+9.1 SaaS Super Administrator
+Responsible for:
+•customer onboarding;
+•subscription administration;
+•tenant configuration;
+•system monitoring.
+9.2 Organisation Administrator
+Responsible for:
+•organisation configuration;
+•user management;
+•audit templates;
+•workflow configuration;
+•escalation matrix.
+9.3 Plant Head
+Requires visibility of:
+•plant scores;
+•problem areas;
+•overdue actions;
+•department performance;
+•trends.
+9.4 5S Coordinator
+Responsible for:
+•5S governance;
+•audit planning;
+•standards;
+•audit schedules;
+•action monitoring;
+•reporting.
+9.5 Department Head
+Responsible for assigned departments and actions.
+9.6 Area Owner
+Responsible for maintaining 5S standards within assigned areas.
+9.7 Auditor
+Responsible for conducting assessments and recording findings.
+9.8 Employee
+May:
+•report abnormalities;
+•participate in Red Tag campaigns;
+•acknowledge tasks;
+•access 5S standards.
+9.9 Executive Management
+Primarily consumes:
+•dashboards;
+•summaries;
+•trends;
+•comparisons;
+•AI-generated insights.
+9.10 External Auditor / Consultant
+Temporary restricted access to selected audits or sites.
+10. ROLE-BASED ACCESS CONTROL
+Access shall be configurable by:
+•role;
+•organisation;
+•site;
+•department;
+•area;
+•transaction type;
+•workflow status.
+The system should support:
+•Create
+•Read
+•Update
+•Delete
+•Submit
+•Approve
+•Close
+•Reopen
+•Export
+•Configure permissions.
+11. FUNCTIONAL MODULES
+The application shall contain the following major modules.
+1.Organisation & Tenant Management
+2.User and Role Management
+3.Location & Area Management
+4.5S Standard Management
+5.Audit Template Management
+6.Audit Planning
+7.Mobile Audit Execution
+8.Observation Management
+9.Corrective Action Management
+10.Red Tag Management
+11.Visual Standard Management
+12.Abnormality Reporting
+13.Dashboard & Analytics
+14.Maturity Assessment
+15.Gamification and Leaders Point system
+16.Learning & Competency
+17.Notification & Escalation
+18.AI Assistant
+19.Conversational Analytics
+20.Integration Management
+21.Subscription & Billing
+22.Platform Administration
+12. TENANT MANAGEMENT REQUIREMENTS
+BR-TEN-001 - Each subscribing organisation shall operate as an independent tenant.
+BR-TEN-002 - Tenant data shall be logically isolated from other customers.
+BR-TEN-003 - Each tenant shall maintain independent:
+•users;
+•locations;
+•templates;
+•scoring models;
+•workflows;
+•branding;
+•dashboards.
+BR-TEN-004 - The platform shall support tenant-specific configuration without modifying application code.
+BR-TEN-005 - Super Administrators shall be able to:
+•activate tenant;
+•suspend tenant;
+•change subscription;
+•assign storage quota;
+•monitor tenant usage.
+13. CUSTOMER ONBOARDING
+The system shall support guided onboarding.
+Typical onboarding wizard:
+1.Create organisation.
+2.Upload logo.
+3.Configure location structure.
+4.Configure departments.
+5.Create users.
+6.Assign owners.
+7.Select standard 5S template.
+8.Configure scoring.
+9.Configure audit frequency.
+10.Configure escalation.
+11.Upload workplace standards.
+12.Start first audit.
+Excel import shall be available for mass creation.
+14. AREA MANAGEMENT
+Every 5S location shall have an Area Master.
+Fields may include:
+•Area ID
+•Area Name
+•Site
+•Department
+•Parent Area
+•Area Owner
+•Backup Owner
+•Area Type
+•Area Category
+•Floor
+•Building
+•Description
+•Photograph
+•QR code
+•Risk Classification
+•Audit Frequency
+•Active / Inactive
+The system shall automatically generate QR codes.
+15. QR / NFC BASED IDENTIFICATION
+Users shall be able to:
+•scan area QR;
+•tap NFC tag;
+•open corresponding area;
+•view current standard;
+•view latest score;
+•start audit;
+•raise abnormality.
+This shall reduce incorrect area selection.
+16. 5S STANDARD MANAGEMENT
+Each area should have defined workplace standards.
+Standards shall support:
+•text;
+•photographs;
+•videos;
+•diagrams;
+•attachments;
+•SOP documents.
+Example:
+Tool Storage Standard
+•Tool must be stored in labelled location.
+•Shadow board must match tool.
+•No missing tools.
+•Broken tools prohibited.
+•Maximum quantity: 2.
+________________________________________
+17. STANDARD REFERENCE PHOTOS
+The system shall allow:
+Standard Condition Photograph
+versus
+Current Condition Photograph
+This capability is strategically important for AI-enabled visual compliance.
+Multiple reference photographs may be stored for:
+•different angles;
+•shifts;
+•machines;
+•product changeovers.
+________________________________________
+18. STANDARD VERSION CONTROL
+Every standard shall maintain:
+•Revision number
+•Effective date
+•Revised by
+•Approved by
+•Revision comments
+•Previous version
+Users must always reference the applicable approved version.
+19. AUDIT TEMPLATE MANAGEMENT
+Administrators shall create reusable audit templates.
+Templates shall contain:
+•Section
+•5S category
+•Question
+•Description
+•Standard
+•Weightage
+•Score
+•Mandatory evidence
+•Severity
+•Applicability
+•Guidance
+•Reference photograph
+20. QUESTION TYPES
+The system shall support:
+•Yes / No
+•Pass / Fail
+•Numeric scoring
+•0–5 scale
+•0–10 scale
+•Percentage
+•Multiple choice
+•Text
+•Photograph
+•Checklist
+•Compliance / Non-compliance
+•Not Applicable
+21. AUDIT TYPES
+The system shall support multiple audit types.
+Routine Audit - Periodic scheduled audit.
+Self-Audit - Conducted by area owner.
+Layered Audit - Conducted by different management levels.
+Cross-functional Audit - Conducted by another department.
+Management Audit - Conducted by leadership.
+Surprise Audit - Unannounced audit.
+Certification Audit - Formal 5S maturity evaluation.
+Campaign Audit
+Example:
+“Red Tag Week.”
+22. AUDIT SCHEDULING
+Audits may be scheduled:
+•daily;
+•weekly;
+•fortnightly;
+•monthly;
+•quarterly;
+•annually;
+•custom interval.
+Audit schedules shall contain:
+•Area
+•Audit Type
+•Auditor
+•Planned Date
+•Frequency
+•Checklist
+•Approver
+Recurring schedules shall automatically create audits.
+23. AUDITOR ROTATION
+The application should optionally assign auditors automatically based on:
+•competency;
+•department independence;
+•availability;
+•past audits;
+•rotation rules.
+24. MOBILE AUDIT EXECUTION
+The mobile audit screen should minimise navigation.
+Typical auditor workflow:
+Scan QR
+→
+Open Area
+→
+View Standard
+→
+Answer Questions
+→
+Capture Evidence
+→
+Create Observation
+→
+Assign Severity
+→
+Submit Audit
+25. OFFLINE CAPABILITY
+Mobile applications should support offline audit execution.
+Offline mode shall support:
+•downloading assigned audits;
+•checklist completion;
+•photo capture;
+•observation recording;
+•action creation.
+Data shall synchronise automatically when connectivity returns.
+26. EVIDENCE CAPTURE
+Audit evidence may include:
+•photographs;
+•short video;
+•voice notes;
+•attachments;
+•text comments.
+Metadata should capture:
+•timestamp;
+•user;
+•location if permitted;
+•audit reference.
+27. PHOTO ANNOTATION
+Auditors shall be able to mark:
+•arrows;
+•circles;
+•boxes;
+•text annotations
+directly on photographs.
+28. OBSERVATION MANAGEMENT
+Every non-conformance may create an Observation.
+Observation fields:
+•Observation ID
+•Audit
+•Location
+•5S Category
+•Description
+•Evidence
+•Severity
+•Risk
+•Assigned To
+•Target Date
+•Status
+•Root Cause
+•Corrective Action
+•Verified By
+•Closure Evidence
+29. SEVERITY CLASSIFICATION
+Example:
+•Minor
+•Moderate
+•Major
+•Critical
+Tenants shall configure severity rules.
+30. CORRECTIVE ACTION MANAGEMENT
+Actions may arise from:
+•audit observations;
+•abnormalities;
+•red tags;
+•management reviews;
+•AI suggestions.
+Workflow:
+Open
+→
+Assigned
+→
+In Progress
+→
+Pending Verification
+→
+Verified
+→
+Closed
+31. ACTION SLA
+The system shall calculate target closure dates based on:
+•severity;
+•area;
+•customer configuration.
+Example:
+Critical – 24 hours
+Major – 3 days
+Moderate – 7 days
+Minor – 15 days
+32. ACTION ESCALATION
+Escalation rules may include: In app and Email
+T-2 days → reminder
+Due date → owner alert -
++2 days → department head
++5 days → plant head
++10 days → 5S coordinator
+Rules shall be configurable.
+33. CLOSURE EVIDENCE
+Actions should not normally be closed without:
+•closure comments;
+•after photograph.
+Customers may configure exceptions.
+34. ACTION VERIFICATION
+The person performing the action should not necessarily verify the action.
+The system shall support independent verification.
+35. REOPENING ACTIONS
+Verifier may reopen actions where corrective actions are inadequate.
+History shall be maintained.
+36. RED TAG MANAGEMENT
+The system shall provide dedicated Red Tag functionality.
+Red Tag fields: Option to generate or print red tag from system should be allowed
+•Tag Number – with option for unique QR code tracking
+•Item
+•Description
+•Quantity
+•Area
+•Photograph
+•Reason
+•Tagged By
+•Tag Date
+•Owner
+•Decision
+•Target Disposition Date
+•Disposition
+•Closure Date
+•Purchase value (if applicable)
+37. RED TAG DISPOSITION
+Possible decisions:
+•Keep
+•Relocate
+•Repair
+•Reuse
+•Return
+•Sell
+•Scrap
+•Dispose
+38. RED TAG AREA
+Items transferred into physical Red Tag Zones may be digitally tracked.
+The application shall report:
+•number of items;
+•ageing;
+•estimated value;
+•disposition status.
+39. ABNORMALITY REPORTING
+Any authorised employee shall be able to report 5S abnormalities without conducting a complete audit.
+Workflow:
+Scan QR
+→
+Take photograph
+→
+Select category
+→
+Submit
+This should require less than approximately 30 seconds under normal usage.
+40. VISUAL MANAGEMENT MODULE
+The system shall manage visual workplace controls such as:
+•floor markings;
+•labels;
+•shadow boards;
+•location markings;
+•storage limits;
+•gangway standards;
+•colour coding;
+•equipment identification;
+•cleaning standards.
+41. BEFORE / AFTER IMPROVEMENT
+The application shall maintain before-and-after photographs for improvements.
+This shall create a digital Kaizen gallery.
+42. 5S SCORING ENGINE
+The system shall support configurable scoring.
+Example:
+S1 Sort – 20%
+S2 Set in Order – 20%
+S3 Shine – 20%
+S4 Standardise – 20%
+S5 Sustain – 20%
+or weighted models.
+43. WEIGHTED QUESTIONS
+•Questions may have different weightages.
+•Critical safety-related questions may automatically cap the overall score.
+Example: If critical fire escape observation exists:
+Maximum audit score = 70%.
+44. NOT APPLICABLE QUESTIONS
+N/A questions shall automatically adjust the denominator.
+45. 5S MATURITY MODEL
+Beyond audit scores, the system shall support maturity levels.
+Example:
+Level 1 – Initial
+Basic awareness.
+Level 2 – Implemented
+Basic workplace organisation exists.
+Level 3 – Standardised
+Standards are documented.
+Level 4 – Sustained
+Consistent adherence demonstrated.
+Level 5 – Excellence
+Self-sustaining improvement culture.
+46. CERTIFICATION
+Customers may configure internal certifications such as:
+•Bronze
+•Silver
+•Gold
+•Platinum
+based on:
+•score;
+•repeat findings;
+•action closure;
+•audit adherence;
+•sustained performance.
+47. AUDIT ADHERENCE
+The platform shall measure:
+Audit Adherence %
+Completed scheduled audits ÷ Scheduled audits × 100
+48. ACTION CLOSURE KPI
+On-Time Action Closure %
+Actions closed within target date ÷ Actions closed × 100
+49. REPEAT OBSERVATION RATE
+Repeat observations shall be identified and reported.
+Example KPI:
+Repeat Observations ÷ Total Observations × 100
+50. MANAGEMENT DASHBOARD
+Dashboard shall include:
+•Overall 5S score
+•Plant-wise score
+•Department-wise score
+•S1–S5 performance
+•Trend
+•Audit compliance
+•Open actions
+•Overdue actions
+•Critical observations
+•Repeat observations
+•Red Tags pending
+•Best areas
+•Lowest-performing areas
+•Maturity levels
+51. HEAT MAP
+The application should provide a visual 5S heat map.
+Example:
+Plant
+→ Department
+→ Area
+Colours can indicate performance bands.
+52. DRILLDOWN
+Users shall be able to drill down from:
+Enterprise
+to
+Plant
+to
+Department
+to
+Area
+to
+Audit
+to
+Observation.
+53. TREND ANALYTICS
+Trend views shall support:
+•3 months
+•6 months
+•12 months
+•custom period.
+54. BENCHMARKING
+The system shall allow comparison between:
+•plants;
+•departments;
+•production lines;
+•areas;
+•shifts.
+55. GAMIFICATION
+Gamification shall be optional – Leader’s points
+Possible features:
+•Best 5S Area
+•Most Improved Area
+•Zero Overdue Award
+•Best Auditor
+•Best Red Tag Contributor
+•5S Champion
+56. LEADERBOARD
+Leaderboards may be configured by:
+•plant;
+•department;
+•team;
+•region.
+________________________________________
+57. LEARNING MANAGEMENT
+Basic microlearning shall be incorporated.
+Content may include:
+•5S fundamentals;
+•examples;
+•photographs;
+•videos;
+•quizzes;
+•lessons learned.
+The application need not initially replace a dedicated enterprise LMS.
+58. AUDITOR COMPETENCY
+The system shall maintain:
+•training completion;
+•assessment score;
+•certification;
+•certification validity.
+Only qualified auditors may conduct specified audits.
+59. DIGITAL SOP / KNOWLEDGE MANAGEMENT
+Each area may contain:
+•SOP;
+•work instruction;
+•cleaning checklist;
+•visual standard;
+•safety standard.
+QR scan should provide immediate access.
+60. NOTIFICATION ENGINE
+Notifications shall support:
+•in-app;
+•email;
+•mobile push;
+•WhatsApp through approved provider;
+•Microsoft Teams, where integrated.
+61. NOTIFICATION EVENTS
+Examples:
+•Audit due
+•Audit overdue
+•Action assigned
+•Action approaching due date
+•Action overdue
+•Critical observation
+•Verification pending
+•Red Tag ageing
+•Certification expiry
+62. DAILY DIGEST
+Managers may receive consolidated digest:
+•audits due;
+•overdue actions;
+•new critical issues;
+•yesterday's closure performance.
+63. AI STRATEGY
+AI capabilities shall be implemented in controlled phases.
+AI features shall be divided into:
+Category A – Immediately Deployable AI
+Does not require extensive customer historical data.
+Category B – Data Dependent AI
+Improves after sufficient historical data is available.
+64. AI – AUDIT ASSISTANT
+During an audit, AI may assist the auditor by:
+•suggesting observation descriptions;
+•recommending 5S category;
+•suggesting severity;
+•proposing corrective action text.
+Example:
+User photographs blocked access aisle.
+AI suggests:
+“Material stored within marked pedestrian aisle. Possible Set-in-Order and Safety deviation.”
+Auditor confirms or modifies.
+65. AI – IMAGE ANALYSIS
+AI may analyse workplace photographs to identify possible abnormalities.
+Possible detection categories:
+•items outside designated zones;
+•clutter;
+•blocked aisles;
+•missing labels;
+•waste accumulation;
+•spillages;
+•poor housekeeping;
+•PPE deviations where applicable;
+•fire extinguisher obstruction;
+•misplaced tools.
+All AI detections shall be presented as suggestions.
+Human validation shall remain mandatory.
+66. STANDARD VS CURRENT IMAGE COMPARISON
+Where an approved standard photograph exists, AI may compare:
+Reference Image
+against
+Current Image.
+Potential differences:
+•missing object;
+•added object;
+•location change;
+•clutter;
+•label absence;
+•arrangement difference.
+This is a strategic long-term feature.
+67. AI – VOICE TO OBSERVATION
+Auditor may dictate:
+“Three unused containers kept next to Line 4 for more than one week.”
+AI converts this into structured fields:
+Category: Sort
+Observation: Unnecessary containers retained near Line 4
+Suggested severity: Moderate
+The user confirms before submission.
+68. AI – DUPLICATE OBSERVATION DETECTION
+AI should identify potentially similar observations.
+Example:
+“Oil leakage below CNC-12”
+appearing repeatedly across audits.
+The system may indicate:
+Similar observation recorded four times in the last three months.
+69. AI – ROOT CAUSE ASSISTANT
+AI may suggest probable root causes based on:
+•historical observations;
+•area;
+•equipment;
+•recurring patterns;
+•prior actions.
+AI suggestions must be clearly identified as recommendations.
+70. AI – CORRECTIVE ACTION ASSISTANT
+AI may propose corrective actions.
+Example:
+Observation:
+“Cleaning material has no fixed storage location.”
+AI suggestion:
+“Define marked cleaning station, provide tool silhouettes and establish end-of-shift return check.”
+71. AI – AUDIT REPORT GENERATION
+After audit completion, AI may automatically generate:
+•executive summary;
+•strengths;
+•major gaps;
+•priority actions;
+•recurring observations;
+•recommendations.
+72. AI – MANAGEMENT SUMMARY
+Example:
+Plant A improved its 5S score from 74% to 81% over the last quarter. However, Set-in-Order remains the weakest dimension. Four of the eight overdue actions relate to tool storage in Assembly.
+73. CONVERSATIONAL REPORTING
+Management shall be able to ask questions in natural language.
+Examples:
+Which departments had the most repeat observations this quarter?
+Show overdue actions above 15 days.
+Which plant improved most in the last six months?
+Why did Plant B's score reduce in August?
+Which 5S category generates the highest number of observations?
+The system shall translate questions into authorised analytical queries.
+74. AI QUERY ACCESS CONTROL
+AI shall only retrieve data the logged-in user is authorised to access.
+The AI layer shall not bypass application permissions.
+75. AI – TREND IDENTIFICATION
+After sufficient data exists, AI may identify:
+•declining areas;
+•recurring observations;
+•problematic shifts;
+•seasonal issues;
+•categories experiencing deterioration.
+76. AI – RISK PREDICTION
+Future phases may provide risk indicators such as:
+Area A has a high probability of falling below 70% during the next audit.
+Inputs may include:
+•past score;
+•overdue actions;
+•repeat findings;
+•audit misses;
+•observation frequency.
+This capability requires sufficient historical data.
+77. AI – AUDIT SAMPLING
+The system may recommend audit priority based on risk.
+Rather than auditing every area equally, AI may identify areas requiring attention.
+78. AI GOVERNANCE
+Every AI-generated recommendation should maintain:
+•AI flag;
+•model version;
+•prompt / request category where appropriate;
+•user confirmation;
+•modification record.
+AI output shall not silently modify transactional data.
+79. AI DATA PRIVACY
+Customer data should not automatically be used to train public AI models.
+Enterprise AI configuration should support:
+•data processing agreement;
+•customer-controlled retention;
+•private API endpoint where required.
+80. AI PHASE CLASSIFICATION
+Phase 1 AI
+•Text summarisation
+•Audit narration
+•Voice-to-text
+•Observation categorisation
+•Corrective action suggestions
+•Conversational reporting
+Phase 2 AI
+•Similar observation detection
+•Root cause suggestions
+•intelligent escalation
+•image classification
+Phase 3 AI
+•Standard vs actual image comparison
+•predictive deterioration
+•audit risk prioritisation
+•enterprise benchmarking intelligence
+81. REPORTING REQUIREMENTS
+Standard reports should include:
+•Audit Schedule
+•Audit Completion
+•5S Score
+•Area Ranking
+•Department Ranking
+•Observation Register
+•Open Action Register
+•Overdue Action Register
+•Repeat Observation Report
+•Red Tag Register
+•Maturity Report
+•Certification Report
+•Audit Trend
+•Action Ageing
+•Auditor Performance
+82. CUSTOM REPORTING
+Authorised users should be able to filter and export reports by:
+•date;
+•site;
+•department;
+•area;
+•5S category;
+•auditor;
+•action owner;
+•severity;
+•status.
+83. EXPORT
+Reports should support:
+•Excel
+•CSV
+•PDF
+subject to user permission.
+84. SAAS SUBSCRIPTION MODEL
+The application should support different plans.
+Example:
+Starter
+Suitable for smaller organisations.
+Professional
+Multiple departments and enhanced analytics.
+Enterprise
+Multi-location, SSO, integrations, AI and enterprise governance.
+85. POSSIBLE COMMERCIAL METRICS
+Pricing can eventually be based on combinations of:
+•sites;
+•active users;
+•auditable areas;
+•audits per month;
+•storage;
+•AI usage.
+Avoid excessive per-user pricing for shop-floor participants.
+A commercially attractive model could use:
+Site + Active Auditor + AI Consumption
+rather than charging every employee.
+86. TRIAL MANAGEMENT
+The platform shall support:
+•14-day / 30-day trial;
+•user limits;
+•site limits;
+•automatic trial expiry;
+•conversion to paid subscription.
+87. SUBSCRIPTION ENTITLEMENTS
+Feature access shall depend on plan.
+Example:
+CapabilityStarterProfessionalEnterprise
+AuditsYesYesYes
+MobileYesYesYes
+Action ManagementYesYesYes
+Red TagYesYesYes
+Multi-SiteLimitedYesYes
+AI ReportsLimitedYesYes
+Conversational AnalyticsNoYesYes
+SSONoOptionalYes
+APILimitedYesYes
+White LabellingNoOptionalYes
+88. BILLING REQUIREMENTS
+System should support integration with payment gateways for:
+•subscription purchase;
+•renewal;
+•upgrade;
+•downgrade.
+Payments can be integrated with platforms such as:
+•Stripe;
+•Razorpay
+depending on geography.
+89. TECHNICAL ARCHITECTURE
+Recommended high-level architecture:
+Client Layer
+↓
+Web Application / Mobile App / PWA
+↓
+API Gateway
+↓
+Application Services
+↓
+Authentication / Audit / Actions / Analytics / AI Services
+↓
+Database
+↓
+Object Storage
+↓
+Reporting / AI / Integration Layer
+90. ARCHITECTURE APPROACH
+The initial platform should preferably use a:
+Modular Monolith with API-first design
+rather than immediately implementing complex microservices.
+Benefits:
+•lower development complexity;
+•faster release cycles;
+•easier debugging;
+•lower infrastructure cost.
+Specific functions may later be extracted into services.
+Potential candidates:
+•AI processing;
+•image processing;
+•notifications;
+•analytics;
+•integration services.
+91. RECOMMENDED TECHNOLOGY OPTIONS
+Technology should ultimately depend on development capability.
+Possible architecture:
+Front End
+React / Next.js
+or equivalent modern framework.
+Mobile
+Flutter
+or React Native.
+A PWA may be considered for MVP.
+Backend
+Python / Django
+Node.js / NestJS
+or Frappe Framework where strategically appropriate.
+Database
+PostgreSQL
+recommended.
+Cache
+Redis.
+Background Jobs
+Redis Queue / Celery / equivalent.
+Object Storage
+AWS S3-compatible storage.
+AI Integration
+API abstraction layer supporting:
+•OpenAI;
+•Azure OpenAI;
+•other enterprise models.
+The system should avoid hard dependency on one AI provider.
+92. API-FIRST ARCHITECTURE
+All major functions shall expose secure APIs.
+Example endpoint groups:
+/auth
+/sites
+/areas
+/standards
+/audits
+/observations
+/actions
+/redtags
+/reports
+/ai
+93. DATABASE REQUIREMENTS
+Primary entities shall include:
+•Tenant
+•Subscription
+•User
+•Role
+•Site
+•Department
+•Area
+•Standard
+•StandardRevision
+•AuditTemplate
+•AuditQuestion
+•AuditSchedule
+•Audit
+•AuditResponse
+•Observation
+•Action
+•RedTag
+•Attachment
+•Certification
+•Training
+•Notification
+•AIInteraction
+•AuditLog
+94. MULTI-TENANCY
+Possible approaches:
+Shared database with Tenant ID
+Suitable for SaaS scale and simpler operations.
+Strong application-level and database-level controls shall be mandatory.
+For enterprise customers requiring stronger segregation, future capability may support:
+•dedicated database;
+•dedicated instance.
+95. DATABASE INDEXING
+Indexes shall be designed for frequent filtering by:
+•Tenant
+•Site
+•Area
+•Date
+•Status
+•Owner
+•Audit
+•Severity.
+96. FILE STORAGE
+Images and videos shall not normally be stored directly inside transactional database rows.
+Use object storage.
+File metadata shall remain in application database.
+97. IMAGE OPTIMISATION
+Mobile photographs should automatically be:
+•compressed;
+•resized;
+•thumbnail-generated.
+Original images may be retained based on plan or policy.
+98. STORAGE MANAGEMENT
+Each subscription shall include a configurable storage allowance.
+System shall monitor:
+•storage usage;
+•image count;
+•video usage.
+99. AUTHENTICATION
+Authentication shall support:
+•email/password;
+•OTP where applicable;
+•Google;
+•Microsoft;
+•SAML / OIDC for enterprise.
+100. MULTI-FACTOR AUTHENTICATION
+MFA should be configurable and mandatory for selected administrator roles.
+101. PASSWORD SECURITY
+System shall enforce:
+•minimum password complexity;
+•password hashing;
+•reset token expiry;
+•brute-force protection.
+Passwords shall never be stored in plaintext.
+102. AUTHORISATION
+Server-side access control shall be mandatory.
+UI hiding alone shall not be considered security.
+103. DATA ENCRYPTION
+Data in Transit
+TLS 1.2 or higher.
+Data at Rest
+Database and storage encryption.
+104. AUDIT LOGGING
+The platform shall maintain immutable or tamper-resistant logs for significant activities:
+•login;
+•user creation;
+•permission changes;
+•audit submission;
+•action closure;
+•score modification;
+•standard revision;
+•configuration changes.
+105. SESSION MANAGEMENT
+The platform shall support:
+•session timeout;
+•device logout;
+•revoke active sessions;
+•optional concurrent login restrictions.
+106. DATA RETENTION
+Retention shall be configurable.
+Example:
+Audit records – 7 years
+Photos – 3 years
+Application logs – 1 year
+Actual retention will depend on customer requirements.
+107. BACKUP REQUIREMENTS
+The SaaS environment shall provide:
+•automated database backups;
+•object storage redundancy;
+•backup monitoring;
+•restoration testing.
+108. DISASTER RECOVERY
+Initial target:
+RPO ≤ 24 hours
+RTO ≤ 8 hours
+Enterprise plans may require stricter commitments.
+109. PERFORMANCE REQUIREMENTS
+Typical screens should load within approximately:
+2–3 seconds under normal conditions.
+API response targets should be defined for critical functions.
+110. SCALE TARGET
+The architecture should support scaling from:
+10 users
+to
+tens of thousands of users
+without redesigning the entire product.
+111. CONCURRENCY
+Architecture should support high concurrent mobile usage during shift changes and audit periods.
+112. AVAILABILITY
+Target SaaS availability:
+≥ 99.5% initially.
+Enterprise tier may target:
+≥ 99.9%.
+113. MOBILE TECHNICAL REQUIREMENTS
+Mobile application shall support:
+•Android;
+•iOS where commercially necessary;
+•camera;
+•QR scanning;
+•offline cache;
+•push notifications.
+114. LOW BANDWIDTH DESIGN
+Mobile workflows shall remain practical in:
+•factory shop floors;
+•warehouses;
+•remote sites.
+Photos should upload asynchronously.
+115. BROWSER SUPPORT
+Web application should support latest stable versions of:
+•Chrome
+•Edge
+•Firefox
+•Safari
+subject to defined support policy.
+116. RESPONSIVE DESIGN
+Web screens shall function across:
+•desktop;
+•tablet;
+•mobile.
+117. ACCESSIBILITY
+Interface should progressively align with WCAG principles.
+Examples:
+•keyboard navigation;
+•readable contrast;
+•accessible labels;
+•screen-reader support.
+118. INTERNATIONALISATION
+Architecture shall support multiple:
+•languages;
+•date formats;
+•time zones;
+•currencies where applicable.
+Initial release may be English-first.
+119. TRANSLATION
+Questions, templates and standards should support multilingual content.
+This is particularly useful in shop-floor environments.
+120. AI TRANSLATION
+AI may assist with translating observation descriptions while preserving the original language.
+121. INTEGRATION ARCHITECTURE
+Integration shall be API driven.
+Supported patterns:
+•REST APIs
+•Webhooks
+•Scheduled synchronisation
+•File import/export
+122. HRMS INTEGRATION
+Possible systems:
+•ERPNext
+•SAP SuccessFactors
+•Workday
+•Zoho People
+•Darwinbox
+Data may include:
+•employee;
+•department;
+•manager;
+•location.
+123. ERP INTEGRATION
+Relevant master data may synchronise from:
+•ERPNext
+•SAP
+•Oracle
+•Microsoft Dynamics
+•Odoo
+Avoid duplicating masters unnecessarily.
+124. MICROSOFT TEAMS INTEGRATION
+Possible features:
+•action notifications;
+•escalation messages;
+•approval links.
+125. WHATSAPP INTEGRATION
+WhatsApp integration may be provided for:
+•reminders;
+•overdue actions;
+•daily summary.
+Use official WhatsApp Business APIs.
+126. EMAIL INTEGRATION
+Email notifications shall contain secure links to relevant transactions.
+127. WEBHOOKS
+Customers should be able to subscribe to events such as:
+•audit completed;
+•observation created;
+•action overdue;
+•action closed.
+128. EXTERNAL API SECURITY
+APIs shall support:
+•OAuth;
+•API keys;
+•rate limiting;
+•IP restrictions where required.
+129. IMPORT REQUIREMENTS
+Bulk imports shall support:
+•Users
+•Areas
+•Departments
+•Audit questions
+•Standards
+•Existing actions
+using standard templates.
+130. CONFIGURATION MANAGEMENT
+Tenant administrators shall configure:
+•terminology;
+•scoring;
+•severity;
+•workflow;
+•escalation;
+•notifications;
+•numbering;
+•branding
+131. WHITE LABELLING
+Enterprise customers may optionally configure:
+•logo;
+•application colour;
+•email branding;
+•custom domain.
+132. SEARCH
+Global search shall support searching by:
+•audit number;
+•observation;
+•area;
+•action;
+•Red Tag;
+•employee.
+133. ATTACHMENT SECURITY
+Attachment access shall require authorised application sessions.
+Sensitive files should not be exposed through unrestricted public URLs.
+134. SYSTEM MONITORING
+Platform operations shall monitor:
+•CPU;
+•memory;
+•database health;
+•queue health;
+•API errors;
+•background jobs;
+•storage;
+•failed notifications.
+135. APPLICATION LOGGING
+Logs shall include:
+•application errors;
+•integration failures;
+•background job errors;
+•AI failures.
+Customer data should be minimised in system logs.
+136. OBSERVABILITY
+Use:
+•metrics;
+•logs;
+•tracing
+for production support.
+137. FEATURE FLAGS
+New functions should be enabled gradually using feature flags.
+Useful for:
+•beta features;
+•AI experiments;
+•tenant-specific rollout.
+138. PRODUCT ANALYTICS
+The SaaS provider should monitor product usage such as:
+•monthly active users;
+•audits created;
+•audits completed;
+•actions closed;
+•photos uploaded;
+•AI queries;
+•feature adoption.
+Customer confidentiality must be maintained.
+139. SAAS ADMIN DASHBOARD
+Platform operator dashboard should provide:
+•Active tenants
+•Trial tenants
+•Paid subscriptions
+•Monthly recurring revenue
+•Churn
+•Storage consumption
+•Active users
+•AI consumption
+•Failed integrations
+140. AI COST GOVERNANCE
+Since generative AI incurs usage cost, the system shall track:
+•tokens;
+•image processing;
+•AI calls;
+•tenant;
+•feature.
+Usage limits shall be subscription controlled.
+141. AI FALLBACK
+Core 5S functionality must continue even when AI services are unavailable.
+AI downtime shall not block:
+•audits;
+•actions;
+•Red Tags;
+•reporting.
+142. DATA QUALITY REQUIREMENTS
+Mandatory master fields shall be validated.
+Examples:
+Every auditable area should ideally have:
+•owner;
+•location;
+•active status;
+•audit frequency.
+143. DUPLICATE PREVENTION
+The system should identify probable duplicates for:
+•users;
+•areas;
+•audit templates.
+144. WORKFLOW ENGINE
+A configurable workflow engine should support future requirements beyond hard-coded approvals.
+145. NUMBERING
+Transactions shall have unique readable identifiers.
+Examples:
+AUD-BLR-2026-0001
+OBS-BLR-2026-0014
+ACT-BLR-2026-0045
+RT-BLR-2026-0087
+146. AUDIT LOCKING
+After submission:
+•audit score;
+•answers;
+•evidence
+shall be locked.
+Authorised amendment should create a revision or audit trail.
+147. TIME STAMPING
+All critical events shall store:
+•UTC timestamp;
+•displayed local timezone.
+148. SOFT DELETE
+Important transactional records should not be permanently deleted by standard users.
+Records may be cancelled, archived or deactivated.
+149. PRIVACY
+The platform should support applicable privacy requirements including:
+•access requests;
+•deletion requests where legally permissible;
+•data export.
+150. SECURITY TESTING
+Before production release, conduct:
+•vulnerability scanning;
+•dependency scanning;
+•API security testing;
+•penetration testing.
+151. SECURE DEVELOPMENT
+Development process should include:
+•code review;
+•branch protection;
+•secrets management;
+•environment separation.
+152. ENVIRONMENTS
+Maintain separate:
+•Development
+•Testing
+•UAT
+•Production
+environments.
+153. CI/CD
+Automated deployment pipelines should include:
+•tests;
+•build;
+•vulnerability checks;
+•controlled production deployment.
+154. AUTOMATED TESTING
+Automated tests should cover:
+•authentication;
+•permissions;
+•audit scoring;
+•workflow;
+•tenant isolation;
+•action SLA;
+•APIs.
+155. ACCEPTANCE CRITERIA – MVP
+The MVP shall be considered business-ready when users can:
+1.Create organisation.
+2.Create users and roles.
+3.Define plant/department/area.
+4.Generate area QR.
+5.Create audit templates.
+6.Schedule audits.
+7.Conduct mobile audit.
+8.Capture photographs.
+9.Record observations.
+10.Assign corrective actions.
+11.Escalate overdue actions.
+12.Verify and close actions.
+13.Perform Red Tag management.
+14.Display management dashboard.
+15.Generate reports.
+16.Maintain complete audit trail.
+156. MVP FUNCTIONAL SCOPE
+Recommended MVP:
+Core SaaS
+•Tenant creation
+•User management
+•Subscription controls
+Masters
+•Site
+•Department
+•Area
+•QR
+Standards
+•Standard descriptions
+•reference photographs
+Audit
+•Templates
+•scheduling
+•mobile execution
+•photographs
+Actions
+•assignment
+•SLA
+•escalation
+•closure verification
+Red Tags
+•tagging
+•ageing
+•disposition
+Analytics
+•dashboard
+•trends
+•reports
+Basic AI
+•observation text assistance;
+•audit summaries.
+157. PHASE 2
+Phase 2 should introduce:
+•advanced visual standards;
+•gamification;
+•learning;
+•competency;
+•WhatsApp;
+•Teams;
+•advanced dashboards;
+•multilingual support;
+•conversational reporting;
+•root cause assistant;
+•recurring observation analysis
+158. PHASE 3
+Phase 3 may introduce:
+•computer vision;
+•reference-image comparison;
+•predictive deterioration;
+•risk-based audit scheduling;
+•enterprise benchmarking;
+•advanced maturity models.
+159. FEATURES NOT RECOMMENDED FOR MVP
+Avoid overloading the MVP with:
+•complex machine learning models;
+•fully automated visual audits;
+•extensive LMS;
+•complex microservices;
+•elaborate gamification;
+•custom BI platform;
+•predictive analytics without historical data.
+These can dramatically increase development cost without proving core product-market fit.
+160. KEY BUSINESS KPIs FOR CUSTOMER
+The platform should track:
+5S Score
+Audit Adherence %
+On-Time Action Closure %
+Overdue Action %
+Repeat Observation %
+Critical Observation Count
+Red Tag Ageing
+Average Action Closure Days
+Area Sustainability Score
+5S Maturity Level
+161. PRODUCT SUCCESS KPIs FOR SAAS PROVIDER
+The product owner should monitor:
+•Trial-to-paid conversion
+•Monthly recurring revenue
+•Customer churn
+•Active tenant %
+•Monthly active users
+•Audits per active tenant
+•Action closure usage
+•AI adoption
+•Storage cost per tenant
+•Customer acquisition cost
+•Lifetime value
+162. KEY BUSINESS RULES
+BRULE-01 - Every audit must belong to a valid tenant.
+BRULE-02 - Every audit must reference an approved template version.
+BRULE-03 - Users may only access authorised locations.
+BRULE-04
+Audit submissions must retain immutable historical answers.
+BRULE-05
+AI recommendations require human confirmation before becoming transactional records.
+BRULE-06
+An audit cannot normally be completed with unanswered mandatory questions.
+BRULE-07
+Critical observations shall trigger immediate escalation.
+BRULE-08
+Action closure may require evidence based on customer configuration.
+BRULE-09
+All score overrides shall be logged.
+BRULE-10
+A suspended tenant shall not create new transactions.
+163. KEY NON-FUNCTIONAL REQUIREMENTS
+NFRRequirement
+Availability≥99.5%
+SecurityRole- and tenant-based
+EncryptionIn transit and at rest
+Mobile OfflineRequired
+ScalabilityHorizontal scaling capable
+PerformanceTypical response 2–3 seconds
+BackupAutomated
+AuditabilityFull transaction history
+BrowserModern major browsers
+ResponsiveDesktop, tablet, mobile
+LocalizationArchitecture ready
+APIREST/API-first
+AI ResilienceCore application independent of AI
+164. PROPOSED HIGH-LEVEL DATA FLOW
+User / Auditor
+↓
+Mobile / Web
+↓
+Authentication
+↓
+Tenant Context
+↓
+Area / Audit Engine
+↓
+Observation
+↓
+Corrective Action
+↓
+Verification
+↓
+Analytics Database
+↓
+Dashboard / AI Insights
+165. HIGH-LEVEL AUDIT WORKFLOW
+Audit Schedule
+↓
+Auditor Notification
+↓
+QR Scan
+↓
+Area Confirmation
+↓
+View Standard
+↓
+Conduct Audit
+↓
+Capture Evidence
+↓
+Create Observations
+↓
+Calculate Score
+↓
+Submit
+↓
+Action Assignment
+↓
+Corrective Action
+↓
+Verification
+↓
+Closure
+↓
+Trend / Recurrence Monitoring
+166. HIGH-LEVEL AI WORKFLOW
+User Input / Photograph / Voice
+↓
+Application
+↓
+AI Security & Permission Layer
+↓
+AI Processing
+↓
+Suggested Output
+↓
+Human Confirmation
+↓
+Transactional Record

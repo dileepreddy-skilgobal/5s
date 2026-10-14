@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "SkilGlobal 5S Mobile",
+    "slug": "skilglobal-5s-mobile",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "requireFullScreen": false
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "package": "com.anonymous.skilglobal5smobile"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow SkilGlobal 5S to access your camera to scan shopfloor QR codes and capture inspection photos."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow SkilGlobal 5S to access your photos to attach shopfloor audit evidence.",
+          "cameraPermission": "Allow SkilGlobal 5S to access your camera to capture shopfloor audit evidence photos."
+        }
+      ]
+    ],
+    "extra": {
+      "tenantId": "skilglobal-mfg",
+      "appName": "SkilGlobal 5S Enterprise",
+      "version": "1.0.0"
+    }
+  }
+}

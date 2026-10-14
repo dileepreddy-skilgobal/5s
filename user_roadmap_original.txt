@@ -1,0 +1,116 @@
+<USER_REQUEST>
+@[c:\Users\Admin\Desktop\SkilGobal\5s\5S_SaaS_Business_Requirements_Document.docx] 
+the above document is brd of thes platform and i have the whole in different phase which i have provide  below and i have completed phase 1 and almost phase 2 also completed upto 80 to 90% check it and make sure you act as senior software developer who has 10+ years of experience ,who build quality applications for well repuited company and also make sure all functionalities should properly and following all system designs betterly
+Phase 1 — Tenant, Org & Location Masters
+Modules: Organisation & Tenant Management, User & Role Management, Location & Area Management (BRD §12–15)
+
+Tenant/org creation, Super Admin console (activate/suspend tenant, storage quota)
+Guided onboarding wizard (org → logo → location structure → departments → users → owners)
+Full RBAC UI: roles, permissions by role/org/site/department/area/transaction type/status
+Organisational hierarchy (configurable levels: Org → BU → Country → Region → Plant → Department → Area → Zone → Workstation — flexible enough for manufacturing, warehouse, hospital, and office structures, per the 17 Sep meeting)
+Area/Location Master (all fields per §14) with auto QR code generation
+Location Plan & Timeline: planned start/end dates, actual progress, status, notes and supporting documents per location (from meeting summary — this is a distinct sub-module from the audit itself)
+Location detail screen built as tabs: Overview/Plan, 5S Evidence, Audit, Items, CAPA, Documents, History — one centralized record per location
+Excel bulk import for masters
+Exit criteria: an admin can fully set up a tenant's structure and users, and open any location to see its plan, evidence, audit, and item history in one place, without any developer involvement.
+
+Phase 2 — Standards & Audit Template Engine
+Modules: 5S Standard Management, Audit Template Management (§16–23)
+
+Standard authoring: text, photos, video, SOP attachments; standard-vs-current photo pairing
+Standard version control (revision, effective date, approver, revision comments)
+Audit template builder: sections, 5S category, question, weightage, severity, mandatory evidence, guidance
+All question types (Yes/No, Pass/Fail, 0–5, 0–10, %, multiple choice, text, photo, checklist, N/A)
+Audit types (routine, self, layered, cross-functional, management, surprise, certification, campaign)
+Audit scheduling engine, including recurrence and auto-generation of scheduled audits
+Exit criteria: an admin can build a real audit template end-to-end and schedule it against real areas.
+
+Phase 3 — Mobile Audit Execution
+Modules: Mobile Audit Execution, Evidence Capture, Scoring Engine (§24–27, 42–44)
+
+Core mobile/PWA flow: scan QR → open area → view standard → answer questions → capture evidence → create observation → submit
+Offline mode: download assigned audits, complete offline, auto-sync on reconnect
+Evidence: photo, short video, voice notes, timestamp/user/location metadata
+Multiple Before/After photo sets per location, each tagged with uploader, timestamp, comment, and 5S category (meeting summary §6) — separate from in-audit evidence, since this documents implementation progress over time
+Photo annotation (arrows, circles, boxes, text)
+Scoring engine: weighted questions, critical-question score caps, N/A denominator adjustment
+Exit criteria: a real auditor can complete a full audit on a phone, offline, and have it sync and score correctly.
+
+Phase 4 — Observations, Actions & Red Tags
+Modules: Observation Management, Corrective Action Management, Red Tag Management, Abnormality Reporting (§28–39)
+
+Observation records with severity, risk, assignment, target date, root cause, closure evidence
+Action workflow: Open → Assigned → In Progress → Pending Verification → Verified → Closed, with reopen + history
+Action SLA engine (severity-based target dates) and configurable escalation (T-2 days, due date, +2/+5/+10 days)
+Closure evidence rules (comments + after-photo, with configurable exceptions)
+Red Tag module: tagging, disposition (keep/relocate/repair/reuse/return/sell/scrap/dispose), ageing, value tracking. Design decision needed before building this: the BRD treats Red Tags as their own entity; the 17 Sep meeting describes Red Tag areas as special locations that hold tagged items. Recommend modeling Red Tag areas as a location subtype — it satisfies both descriptions and lets Red Tag zones reuse the same location/QR/evidence machinery instead of a parallel data model
+Item & Location Inventory (from meeting summary §13–14): an Items tab per location showing what's expected to be stored there, plus Stock IN/OUT transactions (item, quantity, direction, date) with full movement history. This is new relative to the original BRD — treat it as its own lightweight sub-module rather than folding it into Red Tag or Observations
+Abnormality reporting (sub-30-second scan → photo → category → submit, outside full audits)
+Notification engine: in-app + email at minimum for this phase — expand event list to explicitly include evidence submission, verification pending, and action rejection (meeting summary §11), on top of the SLA/escalation events already listed
+Exit criteria: the full observation-to-closure loop works, real SLA breaches actually escalate, and a location's Items tab reflects accurate on-hand quantities after IN/OUT transactions.
+
+Phase 5 — Dashboards, Analytics & Reporting
+Modules: Dashboard & Analytics, Maturity Assessment (§50–54, 81–83, 160)
+
+Management dashboard: overall/plant/department scores, S1–S5 breakdown, trends, open/overdue/critical counts, best/worst areas
+Heat map (plant → department → area, performance-banded colours) and drilldown to observation level
+Trend views (3/6/12 month, custom)
+Benchmarking across plants/departments/lines/areas/shifts
+5S Maturity model (Level 1–5)
+Standard report set (§81) with Excel/CSV/PDF export, filterable
+Exit criteria: a plant head can answer "how are we doing and where's it getting worse" without asking anyone.
+
+Phase 6 — Basic AI, Security Hardening & MVP Launch Readiness
+Modules: AI Assistant (Category A only), Subscription & Billing (core), Platform Administration, all NFRs (§63–64, 84–88, 99–112, 152–156)
+
+AI Phase 1 set only: observation text suggestions, audit narrative/summary generation, voice-to-text, corrective action text suggestions — all shown as suggestions requiring human confirmation, tagged with AI flag + model version
+MFA (mandatory for admin roles), TLS in transit, encryption at rest, session management
+Core SaaS billing: trial management, plan entitlements (Starter/Professional/Enterprise), payment gateway integration (Stripe/Razorpay)
+Automated test coverage: auth, permissions, scoring, workflow, tenant isolation, action SLA, APIs
+Performance validation against 2–3s response targets and the availability/backup/DR targets in §109–112
+Exit criteria — this is your MVP. Matches BRD §155 acceptance criteria exactly: create org → users/roles → plant/dept/area → area QR → audit templates → schedule → mobile audit → photos → observations → actions → escalate → verify/close → Red Tags → dashboard → reports → audit trail.
+
+Phase 7 — Post-MVP Expansion (BRD Phase 2 scope, §157)
+Build after real customers are live and using the MVP, prioritized by what they actually ask for:
+
+Advanced visual standards, before/after Kaizen gallery
+Gamification & leaderboards (best area, most improved, zero overdue, best auditor)
+Learning & competency module (microlearning, quizzes, auditor certification gating)
+WhatsApp and Microsoft Teams notification channels
+Advanced dashboards, multilingual support
+Conversational analytics (natural-language questions over authorised data only)
+AI Phase 2 set: duplicate/similar observation detection, root cause assistant, intelligent escalation, basic image classification
+Phase 8 — Advanced AI & Enterprise Scale (BRD Phase 3 scope, §158)
+Computer vision: standard-vs-current image comparison
+Predictive deterioration and risk-based audit scheduling/sampling
+Enterprise benchmarking intelligence, advanced maturity models
+Enterprise hardening: SSO/SAML, white-labeling, dedicated DB/instance option
+Deliberately out of MVP scope (per BRD §159)
+Don't let these creep into Phases 0–6, however tempting:
+
+Complex custom ML models beyond the AI abstraction layer
+Fully automated (no-human-check) visual audits
+A full-blown LMS
+Microservices split (stay modular monolith until you have a real scaling reason)
+Elaborate gamification
+Custom BI platform (use your own dashboard + export first)
+Predictive analytics before you have historical data to predict from
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-09-18T09:58:31+05:30.
+
+The user's current state is as follows:
+Active Document: c:\Users\Admin\Desktop\SkilGobal\5s\backend\tsconfig.json (LANGUAGE_UNSPECIFIED)
+Cursor is on line: 1
+Other open documents:
+- c:\Users\Admin\Desktop\SkilGobal\5s\backend\tsconfig.json (LANGUAGE_UNSPECIFIED)
+- c:\Users\Admin\Desktop\SkilGobal\5s\backend\.env (LANGUAGE_UNSPECIFIED)
+
+The user has mentioned some items in the form @[ITEM]. Here is extra information about the items that were mentioned by the user, in the order that they appear:
+
+@[c:\Users\Admin\Desktop\SkilGobal\5s\5S_SaaS_Business_Requirements_Document.docx] is a [File]:
+c:\Users\Admin\Desktop\SkilGobal\5s\5S_SaaS_Business_Requirements_Document.docx
+</ADDITIONAL_METADATA>
+<USER_SETTINGS_CHANGE>
+The user changed setting `Model Selection` from None to Gemini 3.7 Flash (High). No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.
+</USER_SETTINGS_CHANGE>

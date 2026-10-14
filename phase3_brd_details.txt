@@ -1,0 +1,177 @@
+24. MOBILE AUDIT EXECUTION
+The mobile audit screen should minimise navigation.
+Typical auditor workflow:
+Scan QR
+→
+Open Area
+→
+View Standard
+→
+Answer Questions
+→
+Capture Evidence
+→
+Create Observation
+→
+Assign Severity
+→
+Submit Audit
+25. OFFLINE CAPABILITY
+Mobile applications should support offline audit execution.
+Offline mode shall support:
+•downloading assigned audits;
+•checklist completion;
+•photo capture;
+•observation recording;
+•action creation.
+Data shall synchronise automatically when connectivity returns.
+26. EVIDENCE CAPTURE
+Audit evidence may include:
+•photographs;
+•short video;
+•voice notes;
+•attachments;
+•text comments.
+Metadata should capture:
+•timestamp;
+•user;
+•location if permitted;
+•audit reference.
+27. PHOTO ANNOTATION
+Auditors shall be able to mark:
+•arrows;
+•circles;
+•boxes;
+•text annotations
+directly on photographs.
+28. OBSERVATION MANAGEMENT
+Every non-conformance may create an Observation.
+Observation fields:
+•Observation ID
+•Audit
+•Location
+•5S Category
+•Description
+•Evidence
+•Severity
+•Risk
+•Assigned To
+•Target Date
+•Status
+•Root Cause
+•Corrective Action
+•Verified By
+•Closure Evidence
+29. SEVERITY CLASSIFICATION
+Example:
+•Minor
+•Moderate
+•Major
+•Critical
+Tenants shall configure severity rules.
+30. CORRECTIVE ACTION MANAGEMENT
+Actions may arise from:
+•audit observations;
+•abnormalities;
+•red tags;
+•management reviews;
+•AI suggestions.
+Workflow:
+Open
+→
+Assigned
+→
+In Progress
+→
+Pending Verification
+→
+Verified
+→
+Closed
+31. ACTION SLA
+The system shall calculate target closure dates based on:
+•severity;
+•area;
+•customer configuration.
+Example:
+Critical – 24 hours
+Major – 3 days
+Moderate – 7 days
+Minor – 15 days
+32. ACTION ESCALATION
+Escalation rules may include: In app and Email
+T-2 days → reminder
+Due date → owner alert -
++2 days → department head
++5 days → plant head
++10 days → 5S coordinator
+Rules shall be configurable.
+33. CLOSURE EVIDENCE
+Actions should not normally be closed without:
+•closure comments;
+•after photograph.
+Customers may configure exceptions.
+34. ACTION VERIFICATION
+The person performing the action should not necessarily verify the action.
+The system shall support independent verification.
+35. REOPENING ACTIONS
+Verifier may reopen actions where corrective actions are inadequate.
+History shall be maintained.
+36. RED TAG MANAGEMENT
+The system shall provide dedicated Red Tag functionality.
+Red Tag fields: Option to generate or print red tag from system should be allowed
+•Tag Number – with option for unique QR code tracking
+•Item
+•Description
+•Quantity
+•Area
+•Photograph
+•Reason
+•Tagged By
+•Tag Date
+•Owner
+•Decision
+•Target Disposition Date
+•Disposition
+•Closure Date
+•Purchase value (if applicable)
+131. WHITE LABELLING
+Enterprise customers may optionally configure:
+•logo;
+•application colour;
+•email branding;
+•custom domain.
+132. SEARCH
+Global search shall support searching by:
+•audit number;
+•observation;
+•area;
+•action;
+•Red Tag;
+•employee.
+133. ATTACHMENT SECURITY
+Attachment access shall require authorised application sessions.
+Sensitive files should not be exposed through unrestricted public URLs.
+134. SYSTEM MONITORING
+Platform operations shall monitor:
+•CPU;
+•memory;
+•database health;
+•queue health;
+•API errors;
+•background jobs;
+•storage;
+•failed notifications.
+135. APPLICATION LOGGING
+Logs shall include:
+•application errors;
+•integration failures;
+•background job errors;
+•AI failures.
+Customer data should be minimised in system logs.
+136. OBSERVABILITY
+Use:
+•metrics;
+•logs;
+•tracing
+for production support.

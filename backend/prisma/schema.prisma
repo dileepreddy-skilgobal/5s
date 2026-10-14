@@ -1,0 +1,707 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Tenant {
+  id              String   @id @default(uuid())
+  name            String
+  slug            String   @unique
+  status          String   @default("ACTIVE") // ACTIVE, TRIAL, SUSPENDED, CANCELLED
+  logoUrl         String?
+  industry        String   @default("Manufacturing")
+  storageQuotaMb  Int      @default(5120)
+  storageUsedMb   Int      @default(0)
+  hierarchyConfig String   @default("[\"Org\",\"Plant\",\"Department\",\"Area\",\"Zone\",\"Workstation\"]") // JSON array
+  settings        String   @default("{\"brandColor\":\"#2563EB\",\"defaultAuditFrequency\":\"WEEKLY\"}") // JSON
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  users           User[]
+  roles           Role[]
+  permissions     Permission[]
+  orgNodes        OrgNode[]
+  locations       Location[]
+  timelines       LocationTimeline[]
+  documents       LocationDocument[]
+  auditLogs       LocationAuditLog[]
+  standards       Standard[]
+  auditTemplates  AuditTemplate[]
+  auditSchedules  AuditSchedule[]
+  auditInstances  ScheduledAuditInstance[]
+  auditExecutions AuditExecution[]
+  observations    Observation[]
+  correctiveActions CorrectiveAction[]
+  redTags         RedTag[]
+
+  @@index([status])
+}
+
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String
+  email        String
+  passwordHash String
+  firstName    String
+  lastName     String
+  avatarUrl    String?
+  phone        String?
+  jobTitle     String?
+  department   String?
+  status       String   @default("ACTIVE") // ACTIVE, INACTIVE, INVITED
+  isSuperAdmin Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignments    UserRoleAssignment[]
+  ownedLocations Location[] @relation("LocationOwner")
+  backupLocations Location[] @relation("LocationBackupOwner")
+  auditLogs      LocationAuditLog[]
+  approvedRevisions StandardRevision[] @relation("StandardApprover")
+  authoredRevisions StandardRevision[] @relation("StandardAuthor")
+  publishedTemplateVersions AuditTemplateVersion[] @relation("TemplatePublisher")
+  preferredSchedules AuditSchedule[] @relation("PreferredAuditor")
+  assignedAuditInstances ScheduledAuditInstance[] @relation("AssignedAuditor")
+  conductedAudits AuditExecution[] @relation("AuditAuditor")
+  loggedObservations Observation[] @relation("ObservationLogger")
+  assignedActions CorrectiveAction[] @relation("ActionAssignee")
+  createdActions CorrectiveAction[] @relation("ActionCreator")
+  verifiedActions CorrectiveAction[] @relation("ActionVerifier")
+  taggedRedTags RedTag[] @relation("RedTagCreator")
+  disposedRedTags RedTag[] @relation("RedTagDisposer")
+  approvedRedTags RedTag[] @relation("RedTagSupervisor")
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+model Role {
+  id              String   @id @default(uuid())
+  tenantId        String
+  name            String
+  code            String   // SUPER_ADMIN, ORG_ADMIN, PLANT_HEAD, COORDINATOR_5S, DEPT_HEAD, AREA_OWNER, AUDITOR, EMPLOYEE, EXTERNAL_AUDITOR
+  description     String?
+  isSystemDefault Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permissions     Permission[]
+  assignments     UserRoleAssignment[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model Permission {
+  id        String   @id @default(uuid())
+  tenantId  String
+  roleId    String
+  module    String   // TENANTS, USERS, LOCATIONS, STANDARDS, AUDITS, OBSERVATIONS, ACTIONS, RED_TAGS, REPORTS, ANALYTICS, SETTINGS
+  actions   String   // JSON string: ["CREATE","READ","UPDATE","DELETE","APPROVE","CLOSE","EXPORT","CONFIGURE"]
+  scope     String   @default("TENANT") // TENANT, PLANT, DEPARTMENT, AREA
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, roleId])
+}
+
+model UserRoleAssignment {
+  id        String   @id @default(uuid())
+  tenantId  String
+  userId    String
+  roleId    String
+  orgNodeId String?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, userId])
+}
+
+model OrgNode {
+  id        String    @id @default(uuid())
+  tenantId  String
+  parentId  String?
+  name      String
+  code      String
+  nodeType  String    // ENTERPRISE, BUSINESS_UNIT, COUNTRY, REGION, PLANT, DEPARTMENT, AREA, ZONE, WORKSTATION
+  path      String    // Materialized Path: /rootId/parentId/nodeId/
+  depth     Int       @default(0)
+  sortOrder Int       @default(0)
+  status    String    @default("ACTIVE") // ACTIVE, INACTIVE
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  parent    OrgNode?  @relation("OrgNodeHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  children  OrgNode[] @relation("OrgNodeHierarchy")
+  locations Location[]
+  standards Standard[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, path])
+  @@index([tenantId, parentId])
+}
+
+model Location {
+  id             String   @id @default(uuid())
+  tenantId       String
+  orgNodeId      String
+  areaCode       String   // e.g. LOC-BLR-P1-ASM01
+  name           String
+  locationType   String   // PRODUCTION_LINE, WAREHOUSE_BAY, OFFICE_FLOOR, LABORATORY, RED_TAG_ZONE, WORKSHOP, UTILITY
+  riskLevel      String   @default("LOW") // LOW, MEDIUM, HIGH, CRITICAL
+  auditFrequency String   @default("WEEKLY") // DAILY, WEEKLY, FORTNIGHTLY, MONTHLY, QUARTERLY
+  building       String?
+  floor          String?
+  description    String?
+  heroPhotoUrl   String?
+  qrCodeData     String?  // Deep link or payload
+  status         String   @default("ACTIVE") // ACTIVE, INACTIVE, UNDER_MAINTENANCE
+  ownerId        String?
+  backupOwnerId  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  orgNode        OrgNode  @relation(fields: [orgNodeId], references: [id], onDelete: Cascade)
+  owner          User?    @relation("LocationOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  backupOwner    User?    @relation("LocationBackupOwner", fields: [backupOwnerId], references: [id], onDelete: SetNull)
+
+  timelines      LocationTimeline[]
+  documents      LocationDocument[]
+  auditLogs      LocationAuditLog[]
+  standards      Standard[]
+  auditInstances ScheduledAuditInstance[]
+  auditExecutions AuditExecution[]
+  observations   Observation[]
+  correctiveActions CorrectiveAction[]
+  taggedRedTags  RedTag[] @relation("RedTagSourceLocation")
+  holdingRedTags RedTag[] @relation("RedTagHoldingArea")
+
+  @@unique([tenantId, areaCode])
+  @@index([tenantId, orgNodeId])
+  @@index([tenantId, status])
+}
+
+model LocationTimeline {
+  id               String    @id @default(uuid())
+  tenantId         String
+  locationId       String
+  milestoneName    String
+  plannedStartDate DateTime
+  plannedEndDate   DateTime
+  actualStartDate  DateTime?
+  actualEndDate    DateTime?
+  progressPercent  Int       @default(0) // 0 - 100
+  status           String    @default("NOT_STARTED") // NOT_STARTED, IN_PROGRESS, COMPLETED, DELAYED
+  notes            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  tenant           Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location         Location  @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, locationId])
+}
+
+model LocationDocument {
+  id           String   @id @default(uuid())
+  tenantId     String
+  locationId   String
+  title        String
+  docType      String   @default("SOP") // SOP, CLEANING_STANDARD, LAYOUT_MAP, SAFETY_GUIDELINE, OTHER
+  fileUrl      String
+  fileSizeKb   Int      @default(0)
+  version      String   @default("1.0")
+  uploadedById String?
+  createdAt    DateTime @default(now())
+
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location     Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, locationId])
+}
+
+model LocationAuditLog {
+  id         String   @id @default(uuid())
+  tenantId   String
+  locationId String
+  userId     String?
+  actionType String   // CREATED, UPDATED, TIMELINE_UPDATED, STATUS_CHANGED, QR_REGENERATED, EXCEL_IMPORTED
+  details    String   // JSON string describing the change
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location   Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, locationId])
+}
+
+// ==========================================
+// PHASE 2: 5S STANDARDS & REVISION ENGINE
+// ==========================================
+
+model Standard {
+  id                String   @id @default(uuid())
+  tenantId          String
+  code              String   // e.g. STD-5S-MACH-01
+  title             String   // e.g. CNC Machine Tooling & Shadow Board Standard
+  category          String   // S1_SORT, S2_SET_IN_ORDER, S3_SHINE, S4_STANDARDIZE, S5_SUSTAIN, S6_SAFETY
+  scopeType         String   @default("GLOBAL") // GLOBAL, PLANT, DEPARTMENT, LOCATION_TYPE, SPECIFIC_LOCATION
+  targetOrgNodeId   String?
+  targetLocationId  String?
+  status            String   @default("PUBLISHED") // DRAFT, PUBLISHED, ARCHIVED
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  targetOrgNode     OrgNode? @relation(fields: [targetOrgNodeId], references: [id], onDelete: SetNull)
+  targetLocation    Location? @relation(fields: [targetLocationId], references: [id], onDelete: SetNull)
+  revisions         StandardRevision[]
+  questions         AuditTemplateQuestion[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, category])
+  @@index([tenantId, status])
+}
+
+model StandardRevision {
+  id               String    @id @default(uuid())
+  tenantId         String
+  standardId       String
+  revisionNumber   String    // e.g. 1.0, 1.1, 2.0
+  description      String
+  rules            String    // JSON array of rule statements: ["Tool shadow board must match...", "Max quantity: 2"]
+  referencePhotos  String    // JSON array: [{ "type": "STANDARD_CONDITION", "photoUrl": "...", "label": "Angle 1", "description": "..." }, { "type": "CURRENT_CONDITION", "photoUrl": "..." }]
+  videoUrl         String?
+  sopDocumentUrl   String?
+  effectiveDate    DateTime  @default(now())
+  revisionComments String?
+  authorId         String?
+  approvedById     String?
+  approvedAt       DateTime?
+  isCurrent        Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+
+  standard         Standard  @relation(fields: [standardId], references: [id], onDelete: Cascade)
+  author           User?     @relation("StandardAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  approver         User?     @relation("StandardApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, standardId])
+  @@index([standardId, isCurrent])
+}
+
+// ==========================================
+// PHASE 2: AUDIT TEMPLATES & QUESTIONS
+// ==========================================
+
+model AuditTemplate {
+  id                   String   @id @default(uuid())
+  tenantId             String
+  code                 String   // e.g. TPL-5S-DISCRETE-01
+  name                 String   // e.g. Discrete Manufacturing Comprehensive 5S Audit
+  description          String?
+  auditType            String   @default("ROUTINE") // ROUTINE, SELF, LAYERED, CROSS_FUNCTIONAL, MANAGEMENT, SURPRISE, CERTIFICATION, CAMPAIGN
+  categoryScoringModel String   @default("{\"S1\":20,\"S2\":20,\"S3\":20,\"S4\":20,\"S5\":20}") // JSON category weightings
+  status               String   @default("ACTIVE") // DRAFT, ACTIVE, DEPRECATED
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  tenant               Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  versions             AuditTemplateVersion[]
+  schedules            AuditSchedule[]
+  auditExecutions      AuditExecution[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, auditType])
+  @@index([tenantId, status])
+}
+
+model AuditTemplateVersion {
+  id             String   @id @default(uuid())
+  tenantId       String
+  templateId     String
+  versionNumber  String   // e.g. 1.0, 2.0
+  changeSummary  String?
+  isPublished    Boolean  @default(true)
+  publishedAt    DateTime @default(now())
+  publishedById  String?
+  createdAt      DateTime @default(now())
+
+  template       AuditTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  publisher      User?         @relation("TemplatePublisher", fields: [publishedById], references: [id], onDelete: SetNull)
+  sections       AuditTemplateSection[]
+  schedules      AuditSchedule[]
+  auditInstances ScheduledAuditInstance[]
+  auditExecutions AuditExecution[]
+
+  @@index([tenantId, templateId])
+}
+
+model AuditTemplateSection {
+  id                String   @id @default(uuid())
+  tenantId          String
+  templateVersionId String
+  title             String   // e.g. 1S - Sort Physical Area Sweeps
+  description       String?
+  category          String   // S1_SORT, S2_SET_IN_ORDER, S3_SHINE, S4_STANDARDIZE, S5_SUSTAIN, S6_SAFETY
+  sortOrder         Int      @default(0)
+  createdAt         DateTime @default(now())
+
+  templateVersion   AuditTemplateVersion @relation(fields: [templateVersionId], references: [id], onDelete: Cascade)
+  questions         AuditTemplateQuestion[]
+
+  @@index([tenantId, templateVersionId])
+}
+
+model AuditTemplateQuestion {
+  id                         String   @id @default(uuid())
+  tenantId                   String
+  sectionId                  String
+  questionCode               String   // e.g. Q-SORT-01
+  questionText               String   // e.g. Are all unnecessary tools, fixtures, and unlabelled materials removed from workstation?
+  description                String?
+  guidance                   String?  // Rich instruction guidance for the mobile auditor
+  standardId                 String?  // Optional link to 5S Standard definition
+  questionType               String   @default("PASS_FAIL") // YES_NO, PASS_FAIL, NUMERIC_0_5, NUMERIC_0_10, PERCENTAGE, MULTIPLE_CHOICE, TEXT, PHOTO, CHECKLIST, NOT_APPLICABLE
+  options                    String?  // JSON array for multiple choice: [{"label":"Conforming (100%)","score":100},{"label":"Minor (50%)","score":50},{"label":"Non-conforming (0%)","score":0}]
+  weightage                  Float    @default(1.0)
+  severity                   String   @default("MODERATE") // MINOR, MODERATE, MAJOR, CRITICAL
+  isCritical                 Boolean  @default(false)
+  scoreCapOnFail             Int?     // Score cap if this critical question fails (e.g. 70%)
+  requireEvidenceOnScoreBelow Int?    // If score < 3, photo is mandatory
+  mandatoryEvidence          Boolean  @default(false)
+  referencePhotoUrl          String?
+  sortOrder                  Int      @default(0)
+  createdAt                  DateTime @default(now())
+
+  section                    AuditTemplateSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  standard                   Standard?            @relation(fields: [standardId], references: [id], onDelete: SetNull)
+  auditAnswers               AuditAnswer[]
+
+  @@index([tenantId, sectionId])
+}
+
+// ==========================================
+// PHASE 2: AUDIT SCHEDULING & RECURRENCE
+// ==========================================
+
+model AuditSchedule {
+  id                     String    @id @default(uuid())
+  tenantId               String
+  scheduleCode           String    // e.g. SCHED-BLR-WEEKLY-01
+  title                  String    // e.g. Weekly Operational 5S Routine - Plant 1
+  templateId             String
+  templateVersionId      String
+  auditType              String    @default("ROUTINE")
+  targetType             String    @default("ALL_AREAS") // ALL_AREAS, PLANT, DEPARTMENT, SPECIFIC_LOCATIONS
+  targetOrgNodeId        String?
+  targetLocationIds      String    @default("[]") // JSON array of location UUIDs
+  recurrence             String    @default("WEEKLY") // ONCE, DAILY, WEEKLY, FORTNIGHTLY, MONTHLY, QUARTERLY, ANNUALLY, CUSTOM_DAYS
+  recurrenceIntervalDays Int       @default(7)
+  preferredAuditorId     String?
+  rotationRule           String    @default("DEPT_INDEPENDENCE") // ASSIGNED_AUDITOR, DEPT_INDEPENDENCE, ROUND_ROBIN, RANDOM
+  startDate              DateTime  @default(now())
+  endDate                DateTime?
+  leadTimeDays           Int       @default(2) // Generate scheduled audit 2 days before planned date
+  status                 String    @default("ACTIVE") // ACTIVE, PAUSED, COMPLETED
+  lastRunAt              DateTime?
+  nextRunAt              DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  tenant                 Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  template               AuditTemplate          @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  templateVersion        AuditTemplateVersion   @relation(fields: [templateVersionId], references: [id], onDelete: Cascade)
+  preferredAuditor       User?                  @relation("PreferredAuditor", fields: [preferredAuditorId], references: [id], onDelete: SetNull)
+  generatedInstances     ScheduledAuditInstance[]
+
+  @@unique([tenantId, scheduleCode])
+  @@index([tenantId, status])
+  @@index([nextRunAt])
+}
+
+model ScheduledAuditInstance {
+  id                String    @id @default(uuid())
+  tenantId          String
+  scheduleId        String?
+  auditCode         String    // e.g. AUD-BLR-2026-0001 (§145 human-readable format)
+  templateVersionId String
+  locationId        String
+  auditorId         String?
+  auditType         String    @default("ROUTINE")
+  plannedDate       DateTime
+  dueDate           DateTime
+  status            String    @default("SCHEDULED") // SCHEDULED, IN_PROGRESS, SUBMITTED, OVERDUE, CANCELLED
+  score             Float?
+  notes             String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  tenant            Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  schedule          AuditSchedule?       @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  templateVersion   AuditTemplateVersion @relation(fields: [templateVersionId], references: [id], onDelete: Cascade)
+  location          Location             @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  auditor           User?                @relation("AssignedAuditor", fields: [auditorId], references: [id], onDelete: SetNull)
+  executions        AuditExecution[]
+
+  @@unique([tenantId, auditCode])
+  @@index([tenantId, locationId])
+  @@index([tenantId, status])
+  @@index([plannedDate])
+}
+
+// ==========================================
+// OPERATIONAL AUDIT EXECUTION
+// ==========================================
+
+model AuditExecution {
+  id                   String    @id @default(uuid())
+  tenantId             String
+  auditInstanceId      String?   // Optional link to ScheduledAuditInstance
+  locationId           String
+  templateId           String
+  templateVersionId    String
+  auditorId            String?
+  auditCode            String    // e.g. EXEC-BLR-2026-0001
+  auditType            String    @default("ROUTINE") // ROUTINE, SELF, LAYERED, MANAGEMENT, SURPRISE, AD_HOC
+  status               String    @default("IN_PROGRESS") // IN_PROGRESS, SUBMITTED, VERIFIED, REJECTED
+  startedAt            DateTime  @default(now())
+  completedAt          DateTime?
+  overallScore         Float     @default(0.0) // 0 - 100 percentage
+  maxPossibleScore     Float     @default(100.0)
+  earnedScore          Float     @default(0.0)
+  pillarScores         String    @default("{}") // JSON: {"S1_SORT": 85.0, "S2_SET_IN_ORDER": 90.0, ...}
+  isPassed             Boolean   @default(true)
+  criticalFailureCount Int       @default(0)
+  summaryNotes         String?
+  auditorSignature     String?   // Signature Data URL or hash
+  auditorName          String?
+  offlineSyncId        String?
+
+  // Area Owner Acknowledgement & Formal Sign-off
+  acknowledgedAt           DateTime?
+  acknowledgedById         String?
+  acknowledgedByName       String?
+  acknowledgementSignature String?
+  acknowledgementNotes     String?
+  targetResolutionDate     DateTime?
+
+  // Dispute & Contestation Workflow
+  disputeStatus            String?   // NONE, DISPUTED, RESOLVED_ACCEPTED, RESOLVED_REJECTED
+  disputedAt               DateTime?
+  disputedById             String?
+  disputedByName           String?
+  disputeReason            String?   // SCHEDULED_CHANGEOVER, OUT_OF_SCOPE, INACCURATE_EVIDENCE, FORCE_MAJEURE, OTHER
+  disputeNotes             String?
+  disputedQuestionIds      String?   // JSON array of question codes / IDs
+  counterEvidenceUrls      String?   // JSON array of photo/doc URLs
+  disputeResolutionNotes   String?
+  disputeResolvedAt        DateTime?
+  disputeResolvedById      String?
+  disputeResolvedByName    String?
+
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  tenant               Tenant                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  auditInstance        ScheduledAuditInstance? @relation(fields: [auditInstanceId], references: [id], onDelete: SetNull)
+  location             Location                @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  template             AuditTemplate           @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  templateVersion      AuditTemplateVersion    @relation(fields: [templateVersionId], references: [id], onDelete: Cascade)
+  auditor              User?                   @relation("AuditAuditor", fields: [auditorId], references: [id], onDelete: SetNull)
+
+  answers              AuditAnswer[]
+  observations         Observation[]
+
+  @@unique([tenantId, auditCode])
+  @@index([tenantId, locationId])
+  @@index([tenantId, status])
+  @@index([startedAt])
+}
+
+model AuditAnswer {
+  id                String   @id @default(uuid())
+  tenantId          String
+  executionId       String
+  questionId        String
+  sectionId         String
+  score             Float    @default(0.0)
+  maxScore          Float    @default(5.0)
+  status            String   @default("CONFORMING") // CONFORMING, MINOR_NC, MAJOR_NC, CRITICAL_FAIL, NOT_APPLICABLE
+  notes             String?
+  evidenceUrls      String   @default("[]") // JSON array of photo URLs or annotated photo objects
+  voiceNoteUrl      String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  execution         AuditExecution        @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  question          AuditTemplateQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  observations      Observation[]
+
+  @@unique([executionId, questionId])
+  @@index([tenantId, executionId])
+}
+
+// ==========================================
+// OBSERVATION & ABNORMALITY MANAGEMENT
+// ==========================================
+
+model Observation {
+  id                String   @id @default(uuid())
+  tenantId          String
+  observationCode   String   // e.g. OBS-BLR-2026-0001
+  executionId       String?
+  answerId          String?
+  locationId        String
+  category          String   // S1_SORT, S2_SET_IN_ORDER, S3_SHINE, S4_STANDARDIZE, S5_SUSTAIN, S6_SAFETY
+  severity          String   @default("MODERATE") // MINOR, MODERATE, MAJOR, CRITICAL, KAIZEN_OPPORTUNITY
+  title             String
+  description       String
+  beforePhotoUrl    String?
+  annotatedPhotoUrl String?
+  annotationData    String?  // JSON canvas drawing data (arrows, boxes, circles)
+  status            String   @default("OPEN") // OPEN, ACTION_ASSIGNED, IN_PROGRESS, PENDING_VERIFICATION, RESOLVED, CLOSED
+  riskAssessment    String?
+  tags              String   @default("[]") // JSON array
+  loggedById        String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  tenant            Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  execution         AuditExecution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
+  answer            AuditAnswer?    @relation(fields: [answerId], references: [id], onDelete: SetNull)
+  location          Location        @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  loggedBy          User?           @relation("ObservationLogger", fields: [loggedById], references: [id], onDelete: SetNull)
+
+  correctiveAction  CorrectiveAction?
+
+  @@unique([tenantId, observationCode])
+  @@index([tenantId, locationId])
+  @@index([tenantId, severity])
+  @@index([tenantId, status])
+}
+
+// ==========================================
+// CORRECTIVE & PREVENTIVE ACTION (CAPA)
+// ==========================================
+
+model CorrectiveAction {
+  id                  String    @id @default(uuid())
+  tenantId            String
+  actionCode          String    // e.g. CAPA-BLR-2026-0001
+  observationId       String    @unique
+  locationId          String
+  title               String
+  description         String
+  actionType          String    @default("CORRECTIVE") // CORRECTIVE, PREVENTIVE, KAIZEN
+  rootCauseCategory   String    @default("METHOD") // MANPOWER, METHOD, MACHINE, MATERIAL, MEASUREMENT, ENVIRONMENT
+  fiveWhyAnalysis     String    @default("{\"why1\":\"\",\"why2\":\"\",\"why3\":\"\",\"why4\":\"\",\"why5\":\"\"}") // JSON
+  assigneeId          String?
+  assignedById        String?
+  targetDate          DateTime
+  slaHours            Int       @default(72)
+  isOverdue           Boolean   @default(false)
+  escalationTier      String    @default("NORMAL") // NORMAL, DUE_SOON, ESCALATED_L1, ESCALATED_L2
+  status              String    @default("ASSIGNED") // ASSIGNED, IN_PROGRESS, SUBMITTED, PENDING_VERIFICATION, VERIFIED, CLOSED, REOPENED
+  closureNotes        String?
+  afterPhotoUrl       String?
+  closureSubmittedAt  DateTime?
+  verifiedById        String?
+  verifiedAt          DateTime?
+  verificationNotes   String?
+  reopenCount         Int       @default(0)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  tenant              Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  observation         Observation         @relation(fields: [observationId], references: [id], onDelete: Cascade)
+  location            Location            @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  assignee            User?               @relation("ActionAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  assignedBy          User?               @relation("ActionCreator", fields: [assignedById], references: [id], onDelete: SetNull)
+  verifiedBy          User?               @relation("ActionVerifier", fields: [verifiedById], references: [id], onDelete: SetNull)
+
+  history             ActionHistoryLog[]
+
+  @@unique([tenantId, actionCode])
+  @@index([tenantId, locationId])
+  @@index([tenantId, status])
+  @@index([tenantId, assigneeId])
+  @@index([targetDate])
+}
+
+model ActionHistoryLog {
+  id          String   @id @default(uuid())
+  tenantId    String
+  actionId    String
+  actorId     String?
+  actorName   String?
+  fromStatus  String
+  toStatus    String
+  comment     String?
+  metadata    String?  // JSON
+  createdAt   DateTime @default(now())
+
+  action      CorrectiveAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, actionId])
+}
+
+// ==========================================
+// RED TAG MANAGEMENT HUB
+// ==========================================
+
+model RedTag {
+  id                     String    @id @default(uuid())
+  tenantId               String
+  tagNumber              String    // e.g. RT-BLR-2026-0001
+  qrCodeUrl              String?
+  locationId             String    // Workstation where item was found
+  targetHoldingAreaId    String?   // Holding area location
+  itemName               String
+  itemDescription        String?
+  category               String    @default("UNNEEDED_TOOL") // UNNEEDED_TOOL, SURPLUS_INVENTORY, BROKEN_EQUIPMENT, SCRAP_WASTE, UNLABELLED_MATERIAL, EXPIRED_ITEM, OTHER
+  quantity               Int       @default(1)
+  unitOfMeasure          String    @default("PCS") // PCS, KG, BOXES, PALLETS, SETS
+  estimatedValue         Float?    // Financial estimate
+  taggedById             String?
+  taggedDate             DateTime  @default(now())
+  reason                 String
+  photoUrl               String?
+  status                 String    @default("RED_TAGGED") // RED_TAGGED, IN_HOLDING_AREA, PENDING_DISPOSITION, DISPOSITION_APPROVED, DISPOSED, RETURNED, CANCELLED
+  dispositionAction      String?   // DISPOSE_SCRAP, RELOCATE, RETURN_TO_VENDOR, AUCTION_SELL, REPAIR_RESTORE, KEEP_JUSTIFIED
+  dispositionJustification String?
+  targetDispositionDate  DateTime?
+  actualDispositionDate  DateTime?
+  disposedById           String?
+  supervisorApprovedById String?
+  financialRecovered     Float?
+  closurePhotoUrl        String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  tenant                 Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  location               Location  @relation("RedTagSourceLocation", fields: [locationId], references: [id], onDelete: Cascade)
+  holdingArea            Location? @relation("RedTagHoldingArea", fields: [targetHoldingAreaId], references: [id], onDelete: SetNull)
+  taggedBy               User?     @relation("RedTagCreator", fields: [taggedById], references: [id], onDelete: SetNull)
+  disposedBy             User?     @relation("RedTagDisposer", fields: [disposedById], references: [id], onDelete: SetNull)
+  supervisorApprovedBy   User?     @relation("RedTagSupervisor", fields: [supervisorApprovedById], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, tagNumber])
+  @@index([tenantId, locationId])
+  @@index([tenantId, status])
+  @@index([taggedDate])
+}
