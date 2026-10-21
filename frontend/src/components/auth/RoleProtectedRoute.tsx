@@ -15,7 +15,8 @@ export const RoleProtectedRoute: React.FC<RoleProtectedRouteProps> = ({
 }) => {
   const { activeUserRole, currentUser } = useApp();
 
-  const isSuper = currentUser?.isSuperAdmin === true || currentUser?.email === 'superadmin@skilglobal.com' || activeUserRole === 'SUPER_ADMIN';
+  // Platform super admin status comes only from the server-verified profile
+  const isSuper = currentUser?.isSuperAdmin === true;
   
   // Super Admin has master clearance on tenant resources, except tenant-restricted actions where specified
   if (isSuper && allowedRoles.includes('SUPER_ADMIN')) {

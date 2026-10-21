@@ -1,141 +1,162 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Headers } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query } from '@nestjs/common';
+import { Roles } from '../../core/guards/roles.decorator';
+import { RoleGroups } from '../../core/guards/role-groups';
+import { TenantId, CurrentUserId } from '../../core/auth/current-user.decorator';
+import { ApiBearerAuth, ApiTags, ApiOperation } from '@nestjs/swagger';
 import { LocationsService } from './locations.service';
 import { CreateLocationDto, UpdateLocationDto, CreateTimelineDto, UpdateTimelineDto, AddDocumentDto } from './dto/location.dto';
 
 @ApiTags('Location & Area Master')
+@ApiBearerAuth()
 @Controller('api/v1/locations')
 export class LocationsController {
   constructor(private readonly locationsService: LocationsService) {}
 
-  private extractTenantId(tenantHeader?: string): string {
-    return tenantHeader || 'default-tenant-skilglobal';
-  }
-
   @Get()
   @ApiOperation({ summary: 'List all locations with filtering and search' })
   getLocations(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Query('search') search?: string,
     @Query('orgNodeId') orgNodeId?: string,
     @Query('locationType') locationType?: string,
     @Query('riskLevel') riskLevel?: string,
     @Query('auditFrequency') auditFrequency?: string,
     @Query('status') status?: string,
+    @Query('ownerId') ownerId?: string,
+    @Query('mine') mine?: string,
+    @CurrentUserId() userId?: string,
   ) {
-    return this.locationsService.getLocations(this.extractTenantId(tenantId), {
+    return this.locationsService.getLocations(tenantId, {
       search,
       orgNodeId,
       locationType,
       riskLevel,
       auditFrequency,
       status,
+      ownerId,
+      // "My areas": areas the caller owns or backs up, plus those under the units their roles are limited to
+      mineOf: mine === '1' || mine === 'true' ? userId : undefined,
     });
   }
 
   @Get('qr-batch')
-  @ApiOperation({ summary: 'Get printable QR code data for multiple locations' })
-  getBatchQrCodes(@Headers('x-tenant-id') tenantId: string, @Query('ids') ids?: string) {
-    const locationIds = ids ? ids.split(',') : undefined;
-    return this.locationsService.getBatchQrCodes(this.extractTenantId(tenantId), locationIds);
+  @ApiOperation({ summary: 'Get printable QR code data for multiple locations (mine=1: only the caller\'s areas)' })
+  getBatchQrCodes(
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
+    @Query('ids') ids?: string,
+    @Query('mine') mine?: string,
+  ) {
+    const locationIds = ids ? ids.split(',').map((id) => id.trim()).filter(Boolean) : undefined;
+    return this.locationsService.getBatchQrCodes(tenantId, locationIds, mine === '1' || mine === 'true' ? userId : undefined);
   }
 
   @Get('next-code')
   @ApiOperation({ summary: 'Generate next available sequential Location Area Code' })
   getNextCode(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Query('orgNodeId') orgNodeId?: string,
   ) {
-    return this.locationsService.generateNextLocationCode(this.extractTenantId(tenantId), orgNodeId);
+    return this.locationsService.generateNextLocationCode(tenantId, orgNodeId);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get centralized 7-tab Location Record by ID' })
-  getLocationById(@Headers('x-tenant-id') tenantId: string, @Param('id') id: string) {
-    return this.locationsService.getLocationById(this.extractTenantId(tenantId), id);
+  getLocationById(@TenantId() tenantId: string, @Param('id') id: string) {
+    return this.locationsService.getLocationById(tenantId, id);
   }
 
   @Post()
+  @Roles(...RoleGroups.LOCATION_EDITORS)
   @ApiOperation({ summary: 'Create new Area Master record' })
   createLocation(
-    @Headers('x-tenant-id') tenantId: string,
-    @Headers('x-user-id') userId: string,
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
     @Body() dto: CreateLocationDto,
   ) {
-    return this.locationsService.createLocation(this.extractTenantId(tenantId), dto, userId);
+    return this.locationsService.createLocation(tenantId, dto, userId);
   }
 
   @Patch(':id')
+  @Roles(...RoleGroups.LOCATION_EDITORS)
   @ApiOperation({ summary: 'Update Area Master record' })
   updateLocation(
-    @Headers('x-tenant-id') tenantId: string,
-    @Headers('x-user-id') userId: string,
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
     @Param('id') id: string,
     @Body() dto: UpdateLocationDto,
   ) {
-    return this.locationsService.updateLocation(this.extractTenantId(tenantId), id, dto, userId);
+    return this.locationsService.updateLocation(tenantId, id, dto, userId);
   }
 
   @Delete(':id')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Delete Location' })
-  deleteLocation(@Headers('x-tenant-id') tenantId: string, @Param('id') id: string) {
-    return this.locationsService.deleteLocation(this.extractTenantId(tenantId), id);
+  deleteLocation(@TenantId() tenantId: string, @CurrentUserId() actorId: string, @Param('id') id: string) {
+    return this.locationsService.deleteLocation(tenantId, id, actorId);
   }
 
   // --- Timelines ---
 
   @Post(':id/timelines')
+  @Roles(...RoleGroups.AREA_MAINTAINERS)
   @ApiOperation({ summary: 'Add a 5S rollout timeline milestone' })
   createTimeline(
-    @Headers('x-tenant-id') tenantId: string,
-    @Headers('x-user-id') userId: string,
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
     @Param('id') locationId: string,
     @Body() dto: CreateTimelineDto,
   ) {
-    return this.locationsService.createTimeline(this.extractTenantId(tenantId), locationId, dto, userId);
+    return this.locationsService.createTimeline(tenantId, locationId, dto, userId);
   }
 
   @Patch(':id/timelines/:timelineId')
+  @Roles(...RoleGroups.AREA_MAINTAINERS)
   @ApiOperation({ summary: 'Update 5S rollout timeline milestone' })
   updateTimeline(
-    @Headers('x-tenant-id') tenantId: string,
-    @Headers('x-user-id') userId: string,
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
     @Param('id') locationId: string,
     @Param('timelineId') timelineId: string,
     @Body() dto: UpdateTimelineDto,
   ) {
-    return this.locationsService.updateTimeline(this.extractTenantId(tenantId), locationId, timelineId, dto, userId);
+    return this.locationsService.updateTimeline(tenantId, locationId, timelineId, dto, userId);
   }
 
   @Delete(':id/timelines/:timelineId')
+  @Roles(...RoleGroups.AREA_MAINTAINERS)
   @ApiOperation({ summary: 'Delete timeline milestone' })
   deleteTimeline(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Param('id') locationId: string,
     @Param('timelineId') timelineId: string,
   ) {
-    return this.locationsService.deleteTimeline(this.extractTenantId(tenantId), locationId, timelineId);
+    return this.locationsService.deleteTimeline(tenantId, locationId, timelineId);
   }
 
   // --- Documents ---
 
   @Post(':id/documents')
+  @Roles(...RoleGroups.AREA_MAINTAINERS)
   @ApiOperation({ summary: 'Attach SOP / document to location' })
   addDocument(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
     @Param('id') locationId: string,
     @Body() dto: AddDocumentDto,
   ) {
-    return this.locationsService.addDocument(this.extractTenantId(tenantId), locationId, dto);
+    return this.locationsService.addDocument(tenantId, locationId, dto, userId);
   }
 
   @Delete(':id/documents/:docId')
+  @Roles(...RoleGroups.AREA_MAINTAINERS)
   @ApiOperation({ summary: 'Remove document from location' })
   deleteDocument(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
     @Param('id') locationId: string,
     @Param('docId') docId: string,
   ) {
-    return this.locationsService.deleteDocument(this.extractTenantId(tenantId), locationId, docId);
+    return this.locationsService.deleteDocument(tenantId, locationId, docId, userId);
   }
 }

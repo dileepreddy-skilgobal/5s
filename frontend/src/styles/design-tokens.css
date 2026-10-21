@@ -1,116 +1,222 @@
+/* ==========================================================================
+   Design tokens
+   Blue-and-white visual language: a deep primary blue for actions, links and
+   the active state; white surfaces on a cool grey page; pale blue for selected
+   and informational areas; semantic colours used only for status.
+
+   Two layers:
+   - --c-*  theme base values (light below, dark under [data-theme='dark'])
+   - semantic tokens (--bg-*, --text-*, --color-*) that components use; they
+     point at the base values, so a region (e.g. the blue top bar) can remap
+     them locally and reset them with .theme-surface.
+   ========================================================================== */
 :root {
-  /* Font Families */
-  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  /* Font families */
+  --font-sans: 'Inter', 'Segoe UI', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
 
-  /* Font Size Scale (+10% Enterprise Enhanced Typography) */
+  /* Type scale */
   --font-size-2xs: 11px;
-  --font-size-xs: 12.1px;
-  --font-size-sm: 13.2px;
-  --font-size-base: 14.3px;
-  --font-size-md: 15.4px;
-  --font-size-lg: 17.6px;
-  --font-size-xl: 19.8px;
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-md: 15px;
+  --font-size-lg: 16px;
+  --font-size-xl: 18px;
   --font-size-2xl: 22px;
-  --font-size-3xl: 26.4px;
-  --font-size-4xl: 30.8px;
-  --font-size-5xl: 35.2px;
+  --font-size-3xl: 28px;
+  --font-size-4xl: 32px;
 
-  /* Color Palette - Light Theme (Enterprise Slate & Sapphire) */
-  --bg-app: #F8FAFC;
-  --bg-surface: #FFFFFF;
-  --bg-surface-elevated: #FFFFFF;
-  --bg-surface-subtle: #F1F5F9;
-  --bg-surface-hover: #E2E8F0;
-  --bg-sidebar: #0F172A;
-  --bg-sidebar-hover: #1E293B;
-  --bg-sidebar-active: #2563EB;
+  /* Spacing scale (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
 
-  --text-primary: #0F172A;
-  --text-secondary: #475569;
-  --text-tertiary: #94A3B8;
-  --text-sidebar: #E2E8F0;
-  --text-sidebar-muted: #94A3B8;
+  /* Control heights */
+  --control-sm: 32px;
+  --control-md: 40px;
+  --control-lg: 48px;
 
-  --border-subtle: #E2E8F0;
-  --border-strong: #CBD5E1;
-  --border-focus: #2563EB;
+  /* --- Light theme base values --- */
+  --c-page: #F5F7FA;
+  --c-surface: #FFFFFF;
+  --c-surface-subtle: #F7F9FC;
+  --c-surface-hover: #EEF3F8;
+  --c-pale: #F0F6FC;
+  --c-pale-strong: #E2EFFA;
 
-  /* Brand Accents */
-  --color-primary: #2563EB;
-  --color-primary-hover: #1D4ED8;
-  --color-primary-light: #EFF6FF;
-  --color-primary-dark: #1E3A8A;
+  --c-text: #1D2733;
+  --c-text-2: #596579;
+  --c-text-3: #6B7686;
 
-  /* Semantic State Colors */
-  --color-success: #059669;
-  --color-success-bg: #ECFDF5;
-  --color-success-border: #A7F3D0;
+  --c-border: #DCE3EB;
+  --c-border-strong: #C5D0DC;
 
-  --color-warning: #D97706;
-  --color-warning-bg: #FFFBEB;
-  --color-warning-border: #FDE68A;
+  --c-primary: #004C8F;
+  --c-primary-deep: #003B70;
+  --c-interactive: #0072CE;
 
-  --color-danger: #DC2626;
-  --color-danger-bg: #FEF2F2;
-  --color-danger-border: #FECACA;
+  --c-success: #18864B;
+  --c-success-bg: #EAF6EF;
+  --c-success-border: #BFE3CD;
+  --c-warning: #8F5D12; /* text-safe amber (the #B7791F accent fails contrast as text) */
+  --c-warning-accent: #B7791F;
+  --c-warning-bg: #FDF5E7;
+  --c-warning-border: #F0D9AE;
+  --c-danger: #C62828;
+  --c-danger-bg: #FDEEEE;
+  --c-danger-border: #F4C4C4;
+  --c-info: #0067B8;
+  --c-info-bg: #EAF4FC;
+  --c-info-border: #BCD9F2;
+  --c-purple: #5B3FB5;
+  --c-purple-bg: #F2EFFB;
+  --c-purple-border: #D7CDF3;
 
-  --color-info: #0284C7;
-  --color-info-bg: #F0F9FF;
-  --color-info-border: #BAE6FD;
+  /* --- Semantic tokens --- */
+  --bg-app: var(--c-page);
+  --bg-surface: var(--c-surface);
+  --bg-surface-elevated: var(--c-surface);
+  --bg-surface-subtle: var(--c-surface-subtle);
+  --bg-surface-hover: var(--c-surface-hover);
+  --bg-pale: var(--c-pale);
+  --bg-sidebar: var(--c-surface);
+  --bg-sidebar-hover: var(--c-surface-hover);
+  --bg-sidebar-active: var(--c-pale-strong);
 
-  --color-purple: #7C3AED;
-  --color-purple-bg: #F5F3FF;
-  --color-purple-border: #DDD6FE;
+  --text-primary: var(--c-text);
+  --text-secondary: var(--c-text-2);
+  --text-tertiary: var(--c-text-3);
+  --text-sidebar: var(--c-text);
+  --text-sidebar-muted: var(--c-text-3);
+  --text-on-primary: #FFFFFF;
 
-  /* Shadows */
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -4px rgba(0, 0, 0, 0.04);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
+  --border-subtle: var(--c-border);
+  --border-strong: var(--c-border-strong);
+  --border-focus: var(--c-interactive);
+  --focus-ring: 0 0 0 3px rgba(0, 114, 206, 0.22);
 
-  /* Radius */
+  --color-primary: var(--c-primary);
+  --color-primary-hover: var(--c-primary-deep);
+  --color-primary-light: var(--c-pale-strong);
+  --color-primary-subtle: var(--c-pale);
+  --color-primary-dark: var(--c-primary-deep);
+  --color-link: var(--c-primary);
+  --color-interactive: var(--c-interactive);
+
+  --color-success: var(--c-success);
+  --color-success-bg: var(--c-success-bg);
+  --color-success-border: var(--c-success-border);
+  --color-warning: var(--c-warning);
+  --color-warning-accent: var(--c-warning-accent);
+  --color-warning-bg: var(--c-warning-bg);
+  --color-warning-border: var(--c-warning-border);
+  --color-danger: var(--c-danger);
+  --color-danger-bg: var(--c-danger-bg);
+  --color-danger-border: var(--c-danger-border);
+  --color-info: var(--c-info);
+  --color-info-bg: var(--c-info-bg);
+  --color-info-border: var(--c-info-border);
+  --color-purple: var(--c-purple);
+  --color-purple-bg: var(--c-purple-bg);
+  --color-purple-border: var(--c-purple-border);
+
+  /* Top bar (brand band) */
+  --topbar-bg: var(--c-primary);
+  --topbar-text: #FFFFFF;
+
+  /* Shadows: subtle, only where they separate layers */
+  --shadow-xs: 0 1px 2px rgba(16, 32, 56, 0.04);
+  --shadow-sm: 0 1px 3px rgba(16, 32, 56, 0.06), 0 1px 2px rgba(16, 32, 56, 0.04);
+  --shadow-md: 0 4px 10px -2px rgba(16, 32, 56, 0.08);
+  --shadow-lg: 0 10px 24px -6px rgba(16, 32, 56, 0.14);
+  --shadow-xl: 0 20px 40px -12px rgba(16, 32, 56, 0.22);
+
+  /* Radii: restrained */
   --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
   --radius-full: 9999px;
 
-  /* Spacing */
-  --sidebar-width: 260px;
+  /* Layout */
+  --sidebar-width: 256px;
   --sidebar-collapsed-width: 72px;
-  --navbar-height: 64px;
+  --navbar-height: 60px;
+  --content-max-width: 1440px;
 
-  /* Transitions */
+  /* Motion */
   --transition-fast: 0.15s ease;
-  --transition-normal: 0.25s ease;
+  --transition-normal: 0.22s ease;
 }
 
 [data-theme='dark'] {
-  --bg-app: #090D16;
-  --bg-surface: #111827;
-  --bg-surface-elevated: #1F2937;
-  --bg-surface-subtle: #182234;
-  --bg-surface-hover: #233044;
-  --bg-sidebar: #0B0F19;
-  --bg-sidebar-hover: #162032;
+  --c-page: #0B1420;
+  --c-surface: #121D2B;
+  --c-surface-subtle: #172435;
+  --c-surface-hover: #1D2D41;
+  --c-pale: #13283F;
+  --c-pale-strong: #17324F;
 
-  --text-primary: #F9FAFB;
-  --text-secondary: #9CA3AF;
-  --text-tertiary: #6B7280;
+  --c-text: #EEF3F8;
+  --c-text-2: #B8C4D2;
+  --c-text-3: #93A1B3;
 
-  --border-subtle: #1F2937;
-  --border-strong: #374151;
+  --c-border: #24364B;
+  --c-border-strong: #33485F;
 
-  --color-primary-light: #1E293B;
-  --color-success-bg: #064E3B;
-  --color-warning-bg: #78350F;
-  --color-danger-bg: #7F1D1D;
-  --color-info-bg: #0C4A6E;
-  --color-purple-bg: #4C1D95;
+  --c-primary: #3A8BDB;
+  --c-primary-deep: #5BA2E6;
+  --c-interactive: #5BA2E6;
 
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.5);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4);
+  --c-success: #4CC384;
+  --c-success-bg: #10301F;
+  --c-success-border: #1C5A39;
+  --c-warning: #E5B25A;
+  --c-warning-accent: #E5B25A;
+  --c-warning-bg: #33260F;
+  --c-warning-border: #5E4518;
+  --c-danger: #F07A7A;
+  --c-danger-bg: #3A1616;
+  --c-danger-border: #6B2626;
+  --c-info: #67B4F0;
+  --c-info-bg: #0F2A42;
+  --c-info-border: #1D4B71;
+  --c-purple: #B3A1F0;
+  --c-purple-bg: #251D44;
+  --c-purple-border: #423375;
+
+  --topbar-bg: #0E2A47;
+  --focus-ring: 0 0 0 3px rgba(91, 162, 230, 0.35);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 10px -2px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 10px 24px -6px rgba(0, 0, 0, 0.5);
+  --shadow-xl: 0 20px 40px -12px rgba(0, 0, 0, 0.6);
+  color-scheme: dark;
+}
+
+/* Restores the theme's own colours inside a region that remapped them (menus inside the blue top bar) */
+.theme-surface,
+.app-topbar [role='menu'],
+.app-topbar [role='dialog'] {
+  --bg-surface: var(--c-surface);
+  --bg-surface-elevated: var(--c-surface);
+  --bg-surface-subtle: var(--c-surface-subtle);
+  --bg-surface-hover: var(--c-surface-hover);
+  --text-primary: var(--c-text);
+  --text-secondary: var(--c-text-2);
+  --text-tertiary: var(--c-text-3);
+  --border-subtle: var(--c-border);
+  --border-strong: var(--c-border-strong);
+  --color-primary: var(--c-primary);
+  --color-primary-light: var(--c-pale-strong);
+  color: var(--c-text);
 }

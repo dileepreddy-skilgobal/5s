@@ -1,5 +1,7 @@
-import { IsString, IsNotEmpty, IsOptional, IsInt, IsDateString } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsInt, IsDateString, IsIn, Min, Max } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { values } from '../../../core/validation/domain-values';
+import { EmptyToUndefined } from '../../../core/validation/transforms';
 
 export class CreateLocationDto {
   @ApiProperty({ example: 'org-node-uuid' })
@@ -7,29 +9,32 @@ export class CreateLocationDto {
   @IsNotEmpty()
   orgNodeId: string;
 
-  @ApiProperty({ example: 'LOC-BLR-P1-ASM01' })
+  @ApiPropertyOptional({ example: 'LOC-BLR-P1-ASM01', description: 'Generated from the org node when omitted' })
   @IsString()
-  @IsNotEmpty()
-  areaCode: string;
+  @IsOptional()
+  areaCode?: string;
 
   @ApiProperty({ example: 'Main Assembly Line 01' })
   @IsString()
   @IsNotEmpty()
   name: string;
 
-  @ApiProperty({ example: 'PRODUCTION_LINE', enum: ['PRODUCTION_LINE', 'WAREHOUSE_BAY', 'OFFICE_FLOOR', 'LABORATORY', 'RED_TAG_ZONE', 'WORKSHOP', 'UTILITY'] })
+  @ApiProperty({ example: 'PRODUCTION_LINE', enum: values('LOCATION_TYPES') })
   @IsString()
   @IsNotEmpty()
+  @IsIn(values('LOCATION_TYPES'))
   locationType: string;
 
-  @ApiPropertyOptional({ example: 'MEDIUM', enum: ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] })
+  @ApiPropertyOptional({ example: 'MEDIUM', enum: values('RISK_LEVELS') })
   @IsString()
   @IsOptional()
+  @IsIn(values('RISK_LEVELS'))
   riskLevel?: string;
 
-  @ApiPropertyOptional({ example: 'WEEKLY', enum: ['DAILY', 'WEEKLY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY'] })
+  @ApiPropertyOptional({ example: 'WEEKLY', enum: values('AUDIT_FREQUENCIES') })
   @IsString()
   @IsOptional()
+  @IsIn(values('AUDIT_FREQUENCIES'))
   auditFrequency?: string;
 
   @ApiPropertyOptional({ example: 'Building A' })
@@ -74,19 +79,22 @@ export class UpdateLocationDto {
   @IsOptional()
   name?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: values('LOCATION_TYPES') })
   @IsString()
   @IsOptional()
+  @IsIn(values('LOCATION_TYPES'))
   locationType?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: values('RISK_LEVELS') })
   @IsString()
   @IsOptional()
+  @IsIn(values('RISK_LEVELS'))
   riskLevel?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: values('AUDIT_FREQUENCIES') })
   @IsString()
   @IsOptional()
+  @IsIn(values('AUDIT_FREQUENCIES'))
   auditFrequency?: string;
 
   @ApiPropertyOptional()
@@ -119,9 +127,10 @@ export class UpdateLocationDto {
   @IsOptional()
   heroPhotoUrl?: string;
 
-  @ApiPropertyOptional({ enum: ['ACTIVE', 'INACTIVE', 'UNDER_MAINTENANCE'] })
+  @ApiPropertyOptional({ enum: values('LOCATION_STATUSES') })
   @IsString()
   @IsOptional()
+  @IsIn(values('LOCATION_STATUSES'))
   status?: string;
 }
 
@@ -141,12 +150,15 @@ export class CreateTimelineDto {
 
   @ApiPropertyOptional({ example: 0 })
   @IsInt()
+  @Min(0)
+  @Max(100)
   @IsOptional()
   progressPercent?: number;
 
-  @ApiPropertyOptional({ example: 'NOT_STARTED', enum: ['NOT_STARTED', 'IN_PROGRESS', 'COMPLETED', 'DELAYED'] })
+  @ApiPropertyOptional({ example: 'NOT_STARTED', enum: values('TIMELINE_STATUSES') })
   @IsString()
   @IsOptional()
+  @IsIn(values('TIMELINE_STATUSES'))
   status?: string;
 
   @ApiPropertyOptional({ example: 'Initial sorting of unneeded tools and expired work orders' })
@@ -162,33 +174,40 @@ export class UpdateTimelineDto {
   milestoneName?: string;
 
   @ApiPropertyOptional()
+  @EmptyToUndefined()
   @IsDateString()
   @IsOptional()
   plannedStartDate?: string;
 
   @ApiPropertyOptional()
+  @EmptyToUndefined()
   @IsDateString()
   @IsOptional()
   plannedEndDate?: string;
 
   @ApiPropertyOptional()
+  @EmptyToUndefined()
   @IsDateString()
   @IsOptional()
   actualStartDate?: string;
 
   @ApiPropertyOptional()
+  @EmptyToUndefined()
   @IsDateString()
   @IsOptional()
   actualEndDate?: string;
 
   @ApiPropertyOptional()
   @IsInt()
+  @Min(0)
+  @Max(100)
   @IsOptional()
   progressPercent?: number;
 
-  @ApiPropertyOptional({ enum: ['NOT_STARTED', 'IN_PROGRESS', 'COMPLETED', 'DELAYED'] })
+  @ApiPropertyOptional({ enum: values('TIMELINE_STATUSES') })
   @IsString()
   @IsOptional()
+  @IsIn(values('TIMELINE_STATUSES'))
   status?: string;
 
   @ApiPropertyOptional()
@@ -203,9 +222,10 @@ export class AddDocumentDto {
   @IsNotEmpty()
   title: string;
 
-  @ApiProperty({ example: 'SOP', enum: ['SOP', 'CLEANING_STANDARD', 'LAYOUT_MAP', 'SAFETY_GUIDELINE', 'OTHER'] })
+  @ApiProperty({ example: 'SOP', enum: values('DOCUMENT_TYPES') })
   @IsString()
   @IsNotEmpty()
+  @IsIn(values('DOCUMENT_TYPES'))
   docType: string;
 
   @ApiProperty({ example: 'https://storage.5s-saas.com/docs/sop-01.pdf' })
@@ -215,6 +235,7 @@ export class AddDocumentDto {
 
   @ApiPropertyOptional({ example: 1024 })
   @IsInt()
+  @Min(0)
   @IsOptional()
   fileSizeKb?: number;
 

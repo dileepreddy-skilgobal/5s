@@ -1,121 +1,83 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  TextInput,
-  Platform,
-  RefreshControl,
-  ActivityIndicator,
-} from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TextInput, Pressable, RefreshControl, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, SHADOWS } from '../constants/theme';
+import { BOTTOM_NAV_CLEARANCE, COLORS, RADIUS, SPACING, TOUCH_TARGET, TYPE } from '../constants/theme';
 import { LocationMaster } from '../types';
 import { useResponsive } from '../hooks/useResponsive';
+import { useUser } from '../context/UserContext';
+import { Badge, Button, Card, Chip, EmptyState, ScreenHeader } from '../components/ui';
+import { areaScoreTone } from '../components/SheetLayout';
 
 interface LocationsScreenProps {
   locations: LocationMaster[];
   onSelectLocation: (loc: LocationMaster) => void;
   onOpenQRScanner: () => void;
+  /** Report an abnormality at this area (shown when provided). */
+  onReportAbnormality?: (loc: LocationMaster) => void;
   onRefresh?: () => Promise<void> | void;
   isRefreshing?: boolean;
 }
 
-const PAGE_SIZE = 6;
+const PAGE_SIZE = 20;
+const ALL = '__all__';
+/** Filter key for areas without a department. */
+const NO_DEPARTMENT = '__none__';
+
+const departmentKey = (loc: LocationMaster) => loc.department.trim() || NO_DEPARTMENT;
 
 export const LocationsScreen: React.FC<LocationsScreenProps> = ({
   locations,
   onSelectLocation,
   onOpenQRScanner,
+  onReportAbnormality,
   onRefresh,
   isRefreshing = false,
 }) => {
   const { isTablet, isLargeTablet } = useResponsive();
-  const [selectedDept, setSelectedDept] = useState('ALL');
+  const { can } = useUser();
+  // Same rule as App's area handler: conductors open an audit, other roles report / red tag
+  const canConduct = can('AUDIT_CONDUCTORS');
+  const [selectedDept, setSelectedDept] = useState(ALL);
   const [searchQuery, setSearchQuery] = useState('');
   const [visibleCount, setVisibleCount] = useState<number>(PAGE_SIZE);
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [localRefreshing, setLocalRefreshing] = useState(false);
 
-  // Extract friendly category names with counts
-  const categoriesWithCounts = useMemo(() => {
-    const counts: Record<string, number> = { ALL: locations.length };
-    const deptList: { key: string; label: string; count: number }[] = [];
-
-    // Tally departments
+  // Department filter chips with counts (real department names, alphabetical)
+  const departments = useMemo(() => {
+    const counts = new Map<string, number>();
     locations.forEach((loc) => {
-      const deptName = loc.department ? loc.department.split('•')[0].trim() : 'General';
-      counts[deptName] = (counts[deptName] || 0) + 1;
+      const key = departmentKey(loc);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
     });
-
-    deptList.push({
-      key: 'ALL',
-      label: `All (${locations.length})`,
-      count: locations.length,
-    });
-
-    Object.keys(counts).forEach((d) => {
-      if (d !== 'ALL') {
-        // Shorten long department names for concise chips
-        let shortLabel = d;
-        if (d.toLowerCase().includes('cnc') || d.toLowerCase().includes('machin')) {
-          shortLabel = 'Machining';
-        } else if (d.toLowerCase().includes('asm') || d.toLowerCase().includes('assembl')) {
-          shortLabel = 'Assembly';
-        } else if (d.toLowerCase().includes('wh') || d.toLowerCase().includes('logist') || d.toLowerCase().includes('raw')) {
-          shortLabel = 'Logistics';
-        } else if (d.toLowerCase().includes('tool')) {
-          shortLabel = 'Tooling';
-        } else if (d.toLowerCase().includes('chem') || d.toLowerCase().includes('ehs')) {
-          shortLabel = 'Chemical & EHS';
-        }
-
-        deptList.push({
-          key: d,
-          label: `${shortLabel} (${counts[d]})`,
-          count: counts[d],
-        });
-      }
-    });
-
-    return deptList;
+    return Array.from(counts.entries())
+      .map(([key, count]) => ({ key, label: key === NO_DEPARTMENT ? 'No department' : key, count }))
+      .sort((a, b) => (a.key === NO_DEPARTMENT ? 1 : b.key === NO_DEPARTMENT ? -1 : a.label.localeCompare(b.label)));
   }, [locations]);
 
-  // Filter locations by selected category and search query
+  // Filter locations by selected department and search query
   const filtered = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
     return locations.filter((l) => {
-      const matchesDept =
-        selectedDept === 'ALL' ||
-        (l.department && l.department.toLowerCase().includes(selectedDept.toLowerCase())) ||
-        (l.plant && l.plant.toLowerCase().includes(selectedDept.toLowerCase()));
-
-      const q = searchQuery.trim().toLowerCase();
+      const matchesDept = selectedDept === ALL || departmentKey(l) === selectedDept;
       const matchesSearch =
         !q ||
         l.name.toLowerCase().includes(q) ||
         l.code.toLowerCase().includes(q) ||
+        l.department.toLowerCase().includes(q) ||
         (l.plant && l.plant.toLowerCase().includes(q)) ||
         (l.workstation && l.workstation.toLowerCase().includes(q));
-
-    return matchesDept && matchesSearch;
+      return matchesDept && matchesSearch;
     });
   }, [locations, selectedDept, searchQuery]);
 
-  const paginatedLocations = useMemo(() => {
-    return filtered.slice(0, visibleCount);
-  }, [filtered, visibleCount]);
-
+  const paginatedLocations = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount]);
   const hasMore = visibleCount < filtered.length;
+  const isFiltered = selectedDept !== ALL || searchQuery.trim().length > 0;
 
-  const handleLoadMore = () => {
-    if (isLoadingMore || !hasMore) return;
-    setIsLoadingMore(true);
-    setTimeout(() => {
-      setVisibleCount((prev) => prev + PAGE_SIZE);
-      setIsLoadingMore(false);
-    }, 250);
+  const resetFilters = () => {
+    setSelectedDept(ALL);
+    setSearchQuery('');
+    setVisibleCount(PAGE_SIZE);
   };
 
   const handleRefresh = useCallback(async () => {
@@ -129,259 +91,204 @@ export const LocationsScreen: React.FC<LocationsScreenProps> = ({
     }
   }, [onRefresh]);
 
+  const refreshing = isRefreshing || localRefreshing;
+
+  const renderCard = (loc: LocationMaster) => {
+    const score = loc.current5SScore;
+    // Building / floor are optional location fields; only shown when set
+    const meta = [loc.department, loc.plant, loc.workstation].filter((v) => v && v.trim()).join(' · ');
+    const showRedTag = !canConduct && !onReportAbnormality;
+
+    return (
+      <Card key={loc.id} style={[styles.card, isLargeTablet ? styles.largeTabletCard : isTablet ? styles.tabletCard : undefined]}>
+        {/* Area details: tapping does the same as the main action (kept separate from the buttons for screen readers) */}
+        <Pressable
+          onPress={() => onSelectLocation(loc)}
+          accessibilityRole="button"
+          accessibilityLabel={`${loc.name}, ${loc.code}${score !== null ? `, latest score ${score}%` : ', not audited yet'}, owner ${loc.champion}`}
+          accessibilityHint={canConduct ? 'Opens an audit for this area' : 'Shows what you can do at this area'}
+          style={({ pressed }) => pressed && styles.pressed}
+        >
+          <View style={styles.cardTop}>
+            <View style={styles.cardTitleWrap}>
+              <Text style={styles.locName} numberOfLines={2}>
+                {loc.name}
+              </Text>
+              <Text style={styles.locCode}>
+                {loc.code}
+              </Text>
+            </View>
+            {score !== null ? <Badge label={`${score}%`} tone={areaScoreTone(loc.status)} /> : null}
+          </View>
+
+          {meta ? <Text style={styles.metaText}>{meta}</Text> : null}
+
+          <View style={styles.detailRow}>
+            <Ionicons name="time-outline" size={16} color={COLORS.textMuted} />
+            <Text style={styles.detailText}>{loc.lastAuditDate ? `Last audited ${loc.lastAuditDate}` : 'Not audited yet'}</Text>
+          </View>
+          <View style={styles.detailRow}>
+            <Ionicons name="person-outline" size={16} color={COLORS.textMuted} />
+            <Text style={styles.detailText}>
+              Owner: <Text style={styles.detailStrong}>{loc.champion}</Text>
+            </Text>
+          </View>
+        </Pressable>
+
+        {(onReportAbnormality || canConduct || showRedTag) && (
+          <View style={styles.actions}>
+            {onReportAbnormality && (
+              <Button
+                label="Report"
+                icon="alert-circle-outline"
+                variant="secondary"
+                onPress={() => onReportAbnormality(loc)}
+                style={styles.actionButton}
+                accessibilityLabel={`Report an abnormality at ${loc.name}`}
+              />
+            )}
+            {canConduct && (
+              <Button
+                label="Audit"
+                icon="clipboard-outline"
+                onPress={() => onSelectLocation(loc)}
+                style={styles.actionButton}
+                accessibilityLabel={`Audit ${loc.name}`}
+              />
+            )}
+            {showRedTag && (
+              <Button
+                label="Red tag"
+                icon="pricetag-outline"
+                variant="secondary"
+                onPress={() => onSelectLocation(loc)}
+                style={styles.actionButton}
+                accessibilityLabel={`Red tag an item at ${loc.name}`}
+              />
+            )}
+          </View>
+        )}
+      </Card>
+    );
+  };
+
   return (
     <View style={styles.container}>
-      {/* 1. Header with Eyebrow and Scan QR Action */}
-      <View style={styles.header}>
-        <View style={styles.headerTitles}>
-          <Text style={styles.eyebrow}>WORKPLACE HIERARCHY</Text>
-          <Text style={styles.title}>Plant Locations & Bays</Text>
-        </View>
-        <TouchableOpacity
-          style={styles.scanBtn}
-          onPress={onOpenQRScanner}
-          activeOpacity={0.85}
-          accessibilityLabel="Scan Location QR"
-        >
-          <Ionicons name="scan-outline" size={17} color="#FFFFFF" />
-          <Text style={styles.scanBtnText}>Scan QR</Text>
-        </TouchableOpacity>
-      </View>
+      <ScreenHeader
+        title="Areas"
+        subtitle={locations.length > 0 ? `${locations.length} area${locations.length === 1 ? '' : 's'} in your organization` : undefined}
+        action={<Button label="Scan QR" icon="scan-outline" onPress={onOpenQRScanner} accessibilityLabel="Scan an area QR code" />}
+      />
 
-      {/* 2. Search Input Row */}
+      {/* Search */}
       <View style={styles.searchRow}>
         <View style={styles.searchBox}>
-          <Ionicons name="search-outline" size={18} color={COLORS.textMuted} style={styles.searchIcon} />
+          <Ionicons name="search-outline" size={18} color={COLORS.textMuted} />
           <TextInput
             style={styles.searchInput}
-            placeholder="Search bay, machine cell, or area code..."
+            placeholder="Search by area name or code"
             placeholderTextColor={COLORS.textMuted}
             value={searchQuery}
-            onChangeText={setSearchQuery}
+            onChangeText={(v) => {
+              setSearchQuery(v);
+              setVisibleCount(PAGE_SIZE);
+            }}
             returnKeyType="search"
+            autoCorrect={false}
+            accessibilityLabel="Search areas"
           />
           {searchQuery.length > 0 && (
-            <TouchableOpacity onPress={() => setSearchQuery('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Ionicons name="close-circle" size={16} color={COLORS.textMuted} />
-            </TouchableOpacity>
+            <Pressable
+              onPress={() => setSearchQuery('')}
+              hitSlop={12}
+              accessibilityRole="button"
+              accessibilityLabel="Clear search"
+              style={styles.clearBtn}
+            >
+              <Ionicons name="close-circle" size={18} color={COLORS.textMuted} />
+            </Pressable>
           )}
         </View>
       </View>
 
-      {/* 3. Horizontal Filter Tabs (Zero Clipping Guaranteed) */}
-      <View style={styles.filterSection}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.deptScrollContent}
-        >
-          {categoriesWithCounts.map((cat) => {
-            const isSelected = selectedDept.toLowerCase() === cat.key.toLowerCase();
-            return (
-              <TouchableOpacity
-                key={cat.key}
-                style={[styles.deptChip, isSelected && styles.deptChipActive]}
-                onPress={() => {
-                  setSelectedDept(cat.key);
-                  setVisibleCount(PAGE_SIZE);
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={[styles.deptText, isSelected && styles.deptTextActive]}>
-                  {cat.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
+      {/* Department filter: scrolls sideways, the next chip peeks in */}
+      {departments.length > 1 && (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow} style={styles.chipScroll}>
+          <Chip
+            label="All"
+            count={locations.length}
+            selected={selectedDept === ALL}
+            onPress={() => {
+              setSelectedDept(ALL);
+              setVisibleCount(PAGE_SIZE);
+            }}
+          />
+          {departments.map((d) => (
+            <Chip
+              key={d.key}
+              label={d.label}
+              count={d.count}
+              selected={selectedDept === d.key}
+              onPress={() => {
+                setSelectedDept(d.key);
+                setVisibleCount(PAGE_SIZE);
+              }}
+            />
+          ))}
         </ScrollView>
-      </View>
+      )}
 
-      {/* Record Count Header */}
-      <View style={styles.recordCountRow}>
-        <Text style={styles.recordCountText}>
-          Showing {paginatedLocations.length} of {filtered.length} locations
-          {filtered.length !== locations.length && ` (filtered from ${locations.length})`}
-        </Text>
-      </View>
-
-      {/* 4. Scrollable Locations Cards List with Pull-to-Refresh & Pagination */}
+      {/* Areas list with pull-to-refresh and paging */}
       <ScrollView
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
         refreshControl={
-          <RefreshControl
-            refreshing={isRefreshing || localRefreshing}
-            onRefresh={handleRefresh}
-            colors={[COLORS.primary]}
-            tintColor={COLORS.primary}
-          />
+          onRefresh ? (
+            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} colors={[COLORS.primary]} tintColor={COLORS.primary} />
+          ) : undefined
         }
       >
-        {paginatedLocations.length > 0 ? (
-          <View style={isTablet ? styles.tabletGrid : undefined}>
-            {paginatedLocations.map((loc) => {
-              const score = loc.current5SScore || 85;
-              const isOptimal = score >= 80;
+        {isFiltered && filtered.length > 0 && (
+          <Text style={styles.countText}>
+            {filtered.length} of {locations.length} areas
+          </Text>
+        )}
 
-              return (
-                <TouchableOpacity
-                  key={loc.id}
-                  style={[
-                    styles.card,
-                    isLargeTablet
-                      ? styles.largeTabletCard
-                      : isTablet
-                      ? styles.tabletCard
-                      : undefined,
-                    SHADOWS.card,
-                  ]}
-                  onPress={() => onSelectLocation(loc)}
-                  activeOpacity={0.92}
-                >
-                {/* Location Top: Icon, Code, Title & Score Badge */}
-                <View style={styles.cardTop}>
-                  <View style={styles.locIconWrapper}>
-                    <Ionicons
-                      name={
-                        loc.code.includes('REDTAG')
-                          ? 'warning-outline'
-                          : loc.code.includes('MACH')
-                          ? 'hardware-chip-outline'
-                          : loc.code.includes('ASM')
-                          ? 'construct-outline'
-                          : 'business-outline'
-                      }
-                      size={22}
-                      color={COLORS.primary}
-                    />
-                  </View>
-                  <View style={styles.locInfo}>
-                    <Text style={styles.locCode}>{loc.code}</Text>
-                    <Text style={styles.locName} numberOfLines={2}>
-                      {loc.name}
-                    </Text>
-                    <Text style={styles.locPlant} numberOfLines={1}>
-                      {loc.plant} • {loc.department}
-                    </Text>
-                  </View>
-                  <View style={[styles.scoreBadge, isOptimal ? styles.scoreBadgeGreen : styles.scoreBadgeOrange]}>
-                    <Text style={[styles.scoreVal, isOptimal ? styles.scoreValGreen : styles.scoreValOrange]}>
-                      {score}%
-                    </Text>
-                    <Text style={styles.scoreSub}>5S Score</Text>
-                  </View>
-                </View>
-
-                {/* Designated Bay Inventory Manifest */}
-                <View style={styles.inventorySection}>
-                  <View style={styles.invHeaderRow}>
-                    <Ionicons name="layers-outline" size={13} color={COLORS.textDark} />
-                    <Text style={styles.invTitle}>Designated Bay Inventory Manifest:</Text>
-                  </View>
-
-                  <View style={styles.invItemsList}>
-                    {loc.expectedItems && loc.expectedItems.length > 0 ? (
-                      loc.expectedItems.map((item, idx) => {
-                        const isMatch = item.currentQty >= item.standardQty;
-                        return (
-                          <View key={idx} style={styles.invRow}>
-                            <View style={styles.invRowLeft}>
-                              <Ionicons
-                                name={isMatch ? 'checkmark-circle' : 'alert-circle'}
-                                size={14}
-                                color={isMatch ? '#059669' : '#D97706'}
-                              />
-                              <Text style={styles.invName} numberOfLines={1}>
-                                {item.name}
-                              </Text>
-                            </View>
-                            <View style={[styles.invQtyBadge, isMatch ? styles.invQtyOk : styles.invQtyWarn]}>
-                              <Text style={[styles.invQtyText, isMatch ? styles.invQtyTextOk : styles.invQtyTextWarn]}>
-                                {item.currentQty}/{item.standardQty}
-                              </Text>
-                            </View>
-                          </View>
-                        );
-                      })
-                    ) : (
-                      <View style={styles.invRow}>
-                        <View style={styles.invRowLeft}>
-                          <Ionicons name="checkmark-circle" size={14} color="#059669" />
-                          <Text style={styles.invName}>Standard Shadow Board Tools &amp; Gauges</Text>
-                        </View>
-                        <View style={[styles.invQtyBadge, styles.invQtyOk]}>
-                          <Text style={[styles.invQtyText, styles.invQtyTextOk]}>Verified</Text>
-                        </View>
-                      </View>
-                    )}
-                  </View>
-                </View>
-
-                {/* Card Footer: Champion & Action CTA */}
-                <View style={styles.cardFooter}>
-                  <View style={styles.championInfo}>
-                    <Ionicons name="person-circle-outline" size={17} color={COLORS.textMedium} />
-                    <Text style={styles.championText} numberOfLines={1}>
-                      Champion: {loc.champion}
-                    </Text>
-                  </View>
-                  <View style={styles.auditActionTag}>
-                    <Text style={styles.auditActionText}>Audit Bay</Text>
-                    <Ionicons name="arrow-forward" size={12} color={COLORS.primary} />
-                  </View>
-                </View>
-              </TouchableOpacity>
-            );
-          })}
-          </View>
+        {locations.length === 0 ? (
+          refreshing ? (
+            <ActivityIndicator size="large" color={COLORS.primary} style={styles.loading} />
+          ) : (
+            <EmptyState
+              icon="location-outline"
+              title="No areas yet"
+              message="Areas set up for your organization appear here. Pull down to refresh."
+              actionLabel={onRefresh ? 'Refresh' : undefined}
+              onAction={onRefresh ? handleRefresh : undefined}
+            />
+          )
+        ) : paginatedLocations.length > 0 ? (
+          <View style={isTablet ? styles.tabletGrid : undefined}>{paginatedLocations.map(renderCard)}</View>
         ) : (
-          <View style={styles.emptyContainer}>
-            <View style={styles.emptyIconCircle}>
-              <Ionicons name="search-outline" size={32} color={COLORS.textMuted} />
-            </View>
-            <Text style={styles.emptyTitle}>No Matching Workstations</Text>
-            <Text style={styles.emptySubtitle}>
-              Try clearing your search query or select "All ({locations.length})".
-            </Text>
-            <TouchableOpacity
-              style={styles.emptyResetBtn}
-              onPress={() => {
-                setSelectedDept('ALL');
-                setSearchQuery('');
-                setVisibleCount(PAGE_SIZE);
-              }}
-            >
-              <Text style={styles.emptyResetText}>Reset Filters</Text>
-            </TouchableOpacity>
-          </View>
+          <EmptyState
+            icon="search-outline"
+            title="No areas match"
+            message="Try a different name or code, or clear the filters."
+            actionLabel="Clear search and filters"
+            onAction={resetFilters}
+          />
         )}
 
-        {/* Pagination: Load More Action */}
+        {/* Paging */}
         {hasMore && (
-          <TouchableOpacity
-            style={styles.loadMoreBtn}
-            onPress={handleLoadMore}
-            disabled={isLoadingMore}
-            activeOpacity={0.8}
-          >
-            {isLoadingMore ? (
-              <ActivityIndicator size="small" color={COLORS.primary} />
-            ) : (
-              <>
-                <Text style={styles.loadMoreBtnText}>
-                  Load More Locations ({filtered.length - visibleCount} remaining)
-                </Text>
-                <Ionicons name="chevron-down" size={16} color={COLORS.primary} />
-              </>
-            )}
-          </TouchableOpacity>
-        )}
-
-        {!hasMore && filtered.length > PAGE_SIZE && (
-          <View style={styles.endOfListRow}>
-            <Ionicons name="checkmark-done" size={16} color="#94A3B8" />
-            <Text style={styles.endOfListText}>All {filtered.length} locations displayed</Text>
-          </View>
+          <Button
+            label={`Show more (${filtered.length - visibleCount} more)`}
+            icon="chevron-down"
+            variant="secondary"
+            onPress={() => setVisibleCount((prev) => prev + PAGE_SIZE)}
+            fullWidth
+            style={styles.loadMore}
+          />
         )}
       </ScrollView>
     </View>
@@ -391,377 +298,117 @@ export const LocationsScreen: React.FC<LocationsScreenProps> = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F8F9FB',
-    paddingTop: Platform.OS === 'web' ? 14 : 6,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    marginBottom: 12,
-  },
-  headerTitles: {
-    flex: 1,
-    paddingRight: 10,
-  },
-  eyebrow: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#8E95A5',
-    letterSpacing: 1.1,
-    textTransform: 'uppercase',
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: COLORS.textDark,
-    marginTop: 2,
-    letterSpacing: -0.3,
-  },
-  scanBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: 15,
-    paddingVertical: 9,
-    borderRadius: 22,
-    gap: 6,
-    shadowColor: COLORS.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.26,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  scanBtnText: {
-    color: '#FFFFFF',
-    fontWeight: '800',
-    fontSize: 12,
-    letterSpacing: 0.2,
+    backgroundColor: COLORS.background,
   },
   searchRow: {
-    paddingHorizontal: 20,
-    marginBottom: 10,
+    paddingHorizontal: SPACING.screen,
+    marginBottom: SPACING.sm,
   },
   searchBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    height: 44,
-    paddingHorizontal: 14,
+    gap: SPACING.sm,
+    backgroundColor: COLORS.card,
+    borderRadius: RADIUS.md,
+    minHeight: TOUCH_TARGET,
+    paddingLeft: SPACING.md,
+    paddingRight: SPACING.xs,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  searchIcon: {
-    marginRight: 8,
+    borderColor: COLORS.borderDark,
   },
   searchInput: {
     flex: 1,
-    fontSize: 12,
+    ...TYPE.body,
     color: COLORS.textDark,
-    height: '100%',
-    fontWeight: '500',
+    paddingVertical: SPACING.sm,
   },
-  filterSection: {
-    marginBottom: 10,
-  },
-  deptScrollContent: {
-    paddingHorizontal: 20,
-    paddingVertical: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  deptChip: {
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1.5,
-    borderColor: '#E2E8F0',
-    marginRight: 8,
+  clearBtn: {
+    width: 36,
+    height: 36,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 36,
   },
-  deptChipActive: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
-    shadowColor: COLORS.primary,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.25,
-    shadowRadius: 6,
-    elevation: 3,
+  chipScroll: {
+    flexGrow: 0,
+    marginBottom: SPACING.xs,
   },
-  deptText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#475569',
-  },
-  deptTextActive: {
-    color: '#FFFFFF',
+  chipRow: {
+    paddingHorizontal: SPACING.screen,
+    paddingVertical: SPACING.xs,
+    gap: SPACING.sm,
+    alignItems: 'center',
   },
   listContent: {
-    paddingHorizontal: 20,
-    paddingBottom: 140, // Generous padding to prevent bottom floating nav overlap
+    paddingHorizontal: SPACING.screen,
+    paddingTop: SPACING.sm,
+    paddingBottom: BOTTOM_NAV_CLEARANCE,
+  },
+  countText: {
+    ...TYPE.caption,
+    color: COLORS.textMedium,
+    marginBottom: SPACING.sm,
+  },
+  loading: {
+    marginTop: SPACING.xxxl,
   },
   card: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 22,
-    padding: 18,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#EEF2F6',
+    marginBottom: SPACING.md,
+  },
+  pressed: {
+    opacity: 0.7,
   },
   cardTop: {
     flexDirection: 'row',
     alignItems: 'flex-start',
+    gap: SPACING.md,
   },
-  locIconWrapper: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    backgroundColor: '#FFF0EB',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  locInfo: {
+  cardTitleWrap: {
     flex: 1,
-    paddingRight: 6,
-  },
-  locCode: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: COLORS.primary,
-    letterSpacing: 0.6,
+    minWidth: 0,
   },
   locName: {
-    fontSize: 15,
-    fontWeight: '800',
+    ...TYPE.heading,
     color: COLORS.textDark,
-    marginTop: 2,
-    lineHeight: 21,
   },
-  locPlant: {
-    fontSize: 11,
-    color: COLORS.textMedium,
-    marginTop: 3,
-    fontWeight: '500',
-  },
-  scoreBadge: {
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 14,
-    borderWidth: 1,
-    minWidth: 56,
-  },
-  scoreBadgeGreen: {
-    backgroundColor: '#ECFDF5',
-    borderColor: '#A7F3D0',
-  },
-  scoreBadgeOrange: {
-    backgroundColor: '#FFF9F5',
-    borderColor: '#FFE4D6',
-  },
-  scoreVal: {
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  scoreValGreen: {
-    color: '#059669',
-  },
-  scoreValOrange: {
-    color: COLORS.primary,
-  },
-  scoreSub: {
-    fontSize: 8,
+  locCode: {
+    ...TYPE.caption,
     color: COLORS.textMuted,
-    fontWeight: '800',
-    marginTop: 1,
-    textTransform: 'uppercase',
+    marginTop: 2,
   },
-  inventorySection: {
-    backgroundColor: '#F8F9FA',
-    borderRadius: 14,
-    padding: 12,
-    marginTop: 14,
-    borderWidth: 1,
-    borderColor: '#EEF2F6',
-  },
-  invHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 8,
-  },
-  invTitle: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: '#475569',
-    textTransform: 'uppercase',
-    letterSpacing: 0.7,
-  },
-  invItemsList: {
-    gap: 6,
-  },
-  invRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  invRowLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    flex: 1,
-    paddingRight: 6,
-  },
-  invName: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: COLORS.textDark,
-  },
-  invQtyBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  invQtyOk: {
-    backgroundColor: '#ECFDF5',
-  },
-  invQtyWarn: {
-    backgroundColor: '#FFFBEB',
-  },
-  invQtyText: {
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  invQtyTextOk: {
-    color: '#059669',
-  },
-  invQtyTextWarn: {
-    color: '#D97706',
-  },
-  cardFooter: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 14,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#F1F5F9',
-  },
-  championInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    flex: 1,
-    paddingRight: 10,
-  },
-  championText: {
-    fontSize: 11,
-    color: '#475569',
-    fontWeight: '600',
-  },
-  auditActionTag: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: '#FFF0EB',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-  },
-  auditActionText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
-  emptyContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 48,
-    paddingHorizontal: 24,
-  },
-  emptyIconCircle: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 12,
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  emptySubtitle: {
-    fontSize: 12,
-    color: COLORS.textMedium,
-    textAlign: 'center',
-    marginTop: 4,
-    lineHeight: 18,
-  },
-  emptyResetBtn: {
-    marginTop: 16,
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 16,
-  },
-  emptyResetText: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-    fontSize: 12,
-  },
-  recordCountRow: {
-    paddingHorizontal: 20,
-    marginBottom: 8,
-  },
-  recordCountText: {
-    fontSize: 11.5,
-    fontWeight: '600',
-    color: '#64748B',
-  },
-  loadMoreBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    gap: 8,
-    marginTop: 8,
-    marginBottom: 10,
-  },
-  loadMoreBtnText: {
+  metaText: {
+    ...TYPE.caption,
     fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.primary,
+    lineHeight: 18,
+    color: COLORS.textMedium,
+    marginTop: SPACING.sm,
   },
-  endOfListRow: {
+  detailRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 14,
-    gap: 6,
+    alignItems: 'flex-start',
+    gap: SPACING.sm,
+    marginTop: SPACING.sm,
   },
-  endOfListText: {
-    fontSize: 12,
+  detailText: {
+    ...TYPE.caption,
+    fontSize: 13,
+    lineHeight: 18,
+    color: COLORS.textMedium,
+    flex: 1,
+  },
+  detailStrong: {
     fontWeight: '600',
-    color: '#94A3B8',
+    color: COLORS.textDark,
+  },
+  actions: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    marginTop: SPACING.lg,
+  },
+  actionButton: {
+    flex: 1,
+  },
+  loadMore: {
+    marginTop: SPACING.xs,
   },
   tabletGrid: {
     flexDirection: 'row',

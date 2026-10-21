@@ -1,63 +1,73 @@
 import React, { useState, useCallback } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  Switch,
-  Platform,
-  Alert,
-  RefreshControl,
-} from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Platform, Alert, RefreshControl } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, SHADOWS } from '../constants/theme';
+import Constants from 'expo-constants';
+import { BOTTOM_NAV_CLEARANCE, COLORS, RADIUS, SPACING, TYPE } from '../constants/theme';
 import { useUser } from '../context/UserContext';
-import { ENV } from '../config/env';
+import { useWorkspace } from '../context/WorkspaceContext';
 import { useResponsive } from '../hooks/useResponsive';
+import { Badge, Button, Card, InfoRow, ScreenHeader, StatTile } from '../components/ui';
+import { InlineMessage } from '../components/SheetLayout';
 
 interface ProfileScreenProps {
-  isOffline: boolean;
-  onToggleOffline: () => void;
-  pendingSyncCount: number;
-  onSyncNow: () => void;
   onRefresh?: () => Promise<void> | void;
   isRefreshing?: boolean;
 }
 
-export const ProfileScreen: React.FC<ProfileScreenProps> = ({
-  isOffline,
-  onToggleOffline,
-  pendingSyncCount,
-  onSyncNow,
-  onRefresh,
-  isRefreshing,
-}) => {
-  const { currentUser, tenant, usersList, switchUser, userStats } = useUser();
+const APP_VERSION = Constants.expoConfig?.version;
+
+/**
+ * Asks for confirmation. React Native's Alert has no buttons in the web preview, so the browser dialog is used there.
+ */
+const confirmAction = (title: string, message: string, confirmLabel: string, onConfirm: () => void) => {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.confirm(`${title}\n\n${message}`)) onConfirm();
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: 'Cancel', style: 'cancel' },
+    { text: confirmLabel, style: 'destructive', onPress: onConfirm },
+  ]);
+};
+
+type SyncMessage = { tone: 'success' | 'warning' | 'danger'; text: string };
+
+export const ProfileScreen: React.FC<ProfileScreenProps> = ({ onRefresh, isRefreshing }) => {
+  const { currentUser, tenant, userStats, signOut, can } = useUser();
+  const { isOnline, syncItems, isSyncing, syncNow, retrySyncItem, discardSyncItem, lastSyncedAt, templates } = useWorkspace();
   const { isTablet } = useResponsive();
+  const isOffline = !isOnline;
+  const pendingItems = syncItems.filter((i) => i.state === 'PENDING');
+  const failedItems = syncItems.filter((i) => i.state === 'FAILED');
+  const pendingSyncCount = pendingItems.length;
+  const [syncMessage, setSyncMessage] = useState<SyncMessage | null>(null);
 
-  // Field Inspection Preferences
-  const [autoSave, setAutoSave] = useState(true);
-  const [highResPhotos, setHighResPhotos] = useState(true);
-  const [hapticFeedback, setHapticFeedback] = useState(true);
-  const [showUserSwitcher, setShowUserSwitcher] = useState(false);
-
-  const handleClearCache = () => {
-    Alert.alert(
-      'Clean Cache Storage',
-      'This will clear non-essential cached temporary files while keeping all pending audits safe.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Clean Cache',
-          style: 'destructive',
-          onPress: () => Alert.alert('Cache Cleaned', 'Temporary files removed. Local storage optimized.'),
-        },
-      ]
-    );
+  const handleSyncNow = async () => {
+    setSyncMessage(null);
+    const result = await syncNow();
+    if (!result) {
+      setSyncMessage({ tone: 'warning', text: 'No network connection. Items will sync automatically when the device is back online.' });
+    } else if (result.errors.length > 0) {
+      setSyncMessage({ tone: 'danger', text: `Some items were rejected:\n${result.errors.join('\n')}` });
+    } else {
+      setSyncMessage({ tone: 'success', text: result.synced > 0 ? `${result.synced} item${result.synced === 1 ? '' : 's'} sent.` : 'Nothing to send.' });
+    }
   };
 
-  const initials = `${currentUser.firstName?.[0] || 'U'}${currentUser.lastName?.[0] || ''}`;
+  const handleSignOut = () => {
+    const warning =
+      pendingSyncCount > 0
+        ? `You have ${pendingSyncCount} item${pendingSyncCount === 1 ? '' : 's'} waiting to sync. They stay on this device and sync after you sign in again.`
+        : 'You will need to sign in again to continue.';
+    confirmAction('Sign out?', warning, 'Sign out', () => signOut());
+  };
+
+  const initials = `${currentUser.firstName?.[0] || 'U'}${currentUser.lastName?.[0] || ''}`.toUpperCase();
+  const fullName = `${currentUser.firstName} ${currentUser.lastName}`.trim();
+  const jobLine = [currentUser.jobTitle, currentUser.department].filter((v) => v && v.trim()).join(' • ');
+
+  // Personal audit figures only mean something for people who conduct audits (or have done so)
+  const showStats = can('AUDIT_CONDUCTORS') || userStats.auditsCompleted > 0;
 
   const [localRefreshing, setLocalRefreshing] = useState(false);
 
@@ -72,30 +82,22 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     }
   }, [onRefresh]);
 
+  const syncDisabledReason = isOffline
+    ? 'You are offline. Items are sent automatically when the connection returns.'
+    : pendingSyncCount === 0
+      ? 'Nothing is waiting to be sent.'
+      : null;
+
   return (
     <View style={styles.container}>
-      {/* 1. Header */}
-      <View style={styles.header}>
-        <View style={styles.headerTitles}>
-          <Text style={styles.eyebrow}>AUDITOR CREDENTIALS</Text>
-          <Text style={styles.title}>Auditor Profile &amp; Hub</Text>
-        </View>
-        <TouchableOpacity
-          style={styles.switchAccountBtn}
-          onPress={() => setShowUserSwitcher(!showUserSwitcher)}
-          activeOpacity={0.8}
-        >
-          <Ionicons name="people-outline" size={16} color={COLORS.primary} />
-          <Text style={styles.switchAccountText}>Switch Persona</Text>
-        </TouchableOpacity>
-      </View>
+      <ScreenHeader title="Profile" action={<Button label="Sign out" icon="log-out-outline" variant="secondary" onPress={handleSignOut} />} />
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={isRefreshing || localRefreshing}
+            refreshing={!!isRefreshing || localRefreshing}
             onRefresh={handleRefresh}
             colors={[COLORS.primary]}
             tintColor={COLORS.primary}
@@ -103,280 +105,161 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         }
       >
         <View style={isTablet ? styles.tabletLayoutRow : undefined}>
-          {/* Left Column (or full on phone) */}
+          {/* Left column (or full width on phones) */}
           <View style={isTablet ? styles.tabletCol : undefined}>
-            {/* Account Switcher Drawer */}
-            {showUserSwitcher && (
-              <View style={[styles.switcherCard, SHADOWS.card]}>
-                <Text style={styles.switcherTitle}>Active Tenant Personnel ({usersList.length})</Text>
-                {usersList.map((u) => {
-                  const isSelected = u.id === currentUser.id;
-                  return (
-                    <TouchableOpacity
-                      key={u.id}
-                      style={[styles.userItem, isSelected && styles.userItemActive]}
-                      onPress={() => {
-                        switchUser(u.id);
-                        setShowUserSwitcher(false);
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <View style={styles.userItemAvatar}>
-                        <Text style={styles.userItemInitials}>
-                          {u.firstName[0]}
-                          {u.lastName?.[0] || ''}
-                        </Text>
-                      </View>
-                      <View style={styles.userItemText}>
-                        <Text style={[styles.userItemName, isSelected && styles.userItemNameActive]}>
-                          {u.firstName} {u.lastName}
-                        </Text>
-                        <Text style={styles.userItemRole}>
-                          {u.jobTitle} • {u.department}
-                        </Text>
-                      </View>
-                      {isSelected && <Ionicons name="checkmark-circle" size={18} color={COLORS.primary} />}
-                    </TouchableOpacity>
-                  );
-                })}
+            {/* Identity */}
+            <Card style={styles.section}>
+              <View style={styles.identityRow}>
+                <View style={styles.avatar} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+                  <Text style={styles.avatarText}>{initials}</Text>
+                </View>
+                <View style={styles.identityText}>
+                  <Text style={styles.userName} numberOfLines={2}>
+                    {fullName}
+                  </Text>
+                  {jobLine ? <Text style={styles.userJob}>{jobLine}</Text> : null}
+                  <View style={styles.roleBadge}>
+                    <Badge label={currentUser.roleName} tone="info" icon="shield-checkmark-outline" />
+                  </View>
+                </View>
+              </View>
+              <Text style={styles.email} numberOfLines={1}>
+                {currentUser.email}
+              </Text>
+            </Card>
+
+            {/* Personal audit figures, from the user's own audits */}
+            {showStats && (
+              <View style={[styles.section, styles.statsRow]}>
+                <StatTile value={String(userStats.auditsCompleted)} label="Audits completed" />
+                <StatTile
+                  value={userStats.auditsCompleted > 0 ? `${Math.round(userStats.avgScore)}%` : '—'}
+                  label="Average score"
+                />
+                <StatTile value={String(userStats.findingsLogged)} label="Findings recorded" />
               </View>
             )}
 
-            {/* 2. Hero Auditor Profile Card */}
-            <View style={[styles.profileCard, SHADOWS.card]}>
-              <View style={styles.avatarWrapper}>
-                <View style={styles.avatarLarge}>
-                  <Text style={styles.avatarText}>{initials}</Text>
-                </View>
-                <View
-                  style={[
-                    styles.statusDot,
-                    { backgroundColor: isOffline ? '#F59E0B' : '#10B981' },
-                  ]}
-                />
-              </View>
-
-              <Text style={styles.userName}>
-                {currentUser.firstName} {currentUser.lastName}
+            {/* Organization */}
+            <Card style={styles.section}>
+              <Text style={styles.cardTitle} accessibilityRole="header">
+                Organization
               </Text>
-              <Text style={styles.userRole}>
-                {currentUser.jobTitle} • {currentUser.department}
-              </Text>
-
-              {/* Performance Stats Metrics Row */}
-              <View style={styles.statsRow}>
-                <View style={styles.statBox}>
-                  <Text style={styles.statVal}>{userStats.auditsCompleted}</Text>
-                  <Text style={styles.statLabel}>Audits Done</Text>
-                </View>
-                <View style={styles.statDivider} />
-                <View style={styles.statBox}>
-                  <Text style={[styles.statVal, { color: '#059669' }]}>{userStats.avgScore}%</Text>
-                  <Text style={styles.statLabel}>Avg 5S Score</Text>
-                </View>
-                <View style={styles.statDivider} />
-                <View style={styles.statBox}>
-                  <Text style={[styles.statVal, { color: COLORS.primary }]}>{userStats.capasClosed}</Text>
-                  <Text style={styles.statLabel}>CAPAs Closed</Text>
-                </View>
-              </View>
-            </View>
-
-            {/* 4. Enterprise Organization & Facility Hierarchy */}
-            <View style={[styles.sectionCard, SHADOWS.card]}>
-              <View style={styles.cardTitleRow}>
-                <Ionicons name="business-outline" size={16} color={COLORS.textDark} />
-                <Text style={styles.sectionTitle}>Plant &amp; Facility Context</Text>
-              </View>
-
-              <View style={styles.metaList}>
-                <View style={styles.metaRow}>
-                  <View style={styles.metaRowLeft}>
-                    <Ionicons name="cube-outline" size={15} color={COLORS.primary} />
-                    <Text style={styles.metaLabel}>Tenant Entity</Text>
-                  </View>
-                  <Text style={styles.metaValue} numberOfLines={2}>
-                    {tenant.name}
-                  </Text>
-                </View>
-
-                <View style={styles.metaRow}>
-                  <View style={styles.metaRowLeft}>
-                    <Ionicons name="location-outline" size={15} color={COLORS.primary} />
-                    <Text style={styles.metaLabel}>Facility Site</Text>
-                  </View>
-                  <Text style={styles.metaValue} numberOfLines={2}>
-                    {tenant.plantName}
-                  </Text>
-                </View>
-
-                <View style={styles.metaRow}>
-                  <View style={styles.metaRowLeft}>
-                    <Ionicons name="briefcase-outline" size={15} color={COLORS.primary} />
-                    <Text style={styles.metaLabel}>Assigned Unit</Text>
-                  </View>
-                  <Text style={styles.metaValue} numberOfLines={2}>
-                    {currentUser.department}
-                  </Text>
-                </View>
-
-                <View style={styles.metaRow}>
-                  <View style={styles.metaRowLeft}>
-                    <Ionicons name="document-text-outline" size={15} color={COLORS.primary} />
-                    <Text style={styles.metaLabel}>Audit Standard</Text>
-                  </View>
-                  <Text style={styles.metaValue} numberOfLines={2}>
-                    Automotive 5S Standard
-                  </Text>
-                </View>
-
-                <View style={[styles.metaRow, { borderBottomWidth: 0, paddingBottom: 2 }]}>
-                  <View style={styles.metaRowLeft}>
-                    <Ionicons name="server-outline" size={15} color={COLORS.primary} />
-                    <Text style={styles.metaLabel}>Cloud Network</Text>
-                  </View>
-                  <View style={styles.gatewayPill}>
-                    <View style={[styles.greenPing, { backgroundColor: isOffline ? '#F59E0B' : '#10B981' }]} />
-                    <Text style={[styles.gatewayText, { color: isOffline ? '#D97706' : '#059669' }]}>
-                      {isOffline ? 'Offline Mode' : 'Connected (5S Cloud)'}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            </View>
+              <InfoRow label="Organization" value={tenant.name} />
+              {currentUser.department ? <InfoRow label="Department" value={currentUser.department} /> : null}
+              <InfoRow label="Role" value={currentUser.roleName} />
+              <InfoRow label="Audit templates available" value={String(templates.length)} last />
+            </Card>
           </View>
 
-          {/* Right Column (or below on phone) */}
+          {/* Right column (or below on phones) */}
           <View style={isTablet ? styles.tabletCol : undefined}>
-            {/* 3. Offline Engine & Cloud Sync Card */}
-            <View style={[styles.sectionCard, SHADOWS.card]}>
-              <View style={styles.sectionHeader}>
-                <View style={styles.sectionHeaderLeft}>
-                  <View style={[styles.iconCircle, { backgroundColor: isOffline ? '#FFFBEB' : '#ECFDF5' }]}>
-                    <Ionicons
-                      name={isOffline ? 'cloud-offline' : 'cloud-done'}
-                      size={18}
-                      color={isOffline ? '#D97706' : '#059669'}
+            {/* Sync */}
+            <Card style={styles.section}>
+              <View style={styles.syncHeader}>
+                <Text style={styles.cardTitle} accessibilityRole="header">
+                  Sync
+                </Text>
+                <Badge
+                  label={isOffline ? 'Offline' : 'Online'}
+                  tone={isOffline ? 'warning' : 'success'}
+                  icon={isOffline ? 'cloud-offline-outline' : 'cloud-done-outline'}
+                />
+              </View>
+
+              <InfoRow
+                label="Waiting to send"
+                value={pendingSyncCount === 0 ? 'Nothing' : `${pendingSyncCount} item${pendingSyncCount === 1 ? '' : 's'}`}
+              />
+              {failedItems.length > 0 && <InfoRow label="Rejected" value={`${failedItems.length} item${failedItems.length === 1 ? '' : 's'}`} />}
+              <InfoRow label="Last refresh" value={lastSyncedAt ? new Date(lastSyncedAt).toLocaleString() : 'Not yet'} last />
+
+              <Text style={styles.syncNote}>
+                {isOffline
+                  ? 'Audits, red tags and reports are saved on this device and sent automatically when the connection returns.'
+                  : 'Audits, red tags and reports are sent as soon as you save them.'}
+              </Text>
+
+              <Button
+                label={isSyncing ? 'Sending…' : 'Sync now'}
+                icon="sync"
+                onPress={handleSyncNow}
+                loading={isSyncing}
+                disabled={!!syncDisabledReason || isSyncing}
+                fullWidth
+                style={styles.syncButton}
+              />
+              {syncDisabledReason ? <Text style={styles.syncHint}>{syncDisabledReason}</Text> : null}
+              {syncMessage ? (
+                <View style={styles.syncMessage}>
+                  <InlineMessage tone={syncMessage.tone} message={syncMessage.text} />
+                </View>
+              ) : null}
+
+              {/* Work waiting to be sent (audits, red tags, abnormality reports with their media) */}
+              {pendingItems.length > 0 && (
+                <View style={styles.queue}>
+                  {pendingItems.map((item) => (
+                    <View key={item.id} style={styles.queueRow}>
+                      <Ionicons
+                        name={item.type === 'OBSERVATION_CREATE' ? 'alert-circle-outline' : item.type === 'RED_TAG_CREATE' ? 'pricetag-outline' : 'clipboard-outline'}
+                        size={18}
+                        color={COLORS.warning}
+                      />
+                      <View style={styles.queueText}>
+                        <Text style={styles.queueLabel} numberOfLines={2}>
+                          {item.label}
+                        </Text>
+                        <Text style={styles.queueSub} numberOfLines={2}>
+                          {item.attempts > 0 && item.lastError
+                            ? `Waiting to retry: ${item.lastError}`
+                            : `Saved ${new Date(item.createdAt).toLocaleString()}`}
+                        </Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {/* Items rejected by the server need a decision: retry or discard */}
+              {failedItems.map((item) => (
+                <View key={item.id} style={styles.failedItem}>
+                  <View style={styles.queueRowInner}>
+                    <Ionicons name="alert-circle-outline" size={18} color={COLORS.danger} />
+                    <View style={styles.queueText}>
+                      <Text style={styles.queueLabel}>{item.label}</Text>
+                      <Text style={styles.queueSub}>{item.lastError || 'Rejected by the server'}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.failedActions}>
+                    <Button
+                      label="Retry"
+                      icon="refresh"
+                      variant="secondary"
+                      size="sm"
+                      onPress={() => retrySyncItem(item.id)}
+                      style={styles.flex}
+                      accessibilityLabel={`Retry ${item.label}`}
+                    />
+                    <Button
+                      label="Discard"
+                      icon="trash-outline"
+                      variant="danger"
+                      size="sm"
+                      onPress={() =>
+                        confirmAction('Discard item?', 'This submission will be removed from the device and cannot be recovered.', 'Discard', () =>
+                          discardSyncItem(item.id),
+                        )
+                      }
+                      style={styles.flex}
+                      accessibilityLabel={`Discard ${item.label}`}
                     />
                   </View>
-                  <View>
-                    <Text style={styles.sectionTitle}>Cloud Synchronization</Text>
-                    <Text style={styles.sectionSubtitle}>
-                      {isOffline ? 'Offline Mode (Local Storage)' : 'Online Connected (Live API)'}
-                    </Text>
-                  </View>
                 </View>
-                <Switch
-                  value={!isOffline}
-                  onValueChange={onToggleOffline}
-                  trackColor={{ false: '#E2E8F0', true: '#FED7AA' }}
-                  thumbColor={!isOffline ? COLORS.primary : '#94A3B8'}
-                />
-              </View>
+              ))}
+            </Card>
 
-              <Text style={styles.sectionDescription}>
-                {isOffline
-                  ? 'Audits and photo annotations are safely encrypted and queued in local device storage. Tapping toggle reconnects to the cloud.'
-                  : `Direct bidirectional sync with ${tenant.name} API gateway. All scores and CAPA actions are synchronized in real-time.`}
-              </Text>
-
-              {/* Queue Status Box */}
-              <View style={[styles.syncStatusCard, pendingSyncCount > 0 ? styles.syncStatusPending : styles.syncStatusOk]}>
-                <View style={styles.syncStatusInfo}>
-                  <Ionicons
-                    name={pendingSyncCount > 0 ? 'time-outline' : 'checkmark-circle-outline'}
-                    size={20}
-                    color={pendingSyncCount > 0 ? '#D97706' : '#059669'}
-                  />
-                  <View style={styles.syncTextContainer}>
-                    <Text style={styles.syncStatusLabel}>
-                      {pendingSyncCount > 0 ? `${pendingSyncCount} Sessions Queued` : 'All Audits Synchronized'}
-                    </Text>
-                    <Text style={styles.syncStatusSub}>
-                      {pendingSyncCount > 0
-                        ? 'Pending upload to central 5S server'
-                        : 'Device local storage is in full sync'}
-                    </Text>
-                  </View>
-                </View>
-
-                <TouchableOpacity
-                  style={[
-                    styles.syncActionButton,
-                    pendingSyncCount === 0 && styles.syncActionButtonDisabled,
-                  ]}
-                  onPress={onSyncNow}
-                  disabled={pendingSyncCount === 0}
-                  activeOpacity={0.8}
-                >
-                  <Ionicons name="sync" size={14} color="#FFFFFF" />
-                  <Text style={styles.syncActionText}>Sync Now</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {/* 5. Auditor Field Inspection Preferences */}
-            <View style={[styles.sectionCard, SHADOWS.card]}>
-              <View style={styles.cardTitleRow}>
-                <Ionicons name="options-outline" size={16} color={COLORS.textDark} />
-                <Text style={styles.sectionTitle}>Field Inspection Preferences</Text>
-              </View>
-
-              <View style={styles.prefRow}>
-                <View style={styles.prefInfo}>
-                  <Text style={styles.prefTitle}>Auto-Save Answers</Text>
-                  <Text style={styles.prefDesc}>Continuously save question responses as you inspect</Text>
-                </View>
-                <Switch
-                  value={autoSave}
-                  onValueChange={setAutoSave}
-                  trackColor={{ false: '#E2E8F0', true: '#FED7AA' }}
-                  thumbColor={autoSave ? COLORS.primary : '#94A3B8'}
-                />
-              </View>
-
-              <View style={styles.prefRow}>
-                <View style={styles.prefInfo}>
-                  <Text style={styles.prefTitle}>High-Resolution Defect Photos</Text>
-                  <Text style={styles.prefDesc}>Store full-detail photographic evidence for CAPA actions</Text>
-                </View>
-                <Switch
-                  value={highResPhotos}
-                  onValueChange={setHighResPhotos}
-                  trackColor={{ false: '#E2E8F0', true: '#FED7AA' }}
-                  thumbColor={highResPhotos ? COLORS.primary : '#94A3B8'}
-                />
-              </View>
-
-              <View style={[styles.prefRow, { borderBottomWidth: 0 }]}>
-                <View style={styles.prefInfo}>
-                  <Text style={styles.prefTitle}>Haptic Checklist Feedback</Text>
-                  <Text style={styles.prefDesc}>Vibrate device on scoring and standard verification</Text>
-                </View>
-                <Switch
-                  value={hapticFeedback}
-                  onValueChange={setHapticFeedback}
-                  trackColor={{ false: '#E2E8F0', true: '#FED7AA' }}
-                  thumbColor={hapticFeedback ? COLORS.primary : '#94A3B8'}
-                />
-              </View>
-
-              <TouchableOpacity style={styles.cacheClearBtn} onPress={handleClearCache} activeOpacity={0.8}>
-                <Ionicons name="trash-outline" size={15} color="#DC2626" />
-                <Text style={styles.cacheClearText}>Clean Offline Temporary Cache</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* 6. Footer System Info */}
-            <View style={styles.footerInfo}>
-              <Text style={styles.versionText}>
-                {ENV.APP_NAME} v{ENV.VERSION} ({ENV.BUILD_ENV})
-              </Text>
-              <Text style={styles.copyrightText}>Workplace Organisation &amp; Operational Discipline Platform</Text>
-              <Text style={styles.signedInText}>
-                Authenticated Session: {currentUser.firstName} {currentUser.lastName} ({currentUser.email})
-              </Text>
-            </View>
+            {APP_VERSION ? <Text style={styles.versionText}>App version {APP_VERSION}</Text> : null}
           </View>
         </View>
       </ScrollView>
@@ -387,424 +270,146 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F8F9FB',
-    paddingTop: Platform.OS === 'web' ? 14 : 6,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    marginBottom: 12,
-  },
-  headerTitles: {
-    flex: 1,
-  },
-  eyebrow: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: '#8E95A5',
-    letterSpacing: 1.1,
-    textTransform: 'uppercase',
-  },
-  title: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: COLORS.textDark,
-    marginTop: 2,
-    letterSpacing: -0.3,
-  },
-  switchAccountBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#FFF0EB',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#FFE4D6',
-  },
-  switchAccountText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
-  switcherCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    padding: 14,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  switcherTitle: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: COLORS.textDark,
-    marginBottom: 10,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  userItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: 12,
-    marginBottom: 4,
-  },
-  userItemActive: {
-    backgroundColor: '#FFF0EB',
-  },
-  userItemAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#1E293B',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 10,
-  },
-  userItemInitials: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  userItemText: {
-    flex: 1,
-  },
-  userItemName: {
-    fontSize: 12.5,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  userItemNameActive: {
-    color: COLORS.primary,
-  },
-  userItemRole: {
-    fontSize: 10.5,
-    color: COLORS.textMedium,
+    backgroundColor: COLORS.background,
   },
   scrollContent: {
-    paddingHorizontal: 20,
-    paddingBottom: 130,
+    paddingHorizontal: SPACING.screen,
+    paddingTop: SPACING.xs,
+    paddingBottom: BOTTOM_NAV_CLEARANCE,
   },
-  profileCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 22,
-    padding: 20,
+  flex: {
+    flex: 1,
+  },
+  section: {
+    marginBottom: SPACING.md,
+  },
+  identityRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#EEF2F6',
+    gap: SPACING.lg,
   },
-  avatarWrapper: {
-    position: 'relative',
-    marginBottom: 10,
-  },
-  avatarLarge: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: '#1E293B',
+  avatar: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 3,
-    borderColor: '#F8FAFC',
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-    elevation: 4,
   },
   avatarText: {
-    fontSize: 22,
-    fontWeight: '900',
-    color: '#FFFFFF',
-    letterSpacing: 0.5,
+    ...TYPE.title,
+    color: COLORS.textInverse,
   },
-  statusDot: {
-    position: 'absolute',
-    bottom: 2,
-    right: 2,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    borderWidth: 2.5,
-    borderColor: '#FFFFFF',
+  identityText: {
+    flex: 1,
+    minWidth: 0,
   },
   userName: {
-    fontSize: 19,
-    fontWeight: '900',
+    ...TYPE.title,
     color: COLORS.textDark,
   },
-  userRole: {
-    fontSize: 12,
+  userJob: {
+    ...TYPE.caption,
+    fontSize: 13,
+    lineHeight: 18,
     color: COLORS.textMedium,
-    textAlign: 'center',
-    marginTop: 3,
-    paddingHorizontal: 12,
-    lineHeight: 17,
+    marginTop: 2,
+  },
+  roleBadge: {
+    marginTop: SPACING.sm,
+  },
+  email: {
+    ...TYPE.caption,
+    color: COLORS.textMuted,
+    marginTop: SPACING.md,
   },
   statsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    width: '100%',
-    backgroundColor: '#F8F9FA',
-    borderRadius: 16,
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    marginTop: 16,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
+    gap: SPACING.sm,
   },
-  statBox: {
-    alignItems: 'center',
-    flex: 1,
-  },
-  statVal: {
-    fontSize: 16,
-    fontWeight: '900',
+  cardTitle: {
+    ...TYPE.heading,
     color: COLORS.textDark,
+    marginBottom: SPACING.xs,
   },
-  statLabel: {
-    fontSize: 10,
-    color: COLORS.textMuted,
-    fontWeight: '700',
-    marginTop: 2,
-    textTransform: 'uppercase',
-  },
-  statDivider: {
-    width: 1,
-    height: 24,
-    backgroundColor: '#CBD5E1',
-  },
-  sectionCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 22,
-    padding: 18,
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: '#EEF2F6',
-  },
-  sectionHeader: {
+  syncHeader: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
+    gap: SPACING.sm,
   },
-  sectionHeaderLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    flex: 1,
-  },
-  iconCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sectionTitle: {
+  syncNote: {
+    ...TYPE.caption,
     fontSize: 13,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  sectionSubtitle: {
-    fontSize: 11,
+    lineHeight: 18,
     color: COLORS.textMedium,
-    marginTop: 1,
-    fontWeight: '500',
+    marginTop: SPACING.md,
   },
-  sectionDescription: {
-    fontSize: 11,
-    color: COLORS.textMedium,
-    lineHeight: 16,
-    marginBottom: 12,
+  syncButton: {
+    marginTop: SPACING.lg,
   },
-  syncStatusCard: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderRadius: 14,
-    padding: 12,
-    borderWidth: 1,
-  },
-  syncStatusOk: {
-    backgroundColor: '#F0FDF4',
-    borderColor: '#BBF7D0',
-  },
-  syncStatusPending: {
-    backgroundColor: '#FFFBEB',
-    borderColor: '#FDE68A',
-  },
-  syncStatusInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flex: 1,
-    paddingRight: 6,
-  },
-  syncTextContainer: {
-    flex: 1,
-  },
-  syncStatusLabel: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  syncStatusSub: {
-    fontSize: 10,
-    color: COLORS.textMedium,
-    marginTop: 1,
-  },
-  syncActionButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.primary,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 10,
-    gap: 5,
-  },
-  syncActionButtonDisabled: {
-    backgroundColor: '#94A3B8',
-  },
-  syncActionText: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  cardTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginBottom: 12,
-  },
-  metaList: {
-    gap: 0,
-  },
-  metaRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    paddingVertical: 11,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
-    gap: 12,
-  },
-  metaRowLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    width: 115,
-    flexShrink: 0,
-    paddingTop: 1,
-  },
-  metaLabel: {
-    fontSize: 12,
-    color: COLORS.textMedium,
-    fontWeight: '600',
-  },
-  metaValue: {
-    flex: 1,
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.textDark,
-    textAlign: 'right',
-    lineHeight: 17,
-  },
-  gatewayPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#ECFDF5',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-  },
-  greenPing: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#10B981',
-  },
-  gatewayText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#059669',
-  },
-  prefRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
-  },
-  prefInfo: {
-    flex: 1,
-    paddingRight: 10,
-  },
-  prefTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  prefDesc: {
-    fontSize: 10.5,
-    color: COLORS.textMedium,
-    marginTop: 2,
-    lineHeight: 14,
-  },
-  cacheClearBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    marginTop: 14,
-    paddingVertical: 8,
-    backgroundColor: '#FEF2F2',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#FEE2E2',
-  },
-  cacheClearText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#DC2626',
-  },
-  footerInfo: {
-    alignItems: 'center',
-    marginTop: 8,
-    marginBottom: 20,
-    paddingHorizontal: 16,
-  },
-  versionText: {
-    fontSize: 11,
-    fontWeight: '700',
+  syncHint: {
+    ...TYPE.caption,
     color: COLORS.textMuted,
-  },
-  copyrightText: {
-    fontSize: 10,
-    color: COLORS.textMuted,
-    marginTop: 2,
+    marginTop: SPACING.sm,
     textAlign: 'center',
   },
-  signedInText: {
-    fontSize: 9.5,
+  syncMessage: {
+    marginTop: SPACING.md,
+  },
+  queue: {
+    marginTop: SPACING.md,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  queueRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.sm,
+    paddingVertical: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  queueRowInner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.sm,
+  },
+  queueText: {
+    flex: 1,
+  },
+  queueLabel: {
+    ...TYPE.label,
+    color: COLORS.textDark,
+  },
+  queueSub: {
+    ...TYPE.caption,
+    color: COLORS.textMedium,
+    marginTop: 2,
+  },
+  failedItem: {
+    marginTop: SPACING.md,
+    padding: SPACING.md,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.dangerBorder,
+    backgroundColor: COLORS.dangerSoft,
+  },
+  failedActions: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    marginTop: SPACING.md,
+  },
+  versionText: {
+    ...TYPE.caption,
     color: COLORS.textMuted,
-    marginTop: 4,
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    textAlign: 'center',
+    marginTop: SPACING.sm,
+    marginBottom: SPACING.lg,
   },
   tabletLayoutRow: {
     flexDirection: 'row',
-    gap: 16,
+    gap: SPACING.lg,
     alignItems: 'flex-start',
   },
   tabletCol: {

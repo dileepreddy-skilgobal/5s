@@ -1,717 +1,610 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { api } from '../../services/api';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { api, getApiErrorMessage } from '../../services/api';
+import { observationsApi, ObservationSummary } from '../../services/observationsApi';
+import { PercentAnnotation } from '../../services/auditExecutionApi';
 import { useApp } from '../../context/AppContext';
+import { useI18n } from '../../i18n';
+import { useCachedSettings, useTerminology } from '../../hooks/useTerminology';
 import { Card } from '../../components/ui/Card';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
+import { PageHeader } from '../../components/ui/PageHeader';
+import { SummaryCard, SummaryGrid, SummaryTone } from '../../components/ui/SummaryCard';
+import { FormField, SearchInput, FilterBar } from '../../components/ui/FormField';
 import { ImageWithFallback } from '../../components/ui/ImageWithFallback';
+import { LoadingState, ErrorState, EmptyState } from '../../components/ui/StateViews';
 import { PhotoAnnotationModal } from '../../components/common/PhotoAnnotationModal';
-import { Observation, Location, PhotoAnnotation } from '../../types';
-import { FIVE_S_IMAGES } from '../../constants/images';
+import { DuplicateNotice, DuplicateChecking, useDuplicateCheck } from '../../components/common/DuplicateNotice';
+import { Location, SettingsSeverity } from '../../types';
+import type { ObservationRecord } from '../../types/capa';
 import {
-  AlertTriangle,
-  Sparkles,
-  Plus,
-  Filter,
-  Search,
-  Camera,
-  MapPin,
-  Calendar,
-  User,
-  ShieldAlert,
-  Layers,
-  ArrowUpRight,
-  Eye,
-  CheckCircle2,
-  RefreshCw,
-} from 'lucide-react';
+  observationStatusLabel,
+  OBSERVATION_STATUS_LABELS,
+  pillarLabel,
+  PILLAR_LABELS,
+  PILLARS,
+  severityLabel,
+  severityVariant,
+  SEVERITY_LABELS,
+  actionStatusLabel,
+} from '../../constants/labels';
+import { ObservationDetailModal, formatSlaHours, observationStatusVariant } from './ObservationDetailModal';
+import { AlertTriangle, Sparkles, Plus, Camera, MapPin, CalendarDays, ShieldAlert, Layers, RefreshCw, Trash2, Repeat } from 'lucide-react';
+
+const PAGE_SIZE = 24;
+const SEARCH_DELAY_MS = 350;
+
+const emptyForm = (locationId = '') => ({
+  locationId,
+  category: 'S1_SORT',
+  severity: 'MODERATE',
+  title: '',
+  description: '',
+  riskAssessment: '',
+});
+
+interface PhotoDraft {
+  originalDataUrl: string;
+  annotatedDataUrl: string;
+  annotations: PercentAnnotation[];
+}
+
+const ellipsis: React.CSSProperties = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
 
 export const ObservationsPage: React.FC = () => {
-  const navigate = useNavigate();
-  const { addToast } = useApp();
+  const { addToast, can } = useApp();
+  const { relabel } = useTerminology();
+  const settings = useCachedSettings();
+  const { formatDate, formatNumber } = useI18n();
 
+  const [observations, setObservations] = useState<ObservationRecord[]>([]);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState<boolean>(true);
-  const [observations, setObservations] = useState<Observation[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<ObservationSummary | null>(null);
   const [locations, setLocations] = useState<Location[]>([]);
 
-  // Filters
+  // Detail drawer; also opened by deep links (/observations?id=…) from search and notifications.
+  // Links may also preset the filters (?status=&severity=&locationId=) or open the quick form (?new=1&locationId=).
+  const [searchParams, setSearchParams] = useSearchParams();
+  const detailId = searchParams.get('id');
+
+  // Filters (applied by the server)
   const [selectedPillar, setSelectedPillar] = useState<string>('ALL');
-  const [selectedSeverity, setSelectedSeverity] = useState<string>('ALL');
-  const [selectedStatus, setSelectedStatus] = useState<string>('ALL');
-  const [selectedLocationId, setSelectedLocationId] = useState<string>('ALL');
-  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [selectedSeverity, setSelectedSeverity] = useState<string>(() => searchParams.get('severity') || 'ALL');
+  const [selectedStatus, setSelectedStatus] = useState<string>(() => searchParams.get('status') || 'ALL');
+  const [selectedLocationId, setSelectedLocationId] = useState<string>(() => searchParams.get('locationId') || 'ALL');
+  const [searchInput, setSearchInput] = useState<string>('');
+  const [search, setSearch] = useState<string>('');
 
-  // Drawer: Create New Abnormality
-  const [createDrawerOpen, setCreateDrawerOpen] = useState<boolean>(false);
-  const [newObs, setNewObs] = useState({
-    locationId: '',
-    category: 'S1_SORT',
-    severity: 'MODERATE',
-    title: '',
-    description: '',
-    beforePhotoUrl: '',
-    riskAssessment: '',
-    tags: '',
-  });
+  // New observation
+  const [createOpen, setCreateOpen] = useState<boolean>(false);
+  const [newObs, setNewObs] = useState(emptyForm());
+  const [photo, setPhoto] = useState<PhotoDraft | null>(null);
+  const [annotationOpen, setAnnotationOpen] = useState<boolean>(false);
+  const [creating, setCreating] = useState(false);
+  const [createTried, setCreateTried] = useState(false);
 
-  // Photo Annotation Modal for new observation
-  const [annotationModalOpen, setAnnotationModalOpen] = useState<boolean>(false);
-
-  // Photo Zoom Modal
-  const [zoomedPhotoUrl, setZoomedPhotoUrl] = useState<string | null>(null);
+  const openDetail = (id: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('id', id);
+    setSearchParams(next);
+  };
+  const closeDetail = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete('id');
+    setSearchParams(next, { replace: true });
+  };
 
   useEffect(() => {
-    loadData();
+    const timer = setTimeout(() => setSearch(searchInput.trim()), SEARCH_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  const filters = useCallback(
+    () => ({
+      category: selectedPillar !== 'ALL' ? selectedPillar : undefined,
+      severity: selectedSeverity !== 'ALL' ? selectedSeverity : undefined,
+      status: selectedStatus !== 'ALL' ? selectedStatus : undefined,
+      locationId: selectedLocationId !== 'ALL' ? selectedLocationId : undefined,
+      search: search || undefined,
+    }),
+    [selectedPillar, selectedSeverity, selectedStatus, selectedLocationId, search],
+  );
+
+  const requestSeq = useRef(0);
+  const loadFirstPage = useCallback(async () => {
+    const seq = ++requestSeq.current;
+    setLoading(true);
+    setError(null);
+    try {
+      // One extra row tells whether there is another page
+      const page = await observationsApi.list({ ...filters(), limit: PAGE_SIZE + 1, offset: 0 });
+      if (seq !== requestSeq.current) return;
+      setObservations(page.slice(0, PAGE_SIZE));
+      setHasMore(page.length > PAGE_SIZE);
+    } catch (err) {
+      if (seq !== requestSeq.current) return;
+      setError(getApiErrorMessage(err, 'Observations could not be loaded.'));
+    } finally {
+      if (seq === requestSeq.current) setLoading(false);
+    }
+  }, [filters]);
+
+  const loadSummary = useCallback(async () => {
+    try {
+      setSummary(await observationsApi.summary());
+    } catch {
+      // The counts are secondary; the list shows its own error
+      setSummary(null);
+    }
   }, []);
 
-  const loadData = async () => {
+  useEffect(() => {
+    loadFirstPage();
+  }, [loadFirstPage]);
+
+  useEffect(() => {
+    loadSummary();
+    api
+      .getLocations()
+      .then((locs) => {
+        setLocations(locs);
+        setNewObs((prev) => (prev.locationId ? prev : { ...prev, locationId: locs[0]?.id ?? '' }));
+      })
+      .catch((err) => addToast({ type: 'error', title: 'Locations not loaded', message: getApiErrorMessage(err, 'The location list could not be loaded.') }));
+  }, [loadSummary, addToast]);
+
+  const loadMore = async () => {
+    setLoadingMore(true);
     try {
-      setLoading(true);
-      const [obsRes, locRes] = await Promise.all([
-        api.getObservations(),
-        api.getLocations(),
-      ]);
-      setObservations(obsRes);
-      setLocations(locRes);
-      if (locRes.length > 0 && !newObs.locationId) {
-        setNewObs((prev) => ({ ...prev, locationId: locRes[0].id }));
-      }
-    } catch (err: any) {
-      addToast({
-        type: 'error',
-        title: 'Error Loading Observations',
-        message: err.message || 'Could not fetch observations.',
-      });
+      const page = await observationsApi.list({ ...filters(), limit: PAGE_SIZE + 1, offset: observations.length });
+      setObservations((prev) => [...prev, ...page.slice(0, PAGE_SIZE)]);
+      setHasMore(page.length > PAGE_SIZE);
+    } catch (err) {
+      addToast({ type: 'error', title: 'Could not load more', message: getApiErrorMessage(err, 'More observations could not be loaded.') });
     } finally {
-      setLoading(false);
+      setLoadingMore(false);
     }
   };
+
+  const refresh = () => {
+    loadFirstPage();
+    loadSummary();
+  };
+
+  // Advisory duplicate check while logging a new observation (never blocks submission)
+  const dupTitle = newObs.title.trim();
+  const duplicateCheck = useDuplicateCheck(
+    createOpen && newObs.locationId && dupTitle.length >= 3 ? `${newObs.locationId}|${newObs.category}|${dupTitle.toLowerCase()}` : '',
+    async () =>
+      (await api.findDuplicateObservations({ locationId: newObs.locationId, title: dupTitle, category: newObs.category })).map((d) => ({
+        id: d.id,
+        code: d.observationCode,
+        title: d.title,
+        status: d.status,
+        similarity: d.similarity,
+        link: `/observations?id=${d.id}`,
+      })),
+  );
+
+  const openCreate = (locationId?: string) => {
+    setNewObs(emptyForm(locationId ?? locations[0]?.id ?? ''));
+    setPhoto(null);
+    setCreateTried(false);
+    setCreateOpen(true);
+  };
+
+  // Quick report from an area page: /observations?new=1&locationId=<id> opens the form for that location
+  const wantsQuickCreate = searchParams.get('new') === '1';
+  const quickLocationId = searchParams.get('locationId');
+  useEffect(() => {
+    if (!wantsQuickCreate || locations.length === 0) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete('new');
+    setSearchParams(next, { replace: true });
+    if (!can('SHOPFLOOR_REPORTERS')) {
+      addToast({ type: 'warning', title: 'Not available', message: 'Your role cannot log observations.' });
+      return;
+    }
+    const known = quickLocationId && locations.some((l) => l.id === quickLocationId);
+    openCreate(known ? quickLocationId : undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantsQuickCreate, locations]);
 
   const handleCreateObservation = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newObs.title || !newObs.description || !newObs.locationId) {
-      addToast({
-        type: 'warning',
-        title: 'Missing Required Fields',
-        message: 'Please provide workstation, title, and description.',
-      });
-      return;
-    }
-
+    setCreateTried(true);
+    if (!newObs.locationId || !newObs.title.trim() || !newObs.description.trim()) return;
+    setCreating(true);
     try {
-      const tagsArray = newObs.tags
-        ? newObs.tags.split(',').map((t) => t.trim()).filter(Boolean)
-        : [newObs.category, newObs.severity];
-
-      const created = await api.createObservation({
+      const created = await observationsApi.create({
         locationId: newObs.locationId,
         category: newObs.category,
         severity: newObs.severity,
-        title: newObs.title,
-        description: newObs.description,
-        beforePhotoUrl: newObs.beforePhotoUrl || FIVE_S_IMAGES.defects.clutteredUnderBench,
-        annotatedPhotoUrl: newObs.beforePhotoUrl || FIVE_S_IMAGES.defects.clutteredUnderBench,
-        riskAssessment: newObs.riskAssessment,
-        tags: tagsArray,
+        title: newObs.title.trim(),
+        description: newObs.description.trim(),
+        riskAssessment: newObs.riskAssessment.trim() || undefined,
+        // No photo means no photo: nothing is substituted
+        beforePhotoUrl: photo?.originalDataUrl,
+        annotatedPhotoUrl: photo && photo.annotations.length ? photo.annotatedDataUrl : undefined,
+        annotationData: photo?.annotations.length ? photo.annotations : undefined,
       });
-
-      setObservations((prev) => [created, ...prev]);
-      setCreateDrawerOpen(false);
-      setNewObs({
-        locationId: locations[0]?.id || '',
-        category: 'S1_SORT',
-        severity: 'MODERATE',
-        title: '',
-        description: '',
-        beforePhotoUrl: '',
-        riskAssessment: '',
-        tags: '',
-      });
-
-      addToast({
-        type: 'success',
-        title: 'Observation Logged',
-        message: `Registered ${created.observationCode}. Automatically queued for CAPA assignment.`,
-      });
-    } catch (err: any) {
-      addToast({
-        type: 'error',
-        title: 'Error Logging Observation',
-        message: err.message || 'Failed to save observation.',
-      });
+      setCreateOpen(false);
+      setPhoto(null);
+      addToast({ type: 'success', title: 'Observation logged', message: `${created.observationCode} was added to the register.` });
+      refresh();
+    } catch (err) {
+      addToast({ type: 'error', title: 'Observation not logged', message: getApiErrorMessage(err, 'The observation could not be saved.') });
+    } finally {
+      setCreating(false);
     }
   };
 
-  // Filter logic
-  const filteredObservations = observations.filter((obs) => {
-    if (selectedPillar !== 'ALL' && obs.category !== selectedPillar) return false;
-    if (selectedSeverity !== 'ALL' && obs.severity !== selectedSeverity) return false;
-    if (selectedStatus !== 'ALL' && obs.status !== selectedStatus) return false;
-    if (selectedLocationId !== 'ALL' && obs.locationId !== selectedLocationId) return false;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      const matchTitle = obs.title.toLowerCase().includes(q);
-      const matchDesc = obs.description.toLowerCase().includes(q);
-      const matchCode = obs.observationCode.toLowerCase().includes(q);
-      const matchLoc = obs.location?.name.toLowerCase().includes(q) || false;
-      if (!matchTitle && !matchDesc && !matchCode && !matchLoc) return false;
-    }
-    return true;
-  });
+  const slaHint = (severity: string): string | null => {
+    const hours = settings?.sla.hoursBySeverity[severity as SettingsSeverity];
+    return hours ? `If a corrective action is raised, it is due ${formatSlaHours(hours)} after it is assigned.` : null;
+  };
 
-  // KPI Calculations
-  const totalObs = observations.length;
-  const criticalCount = observations.filter((o) => o.severity === 'CRITICAL').length;
-  const kaizenCount = observations.filter((o) => o.severity === 'KAIZEN_OPPORTUNITY').length;
-  const openCount = observations.filter((o) => o.status !== 'CLOSED' && o.status !== 'RESOLVED').length;
+  const actionDue = (obs: ObservationRecord): string | null => {
+    const action = obs.correctiveAction;
+    if (!action) return null;
+    if (action.status === 'PENDING_ACKNOWLEDGEMENT') return action.slaHours ? `Due ${formatSlaHours(action.slaHours)} after sign-off` : null;
+    return action.targetDate ? `Due ${formatDate(action.targetDate)}` : null;
+  };
 
-  const pillarTabs = [
-    { key: 'ALL', label: 'All 5S Pillars' },
-    { key: 'S1_SORT', label: '1S - Sort' },
-    { key: 'S2_SET_IN_ORDER', label: '2S - Set in Order' },
-    { key: 'S3_SHINE', label: '3S - Shine' },
-    { key: 'S4_STANDARDIZE', label: '4S - Standardize' },
-    { key: 'S5_SUSTAIN', label: '5S - Sustain' },
-    { key: 'S6_SAFETY', label: '6S - Safety' },
+  const kpis: Array<{ label: string; value: number | undefined; icon: React.ReactNode; tone: SummaryTone; hint: string }> = [
+    { label: 'Total', value: summary?.total, icon: <AlertTriangle size={18} />, tone: 'primary', hint: 'All logged observations' },
+    { label: 'Critical', value: summary?.critical, icon: <ShieldAlert size={18} />, tone: 'danger', hint: 'Critical severity' },
+    { label: 'Not yet resolved', value: summary?.open, icon: <Layers size={18} />, tone: 'warning', hint: 'Still open or being worked on' },
+    { label: 'Kaizen ideas', value: summary?.kaizen, icon: <Sparkles size={18} />, tone: 'purple', hint: 'Improvement opportunities' },
   ];
 
-  const getSeverityBadge = (sev: string) => {
-    switch (sev) {
-      case 'CRITICAL':
-        return <Badge variant="danger">Critical (24h SLA)</Badge>;
-      case 'MAJOR':
-        return <Badge variant="warning">Major (3d SLA)</Badge>;
-      case 'MODERATE':
-        return <Badge variant="info">Moderate (7d SLA)</Badge>;
-      case 'MINOR':
-        return <Badge variant="neutral">Minor (15d SLA)</Badge>;
-      case 'KAIZEN_OPPORTUNITY':
-        return <Badge variant="purple" icon={<Sparkles size={11} />}>Kaizen Best Practice</Badge>;
-      default:
-        return <Badge variant="neutral">{sev}</Badge>;
-    }
-  };
-
-  const getStatusBadge = (st: string) => {
-    switch (st) {
-      case 'OPEN':
-        return <Badge variant="neutral">Open</Badge>;
-      case 'ACTION_ASSIGNED':
-        return <Badge variant="info">Action Assigned</Badge>;
-      case 'IN_PROGRESS':
-        return <Badge variant="warning">In Remediation</Badge>;
-      case 'PENDING_VERIFICATION':
-        return <Badge variant="purple">Pending Verification</Badge>;
-      case 'CLOSED':
-      case 'RESOLVED':
-        return <Badge variant="success">Resolved & Verified</Badge>;
-      default:
-        return <Badge variant="neutral">{st}</Badge>;
-    }
-  };
+  const filtersActive = selectedPillar !== 'ALL' || selectedSeverity !== 'ALL' || selectedStatus !== 'ALL' || selectedLocationId !== 'ALL' || !!search;
+  const severityHint = slaHint(newObs.severity);
 
   return (
     <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      {/* Top Header */}
-      <div className="page-header">
-        <div className="page-header-content">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-            <Badge variant="info" icon={<AlertTriangle size={12} />}>
-              Observation Register
-            </Badge>
-            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              Non-Conformance & Abnormality Management
-            </span>
-          </div>
-          <h1 style={{ fontSize: '24px', fontWeight: 800, color: 'var(--text-primary)', margin: 0, letterSpacing: '-0.02em' }}>
-            5S Observations & Shop-Floor Abnormalities
-          </h1>
-        </div>
+      <PageHeader
+        title={relabel('Observations')}
+        description="Problems, hazards and improvement ideas found on the shop floor."
+        actions={
+          <>
+            <Button variant="secondary" icon={<RefreshCw size={16} />} onClick={refresh}>
+              Refresh
+            </Button>
+            {can('SHOPFLOOR_REPORTERS') && (
+              <Button variant="primary" icon={<Plus size={16} />} onClick={() => openCreate()}>
+                {relabel('Log observation')}
+              </Button>
+            )}
+          </>
+        }
+      />
 
-        <div className="page-header-actions">
-          <Button variant="secondary" icon={<RefreshCw size={15} />} onClick={() => loadData()}>
-            Refresh
-          </Button>
-          <Button variant="primary" icon={<Plus size={16} />} onClick={() => setCreateDrawerOpen(true)}>
-            Log Shop-Floor Abnormality
-          </Button>
-        </div>
-      </div>
-
-      {/* KPI Metric Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
-        <Card noPadding>
-          <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: 'var(--radius-md)',
-                background: 'var(--color-primary-subtle)',
-                color: 'var(--color-primary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <AlertTriangle size={22} />
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Total Observations</div>
-              <div style={{ fontSize: '22px', fontWeight: 800, color: 'var(--text-primary)' }}>{totalObs}</div>
-            </div>
-          </div>
-        </Card>
-
-        <Card noPadding>
-          <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: 'var(--radius-md)',
-                background: 'rgba(239, 68, 68, 0.12)',
-                color: '#EF4444',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <ShieldAlert size={22} />
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Critical Severity</div>
-              <div style={{ fontSize: '22px', fontWeight: 800, color: '#EF4444' }}>{criticalCount}</div>
-            </div>
-          </div>
-        </Card>
-
-        <Card noPadding>
-          <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: 'var(--radius-md)',
-                background: 'rgba(245, 158, 11, 0.12)',
-                color: '#F59E0B',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <Layers size={22} />
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Pending Remediation</div>
-              <div style={{ fontSize: '22px', fontWeight: 800, color: '#F59E0B' }}>{openCount}</div>
-            </div>
-          </div>
-        </Card>
-
-        <Card noPadding>
-          <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div
-              style={{
-                width: '44px',
-                height: '44px',
-                borderRadius: 'var(--radius-md)',
-                background: 'rgba(168, 85, 247, 0.12)',
-                color: '#A855F7',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <Sparkles size={22} />
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Kaizen Innovations</div>
-              <div style={{ fontSize: '22px', fontWeight: 800, color: '#A855F7' }}>{kaizenCount}</div>
-            </div>
-          </div>
-        </Card>
-      </div>
-
-      {/* 5S Pillar Tabs */}
-      <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '4px' }}>
-        {pillarTabs.map((tab) => (
-          <button
-            key={tab.key}
-            type="button"
-            onClick={() => setSelectedPillar(tab.key)}
-            style={{
-              padding: '8px 16px',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid',
-              borderColor: selectedPillar === tab.key ? 'var(--color-primary)' : 'var(--border-subtle)',
-              background: selectedPillar === tab.key ? 'var(--color-primary)' : 'var(--bg-surface)',
-              color: selectedPillar === tab.key ? '#FFFFFF' : 'var(--text-secondary)',
-              fontWeight: 600,
-              fontSize: '13px',
-              cursor: 'pointer',
-              whiteSpace: 'nowrap',
-              transition: 'all var(--transition-fast)',
-            }}
-          >
-            {tab.label}
-          </button>
+      <SummaryGrid min={200}>
+        {kpis.map((k) => (
+          <SummaryCard key={k.label} label={k.label} value={k.value === undefined ? '—' : formatNumber(k.value)} icon={k.icon} tone={k.tone} hint={k.hint} />
         ))}
-      </div>
+      </SummaryGrid>
 
-      {/* Filter Controls Bar */}
-      <Card noPadding>
-        <div
-          style={{
-            padding: '16px 20px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: '14px',
-          }}
-        >
-          {/* Search Box */}
-          <div style={{ position: 'relative', flex: 1, minWidth: '240px' }}>
-            <Search
-              size={16}
-              style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }}
-            />
-            <input
-              type="text"
-              placeholder="Search by code, title, description, or workstation..."
-              className="form-control"
-              style={{ paddingLeft: '36px' }}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-          </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <div role="group" aria-label="Filter by pillar" style={{ display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '4px' }}>
+          {[{ key: 'ALL', label: 'All pillars' }, ...PILLARS.map((p) => ({ key: p, label: PILLAR_LABELS[p] }))].map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              className="pillar-tab-pill"
+              aria-pressed={selectedPillar === tab.key}
+              onClick={() => setSelectedPillar(tab.key)}
+              style={{ minHeight: '40px', flexShrink: 0 }}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
 
-          {/* Severity Filter */}
-          <select
-            className="form-control"
-            style={{ width: '180px' }}
-            value={selectedSeverity}
-            onChange={(e) => setSelectedSeverity(e.target.value)}
-          >
-            <option value="ALL">All Severities</option>
-            <option value="CRITICAL">Critical (24h SLA)</option>
-            <option value="MAJOR">Major (3d SLA)</option>
-            <option value="MODERATE">Moderate (7d SLA)</option>
-            <option value="MINOR">Minor (15d SLA)</option>
-            <option value="KAIZEN_OPPORTUNITY">Kaizen Practice</option>
+        <FilterBar label="Filter observations">
+          <SearchInput label="Search observations" placeholder="Search code, title, description or location" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
+          <select aria-label="Severity" className="form-select" value={selectedSeverity} onChange={(e) => setSelectedSeverity(e.target.value)}>
+            <option value="ALL">All severities</option>
+            {Object.entries(SEVERITY_LABELS).map(([code, label]) => (
+              <option key={code} value={code}>
+                {label}
+              </option>
+            ))}
           </select>
-
-          {/* Status Filter */}
-          <select
-            className="form-control"
-            style={{ width: '180px' }}
-            value={selectedStatus}
-            onChange={(e) => setSelectedStatus(e.target.value)}
-          >
-            <option value="ALL">All Statuses</option>
-            <option value="OPEN">Open</option>
-            <option value="ACTION_ASSIGNED">Action Assigned</option>
-            <option value="IN_PROGRESS">In Remediation</option>
-            <option value="PENDING_VERIFICATION">Pending Verification</option>
-            <option value="CLOSED">Resolved & Verified</option>
+          <select aria-label="Status" className="form-select" value={selectedStatus} onChange={(e) => setSelectedStatus(e.target.value)}>
+            <option value="ALL">All statuses</option>
+            {Object.entries(OBSERVATION_STATUS_LABELS).map(([code, label]) => (
+              <option key={code} value={code}>
+                {label}
+              </option>
+            ))}
           </select>
-
-          {/* Location Filter */}
-          <select
-            className="form-control"
-            style={{ width: '220px' }}
-            value={selectedLocationId}
-            onChange={(e) => setSelectedLocationId(e.target.value)}
-          >
-            <option value="ALL">All Workstations</option>
+          <select aria-label="Location" className="form-select" value={selectedLocationId} onChange={(e) => setSelectedLocationId(e.target.value)}>
+            <option value="ALL">All locations</option>
             {locations.map((l) => (
               <option key={l.id} value={l.id}>
                 {l.areaCode} — {l.name}
               </option>
             ))}
           </select>
-        </div>
-      </Card>
+        </FilterBar>
+      </div>
 
-      {/* Observations Grid */}
-      {filteredObservations.length === 0 ? (
-        <Card>
-          <div style={{ textAlign: 'center', padding: '40px 0' }}>
-            <AlertTriangle size={36} color="var(--text-tertiary)" style={{ marginBottom: '12px' }} />
-            <h3 style={{ fontSize: '16px', fontWeight: 700, margin: '0 0 6px 0' }}>No Observations Found</h3>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0 }}>
-              No non-conformance records match your active search filters.
-            </p>
-          </div>
-        </Card>
+      {loading ? (
+        <LoadingState label="Loading observations…" />
+      ) : error ? (
+        <ErrorState message={error} onRetry={loadFirstPage} />
+      ) : observations.length === 0 ? (
+        <EmptyState
+          title={filtersActive ? 'No observations match these filters' : 'No observations yet'}
+          description={filtersActive ? 'Change or clear the filters to see more.' : 'Observations logged on the shop floor or raised by audits appear here.'}
+        />
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '18px' }}>
-          {filteredObservations.map((obs) => (
-            <Card key={obs.id} noPadding>
-              <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                {/* Photo Header */}
-                <div style={{ position: 'relative' }}>
-                  <ImageWithFallback
-                    src={
-                      obs.annotatedPhotoUrl ||
-                      obs.beforePhotoUrl ||
-                      (obs.category === 'S6_SAFETY'
-                        ? FIVE_S_IMAGES.standards.fireSafetyBlocked
-                        : obs.category === 'S3_SHINE'
-                        ? FIVE_S_IMAGES.standards.oilLeakDefect
-                        : obs.category === 'S2_SET_IN_ORDER'
-                        ? FIVE_S_IMAGES.standards.shadowBoardClutter
-                        : FIVE_S_IMAGES.defects.clutteredUnderBench)
-                    }
-                    category={obs.category}
-                    height="185px"
-                    allowZoom={true}
-                    alt={obs.title}
-                  />
-                  <div
-                    style={{
-                      position: 'absolute',
-                      top: '10px',
-                      left: '10px',
-                      display: 'flex',
-                      gap: '6px',
-                      zIndex: 2,
-                      pointerEvents: 'none',
-                    }}
-                  >
-                    {getSeverityBadge(obs.severity)}
-                  </div>
-                </div>
-
-                {/* Body Content */}
-                <div style={{ padding: '18px 20px', flex: 1, display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--color-primary)' }}>
-                      {obs.observationCode}
-                    </span>
-                    {getStatusBadge(obs.status)}
-                  </div>
-
-                  <h3 style={{ fontSize: '15px', fontWeight: 700, margin: 0, color: 'var(--text-primary)', lineHeight: '1.3' }}>
-                    {obs.title}
-                  </h3>
-
-                  <p
-                    style={{
-                      fontSize: '13px',
-                      color: 'var(--text-secondary)',
-                      margin: 0,
-                      lineHeight: '1.4',
-                      display: '-webkit-box',
-                      WebkitLineClamp: 3,
-                      WebkitBoxOrient: 'vertical',
-                      overflow: 'hidden',
-                    }}
-                  >
-                    {obs.description}
-                  </p>
-
-                  <div style={{ marginTop: 'auto', paddingTop: '10px', borderTop: '1px solid var(--border-subtle)', display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '12px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)' }}>
-                      <MapPin size={13} style={{ color: 'var(--color-primary)' }} />
-                      <span>{obs.location?.name || 'Shop Floor Area'}</span>
-                    </div>
-
-                    {obs.correctiveAction && (
-                      <div
-                        onClick={() => navigate('/capa')}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          padding: '6px 10px',
-                          borderRadius: 'var(--radius-sm)',
-                          background: 'var(--color-primary-subtle)',
-                          color: 'var(--color-primary)',
-                          cursor: 'pointer',
-                          fontWeight: 600,
-                          fontSize: '11px',
-                          marginTop: '4px',
-                        }}
-                      >
-                        <span>Linked CAPA: {obs.correctiveAction.actionCode}</span>
-                        <ArrowUpRight size={14} />
+        <>
+          <ul className="grid-auto" style={{ ['--min' as string]: '300px', gap: '16px', listStyle: 'none', margin: 0, padding: 0 } as React.CSSProperties}>
+            {observations.map((obs) => {
+              const due = actionDue(obs);
+              return (
+                <li key={obs.id} id={`observation-${obs.id}`} style={{ minWidth: 0 }}>
+                  <Card noPadding style={{ height: '100%', ...(obs.id === detailId ? { outline: '2px solid var(--color-primary)', outlineOffset: '2px' } : {}) }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+                      <ImageWithFallback
+                        src={obs.annotatedPhotoUrl || obs.beforePhotoUrl}
+                        height="170px"
+                        alt={`Photo of ${obs.title}`}
+                        containerStyle={{ borderRadius: 0, border: 'none', borderBottom: '1px solid var(--border-subtle)' }}
+                      />
+                      <div style={{ padding: '16px', flex: 1, display: 'flex', flexDirection: 'column', gap: '8px', minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                          <span className="code-tag" style={ellipsis} title={obs.observationCode}>
+                            {obs.observationCode}
+                          </span>
+                          <Badge variant={observationStatusVariant(obs.status)}>{observationStatusLabel(obs.status)}</Badge>
+                        </div>
+                        <h2 style={{ fontSize: '16px', fontWeight: 600, margin: 0, lineHeight: 1.35, minWidth: 0 }}>
+                          <button
+                            type="button"
+                            onClick={() => openDetail(obs.id)}
+                            title={obs.title}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              padding: 0,
+                              textAlign: 'left',
+                              color: 'var(--text-primary)',
+                              font: 'inherit',
+                              cursor: 'pointer',
+                              display: '-webkit-box',
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: 'vertical',
+                              overflow: 'hidden',
+                              overflowWrap: 'anywhere',
+                            }}
+                          >
+                            {obs.title}
+                          </button>
+                        </h2>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          <Badge variant={severityVariant(obs.severity)}>{severityLabel(obs.severity)}</Badge>
+                          <Badge variant="neutral">{pillarLabel(obs.category)}</Badge>
+                          {obs.isRepeat && (
+                            <Badge variant="warning" icon={<Repeat size={11} />}>
+                              Repeat
+                            </Badge>
+                          )}
+                        </div>
+                        <p
+                          style={{
+                            fontSize: '13px',
+                            color: 'var(--text-secondary)',
+                            margin: 0,
+                            lineHeight: 1.45,
+                            display: '-webkit-box',
+                            WebkitLineClamp: 3,
+                            WebkitBoxOrient: 'vertical',
+                            overflow: 'hidden',
+                            overflowWrap: 'anywhere',
+                          }}
+                        >
+                          {obs.description}
+                        </p>
+                        <div
+                          style={{
+                            marginTop: 'auto',
+                            paddingTop: '12px',
+                            borderTop: '1px solid var(--border-subtle)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '4px',
+                            fontSize: '12.5px',
+                            color: 'var(--text-secondary)',
+                            minWidth: 0,
+                          }}
+                        >
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                            <MapPin size={14} aria-hidden="true" style={{ flexShrink: 0 }} />
+                            <span style={ellipsis} title={obs.location?.name || undefined}>
+                              {obs.location?.name || '—'}
+                            </span>
+                          </span>
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <CalendarDays size={14} aria-hidden="true" style={{ flexShrink: 0 }} />
+                            Logged {formatDate(obs.createdAt)}
+                          </span>
+                          {obs.correctiveAction && (
+                            <span style={{ overflowWrap: 'anywhere' }}>
+                              Action {obs.correctiveAction.actionCode}: {actionStatusLabel(obs.correctiveAction.status)}
+                              {due ? ` · ${due}` : ''}
+                            </span>
+                          )}
+                        </div>
+                        <Button variant="secondary" size="sm" onClick={() => openDetail(obs.id)} aria-label={`View ${obs.observationCode}`} style={{ width: '100%' }}>
+                          View details
+                        </Button>
                       </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
-      )}
-
-      {/* Modal: Create New Abnormality */}
-      <Modal
-        isOpen={createDrawerOpen}
-        onClose={() => setCreateDrawerOpen(false)}
-        title="Log Shop-Floor Abnormality / Observation"
-        subtitle="Capture workstation defects, safety hazards, and kaizen opportunities"
-        maxWidth="640px"
-      >
-        <form onSubmit={handleCreateObservation} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div className="form-group">
-            <label className="form-label">Target Workstation / Area *</label>
-            <select
-              className="form-control"
-              value={newObs.locationId}
-              onChange={(e) => setNewObs({ ...newObs, locationId: e.target.value })}
-              required
-            >
-              {locations.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.areaCode} — {l.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-            <div className="form-group">
-              <label className="form-label">5S Pillar Category *</label>
-              <select
-                className="form-control"
-                value={newObs.category}
-                onChange={(e) => setNewObs({ ...newObs, category: e.target.value })}
-              >
-                <option value="S1_SORT">1S - Sort</option>
-                <option value="S2_SET_IN_ORDER">2S - Set in Order</option>
-                <option value="S3_SHINE">3S - Shine</option>
-                <option value="S4_STANDARDIZE">4S - Standardize</option>
-                <option value="S5_SUSTAIN">5S - Sustain</option>
-                <option value="S6_SAFETY">6S - Safety</option>
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label className="form-label">Severity & SLA *</label>
-              <select
-                className="form-control"
-                value={newObs.severity}
-                onChange={(e) => setNewObs({ ...newObs, severity: e.target.value })}
-              >
-                <option value="CRITICAL">Critical (24 Hours SLA)</option>
-                <option value="MAJOR">Major (3 Days SLA)</option>
-                <option value="MODERATE">Moderate (7 Days SLA)</option>
-                <option value="MINOR">Minor (15 Days SLA)</option>
-                <option value="KAIZEN_OPPORTUNITY">Kaizen Innovation</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Observation Title *</label>
-            <input
-              type="text"
-              className="form-control"
-              placeholder="e.g. Broken Tool Fixture Left Near Assembly Conveyor"
-              value={newObs.title}
-              onChange={(e) => setNewObs({ ...newObs, title: e.target.value })}
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Detailed Description *</label>
-            <textarea
-              rows={3}
-              className="form-control"
-              placeholder="Describe what was observed, condition of equipment, exact location coordinates..."
-              value={newObs.description}
-              onChange={(e) => setNewObs({ ...newObs, description: e.target.value })}
-              required
-            />
-          </div>
-
-          <div className="form-group">
-            <label className="form-label">Risk & Safety Assessment</label>
-            <input
-              type="text"
-              className="form-control"
-              placeholder="e.g. High slip and tripping hazard for shift operators"
-              value={newObs.riskAssessment}
-              onChange={(e) => setNewObs({ ...newObs, riskAssessment: e.target.value })}
-            />
-          </div>
-
-          {/* Photo Evidence Section */}
-          <div className="form-group">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-              <label className="form-label" style={{ margin: 0 }}>
-                Photo Evidence & Callouts
-              </label>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                icon={<Camera size={14} />}
-                onClick={() => setAnnotationModalOpen(true)}
-              >
-                Open Annotation Canvas
+                    </div>
+                  </Card>
+                </li>
+              );
+            })}
+          </ul>
+          {hasMore && (
+            <div style={{ display: 'flex', justifyContent: 'center' }}>
+              <Button variant="secondary" onClick={loadMore} loading={loadingMore}>
+                Show more
               </Button>
             </div>
+          )}
+        </>
+      )}
 
-            {newObs.beforePhotoUrl ? (
-              <div style={{ position: 'relative', width: '100%', height: '160px', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border-subtle)' }}>
-                <ImageWithFallback src={newObs.beforePhotoUrl} category={newObs.category} height="160px" alt="Preview" />
-              </div>
-            ) : (
-              <div
-                onClick={() => setAnnotationModalOpen(true)}
-                style={{
-                  padding: '24px',
-                  borderRadius: 'var(--radius-md)',
-                  border: '2px dashed var(--border-subtle)',
-                  background: 'var(--bg-surface-subtle)',
-                  textAlign: 'center',
-                  cursor: 'pointer',
-                }}
-              >
-                <Camera size={24} color="var(--text-tertiary)" style={{ marginBottom: '6px' }} />
-                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                  Click to capture photo & annotate defect markers
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '16px' }}>
-            <Button type="button" variant="secondary" onClick={() => setCreateDrawerOpen(false)}>
+      <Modal
+        isOpen={createOpen}
+        onClose={() => setCreateOpen(false)}
+        title={relabel('Log observation')}
+        subtitle="Record a problem, hazard or improvement idea."
+        maxWidth="640px"
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', width: '100%', flexWrap: 'wrap' }}>
+            <Button type="button" variant="secondary" onClick={() => setCreateOpen(false)}>
               Cancel
             </Button>
-            <Button type="submit" variant="primary" icon={<Plus size={16} />}>
-              Save & Queue CAPA
+            <Button type="submit" form="create-observation-form" variant="primary" icon={<Plus size={16} />} loading={creating}>
+              {relabel('Log observation')}
             </Button>
+          </div>
+        }
+      >
+        <form id="create-observation-form" onSubmit={handleCreateObservation} noValidate style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <FormField label="Location" required error={createTried && !newObs.locationId ? 'Choose a location.' : undefined} style={{ margin: 0 }}>
+            {(control) => (
+              <select {...control} className="form-select" value={newObs.locationId} onChange={(e) => setNewObs({ ...newObs, locationId: e.target.value })}>
+                {locations.length === 0 && <option value="">No locations available</option>}
+                {locations.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.areaCode} — {l.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </FormField>
+
+          <div className="grid-auto" style={{ ['--min' as string]: '200px', gap: '16px' } as React.CSSProperties}>
+            <FormField label="Pillar" required style={{ margin: 0 }}>
+              {(control) => (
+                <select {...control} className="form-select" value={newObs.category} onChange={(e) => setNewObs({ ...newObs, category: e.target.value })}>
+                  {PILLARS.map((p) => (
+                    <option key={p} value={p}>
+                      {PILLAR_LABELS[p]}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+            <FormField label="Severity" required hint={severityHint ?? undefined} style={{ margin: 0 }}>
+              {(control) => (
+                <select {...control} className="form-select" value={newObs.severity} onChange={(e) => setNewObs({ ...newObs, severity: e.target.value })}>
+                  {Object.entries(SEVERITY_LABELS).map(([code, label]) => (
+                    <option key={code} value={code}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </FormField>
+          </div>
+
+          <FormField label="Title" required error={createTried && !newObs.title.trim() ? 'Enter a title.' : undefined} style={{ margin: 0 }}>
+            {(control) => (
+              <input
+                {...control}
+                type="text"
+                className="form-input"
+                placeholder="e.g. Broken fixture left next to the conveyor"
+                value={newObs.title}
+                onChange={(e) => setNewObs({ ...newObs, title: e.target.value })}
+              />
+            )}
+          </FormField>
+
+          <DuplicateChecking active={duplicateCheck.loading} />
+          <DuplicateNotice matches={duplicateCheck.matches} description="open observations at this location" />
+
+          <FormField label="Description" required error={createTried && !newObs.description.trim() ? 'Enter a description.' : undefined} style={{ margin: 0 }}>
+            {(control) => (
+              <textarea
+                {...control}
+                rows={3}
+                className="form-textarea"
+                placeholder="What did you see, and exactly where?"
+                value={newObs.description}
+                onChange={(e) => setNewObs({ ...newObs, description: e.target.value })}
+              />
+            )}
+          </FormField>
+
+          <FormField label="Risk assessment" style={{ margin: 0 }}>
+            {(control) => (
+              <input
+                {...control}
+                type="text"
+                className="form-input"
+                placeholder="e.g. Trip hazard for operators on the night shift"
+                value={newObs.riskAssessment}
+                onChange={(e) => setNewObs({ ...newObs, riskAssessment: e.target.value })}
+              />
+            )}
+          </FormField>
+
+          <div>
+            <div className="form-label">Photo</div>
+            {photo ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <ImageWithFallback src={photo.annotatedDataUrl} height="180px" alt="Photo to attach to the observation" style={{ objectFit: 'contain' }} />
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <Button type="button" variant="secondary" size="sm" icon={<Camera size={16} />} onClick={() => setAnnotationOpen(true)}>
+                    Replace photo
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" icon={<Trash2 size={16} />} onClick={() => setPhoto(null)}>
+                    Remove photo
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button type="button" variant="outline" icon={<Camera size={16} />} onClick={() => setAnnotationOpen(true)}>
+                Add photo
+              </Button>
+            )}
           </div>
         </form>
       </Modal>
 
-      {/* Photo Annotation Modal */}
       <PhotoAnnotationModal
-        isOpen={annotationModalOpen}
-        onClose={() => setAnnotationModalOpen(false)}
-        initialPhotoUrl={FIVE_S_IMAGES.defects.clutteredUnderBench}
-        onSave={(dataUrl) => {
-          setNewObs((prev) => ({ ...prev, beforePhotoUrl: dataUrl }));
-        }}
+        isOpen={annotationOpen}
+        onClose={() => setAnnotationOpen(false)}
+        title="Observation photo"
+        onSave={(_url, _shapes, result) => setPhoto({ originalDataUrl: result.originalDataUrl, annotatedDataUrl: result.annotatedDataUrl, annotations: result.annotations })}
       />
 
-      {/* Zoom Photo Modal */}
-      {zoomedPhotoUrl && (
-        <Modal isOpen={Boolean(zoomedPhotoUrl)} onClose={() => setZoomedPhotoUrl(null)} title="Photo Evidence Details" maxWidth="800px">
-          <div style={{ width: '100%', maxHeight: '550px', overflow: 'hidden', borderRadius: 'var(--radius-md)', display: 'flex', justifyContent: 'center' }}>
-            <img src={zoomedPhotoUrl} alt="Zoomed" style={{ maxWidth: '100%', maxHeight: '550px', objectFit: 'contain' }} />
-          </div>
-        </Modal>
-      )}
+      <ObservationDetailModal
+        observationId={detailId}
+        onClose={closeDetail}
+        onChanged={(updated) => {
+          setObservations((prev) => prev.map((o) => (o.id === updated.id ? { ...o, ...updated } : o)));
+          loadSummary();
+        }}
+        onDeleted={(id) => {
+          setObservations((prev) => prev.filter((o) => o.id !== id));
+          closeDetail();
+          loadSummary();
+        }}
+      />
     </div>
   );
 };

@@ -1,27 +1,36 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Headers } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
+import { RoleGroups } from '../../core/guards/role-groups';
+import { TenantId, CurrentUserId } from '../../core/auth/current-user.decorator';
+import { ApiBearerAuth, ApiTags, ApiOperation } from '@nestjs/swagger';
 import { AuditTemplatesService } from './audit-templates.service';
-import { CreateTemplateDto, CreateSectionDto, CreateQuestionDto, PublishVersionDto } from './dto/audit-template.dto';
+import {
+  CreateTemplateDto,
+  CreateSectionDto,
+  CreateQuestionDto,
+  PublishVersionDto,
+  UpdateTemplateDto,
+  CloneTemplateDto,
+  UpdateSectionDto,
+  UpdateQuestionDto,
+  ReorderQuestionsDto,
+} from './dto/audit-template.dto';
 import { Roles } from '../../core/guards/roles.decorator';
 
-@ApiTags('Audit Template Builder Engine')
+@ApiTags('Audit templates')
+@ApiBearerAuth()
 @Controller('api/v1/audit-templates')
 export class AuditTemplatesController {
   constructor(private readonly templatesService: AuditTemplatesService) {}
 
-  private extractTenantId(tenantHeader?: string): string {
-    return tenantHeader || 'default-tenant-skilglobal';
-  }
-
   @Get()
   @ApiOperation({ summary: 'List all audit templates with version count and category models' })
   getTemplates(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Query('auditType') auditType?: string,
     @Query('status') status?: string,
     @Query('search') search?: string,
   ) {
-    return this.templatesService.getTemplates(this.extractTenantId(tenantId), {
+    return this.templatesService.getTemplates(tenantId, {
       auditType,
       status,
       search,
@@ -30,112 +39,139 @@ export class AuditTemplatesController {
 
   @Get(':id')
   @ApiOperation({ summary: 'Get template details with sections and questions across all 11 types' })
-  getTemplateById(@Headers('x-tenant-id') tenantId: string, @Param('id') id: string) {
-    return this.templatesService.getTemplateById(this.extractTenantId(tenantId), id);
+  getTemplateById(@TenantId() tenantId: string, @Param('id') id: string) {
+    return this.templatesService.getTemplateById(tenantId, id);
   }
 
   @Post()
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
-  @ApiOperation({ summary: 'Create a new audit template with initial version 1.0' })
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
+  @ApiOperation({ summary: 'Create a new audit template with an editable draft version 1.0' })
   createTemplate(
-    @Headers('x-tenant-id') tenantId: string,
-    @Headers('x-user-id') userId: string,
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
     @Body() dto: CreateTemplateDto,
   ) {
-    return this.templatesService.createTemplate(this.extractTenantId(tenantId), dto, userId);
+    return this.templatesService.createTemplate(tenantId, dto, userId);
+  }
+
+  @Post(':id/versions')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
+  @ApiOperation({ summary: 'Create a new draft version copied from the latest version (409 while a draft exists)' })
+  createVersion(@TenantId() tenantId: string, @Param('id') templateId: string) {
+    return this.templatesService.createVersion(tenantId, templateId);
   }
 
   @Post(':id/versions/:versionId/sections')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Add a 5S category section to template version' })
   addSection(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
+    @Param('id') templateId: string,
     @Param('versionId') versionId: string,
     @Body() dto: CreateSectionDto,
   ) {
-    return this.templatesService.addSection(this.extractTenantId(tenantId), versionId, dto);
+    return this.templatesService.addSection(tenantId, templateId, versionId, dto);
   }
 
   @Post('sections/:sectionId/questions')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Add question with type, weightage, severity, and critical safety caps' })
   addQuestion(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Param('sectionId') sectionId: string,
     @Body() dto: CreateQuestionDto,
   ) {
-    return this.templatesService.addQuestion(this.extractTenantId(tenantId), sectionId, dto);
+    return this.templatesService.addQuestion(tenantId, sectionId, dto);
+  }
+
+  @Post('sections/:sectionId/questions/reorder')
+  @HttpCode(HttpStatus.OK)
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
+  @ApiOperation({ summary: 'Reorder the questions of a draft section (send every question id in the new order)' })
+  reorderQuestions(
+    @TenantId() tenantId: string,
+    @Param('sectionId') sectionId: string,
+    @Body() dto: ReorderQuestionsDto,
+  ) {
+    return this.templatesService.reorderQuestions(tenantId, sectionId, dto.questionIds);
   }
 
   @Post(':id/versions/:versionId/publish')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
-  @ApiOperation({ summary: 'Publish and lock immutable template version snapshot' })
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
+  @ApiOperation({ summary: 'Publish a draft version; published versions can no longer be edited' })
   publishVersion(
-    @Headers('x-tenant-id') tenantId: string,
-    @Headers('x-user-id') userId: string,
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
     @Param('id') templateId: string,
     @Param('versionId') versionId: string,
     @Body() dto: PublishVersionDto,
   ) {
-    return this.templatesService.publishVersion(this.extractTenantId(tenantId), templateId, versionId, dto, userId);
+    return this.templatesService.publishVersion(tenantId, templateId, versionId, dto, userId);
   }
 
   @Patch(':id')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Update audit template metadata and scoring models' })
   updateTemplate(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Param('id') id: string,
-    @Body() data: any,
+    @Body() data: UpdateTemplateDto,
   ) {
-    return this.templatesService.updateTemplate(this.extractTenantId(tenantId), id, data);
+    return this.templatesService.updateTemplate(tenantId, id, data);
   }
 
   @Post(':id/clone')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Clone template into a new editable template' })
   cloneTemplate(
-    @Headers('x-tenant-id') tenantId: string,
-    @Headers('x-user-id') userId: string,
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
     @Param('id') id: string,
-    @Body() body: { code: string; name?: string },
+    @Body() body: CloneTemplateDto,
   ) {
-    return this.templatesService.cloneTemplate(this.extractTenantId(tenantId), id, body.code, body.name, userId);
+    return this.templatesService.cloneTemplate(tenantId, id, body.code, body.name, userId);
   }
 
   @Patch('sections/:sectionId')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Update template section metadata or sort order' })
   updateSection(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Param('sectionId') sectionId: string,
-    @Body() data: any,
+    @Body() data: UpdateSectionDto,
   ) {
-    return this.templatesService.updateSection(this.extractTenantId(tenantId), sectionId, data);
+    return this.templatesService.updateSection(tenantId, sectionId, data);
+  }
+
+  @Delete('sections/:sectionId')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
+  @ApiOperation({ summary: 'Delete a section and its questions from a draft version' })
+  deleteSection(@TenantId() tenantId: string, @Param('sectionId') sectionId: string) {
+    return this.templatesService.deleteSection(tenantId, sectionId);
   }
 
   @Patch('questions/:questionId')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Update template question config' })
   updateQuestion(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Param('questionId') questionId: string,
-    @Body() dto: any,
+    @Body() dto: UpdateQuestionDto,
   ) {
-    return this.templatesService.updateQuestion(this.extractTenantId(tenantId), questionId, dto);
+    return this.templatesService.updateQuestion(tenantId, questionId, dto);
   }
 
   @Delete('questions/:questionId')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Delete question' })
-  deleteQuestion(@Headers('x-tenant-id') tenantId: string, @Param('questionId') questionId: string) {
-    return this.templatesService.deleteQuestion(this.extractTenantId(tenantId), questionId);
+  deleteQuestion(@TenantId() tenantId: string, @Param('questionId') questionId: string) {
+    return this.templatesService.deleteQuestion(tenantId, questionId);
   }
 
   @Delete(':id')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Delete template' })
-  deleteTemplate(@Headers('x-tenant-id') tenantId: string, @Param('id') id: string) {
-    return this.templatesService.deleteTemplate(this.extractTenantId(tenantId), id);
+  deleteTemplate(@TenantId() tenantId: string, @CurrentUserId() actorId: string, @Param('id') id: string) {
+    return this.templatesService.deleteTemplate(tenantId, id, actorId);
   }
 }

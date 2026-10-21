@@ -1,9 +1,12 @@
-import { IsString, IsOptional, IsNumber, IsBoolean } from 'class-validator';
+import { IsString, IsOptional, IsNumber, IsBoolean, IsIn, IsDateString, Min, IsNotEmpty, MaxLength } from 'class-validator';
+import { values } from '../../../core/validation/domain-values';
+import { EmptyToUndefined } from '../../../core/validation/transforms';
 
 export class CreateRedTagDto {
   @IsString()
   locationId: string;
 
+  @EmptyToUndefined()
   @IsOptional()
   @IsString()
   targetHoldingAreaId?: string;
@@ -16,18 +19,22 @@ export class CreateRedTagDto {
   itemDescription?: string;
 
   @IsString()
-  category: string; // UNNEEDED_TOOL, SURPLUS_INVENTORY, BROKEN_EQUIPMENT, SCRAP_WASTE, UNLABELLED_MATERIAL, EXPIRED_ITEM, OTHER
+  @IsIn(values('RED_TAG_CATEGORIES'))
+  category: string;
 
   @IsOptional()
   @IsNumber()
+  @Min(1)
   quantity?: number;
 
   @IsOptional()
   @IsString()
-  unitOfMeasure?: string; // PCS, KG, BOXES, PALLETS, SETS
+  @IsIn(values('UNITS_OF_MEASURE'))
+  unitOfMeasure?: string;
 
   @IsOptional()
   @IsNumber()
+  @Min(0)
   estimatedValue?: number;
 
   @IsString()
@@ -37,8 +44,9 @@ export class CreateRedTagDto {
   @IsString()
   photoUrl?: string;
 
+  @EmptyToUndefined()
   @IsOptional()
-  @IsString()
+  @IsDateString()
   targetDispositionDate?: string;
 }
 
@@ -53,36 +61,43 @@ export class UpdateRedTagDto {
 
   @IsOptional()
   @IsString()
+  @IsIn(values('RED_TAG_CATEGORIES'))
   category?: string;
 
   @IsOptional()
   @IsNumber()
+  @Min(1)
   quantity?: number;
 
   @IsOptional()
   @IsString()
+  @IsIn(values('UNITS_OF_MEASURE'))
   unitOfMeasure?: string;
 
   @IsOptional()
   @IsNumber()
+  @Min(0)
   estimatedValue?: number;
 
   @IsOptional()
   @IsString()
-  status?: string; // RED_TAGGED, IN_HOLDING_AREA, PENDING_DISPOSITION, DISPOSITION_APPROVED, DISPOSED, RETURNED, CANCELLED
+  @IsIn(values('RED_TAG_STATUSES'))
+  status?: string;
 
   @IsOptional()
   @IsString()
   targetHoldingAreaId?: string;
 
+  @EmptyToUndefined()
   @IsOptional()
-  @IsString()
+  @IsDateString()
   targetDispositionDate?: string;
 }
 
 export class SubmitDispositionDto {
   @IsString()
-  dispositionAction: string; // DISPOSE_SCRAP, RELOCATE, RETURN_TO_VENDOR, AUCTION_SELL, REPAIR_RESTORE, KEEP_JUSTIFIED
+  @IsIn(values('DISPOSITION_ACTIONS'))
+  dispositionAction: string;
 
   @IsString()
   dispositionJustification: string;
@@ -90,22 +105,42 @@ export class SubmitDispositionDto {
   @IsOptional()
   @IsBoolean()
   supervisorApproved?: boolean;
+}
 
-  @IsOptional()
+/** POST /red-tags/:id/move-to-holding — the item was moved to a red-tag holding area. */
+export class MoveToHoldingDto {
   @IsString()
-  supervisorName?: string;
+  @IsNotEmpty()
+  holdingAreaId: string;
+}
+
+/** POST /red-tags/:id/disposition/reject — a supervisor rejects the proposed decision; the reason is kept on the tag. */
+export class RejectDispositionDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(1000)
+  reason: string;
 }
 
 export class CloseRedTagDto {
+  /**
+   * What was actually done with the item, when it differs from the approved decision (e.g. approved for sale,
+   * finally scrapped). Decides whether the tag ends as disposed or returned, and whether a photo is required.
+   */
+  @EmptyToUndefined()
+  @IsOptional()
+  @IsString()
+  @IsIn(values('DISPOSITION_ACTIONS'))
+  actualDispositionAction?: string;
+
+  /** Required when the disposition disposes of the item (scrap, sale, return to vendor). */
+  @EmptyToUndefined()
   @IsOptional()
   @IsString()
   closurePhotoUrl?: string;
 
   @IsOptional()
   @IsNumber()
+  @Min(0)
   financialRecovered?: number;
-
-  @IsOptional()
-  @IsString()
-  notes?: string;
 }

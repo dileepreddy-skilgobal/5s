@@ -1,22 +1,81 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { ROLES } from '../../constants/roles';
 import { useNavigate } from 'react-router-dom';
-import { useApp } from '../../context/AppContext';
+import { useApp, getAvailableRoles } from '../../context/AppContext';
 import {
   Building2,
   ChevronDown,
   Sun,
   Moon,
-  Shield,
-  Bell,
-  Search,
   Check,
-  UserCheck,
   LogOut,
-  User as UserIcon,
   BadgeCheck,
+  ShieldCheck,
+  ShieldAlert,
+  Languages,
+  Menu,
 } from 'lucide-react';
+import { NotificationBell } from './NotificationBell';
+import { GlobalSearch } from './GlobalSearch';
+import { LOCALE_OPTIONS, useI18n } from '../../i18n';
 
-export const TopNavbar: React.FC = () => {
+/** Closes a dropdown on outside click or Escape (Escape also returns focus to its trigger). */
+const useDismiss = (
+  open: boolean,
+  close: () => void,
+  wrapperRef: React.RefObject<HTMLDivElement>,
+  triggerRef: React.RefObject<HTMLButtonElement>,
+) => {
+  useEffect(() => {
+    if (!open) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        close();
+        triggerRef.current?.focus();
+      }
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open, close, wrapperRef, triggerRef]);
+};
+
+/** True while the viewport is at most `px` wide (re-evaluated on resize). */
+const useMaxWidth = (px: number) => {
+  const query = `(max-width: ${px}px)`;
+  const [matches, setMatches] = useState(() => typeof window !== 'undefined' && window.matchMedia(query).matches);
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = () => setMatches(mql.matches);
+    onChange();
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, [query]);
+  return matches;
+};
+
+const menuItemStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '10px',
+  width: '100%',
+  padding: '8px 10px',
+  border: 'none',
+  borderRadius: 'var(--radius-sm)',
+  cursor: 'pointer',
+  fontSize: '13px',
+  textAlign: 'left',
+  fontFamily: 'inherit',
+};
+
+export const TopNavbar: React.FC<{ onMenuClick?: () => void }> = ({ onMenuClick }) => {
   const {
     currentTenant,
     tenants,
@@ -27,29 +86,46 @@ export const TopNavbar: React.FC = () => {
     setActiveUserRole,
     currentUser,
     logout,
+    mfaEnabled,
+    mfaEnrollmentRequired,
   } = useApp();
 
+  const { t, locale, userLocale, setLocale, savingLocale } = useI18n();
   const navigate = useNavigate();
   const [tenantDropdownOpen, setTenantDropdownOpen] = useState(false);
-  const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const tenantRef = useRef<HTMLDivElement>(null);
+  const tenantTriggerRef = useRef<HTMLButtonElement>(null);
+  const userRef = useRef<HTMLDivElement>(null);
+  const userTriggerRef = useRef<HTMLButtonElement>(null);
+  // Stable closers so the dismiss listeners are not re-registered on every render
+  const [closeTenant] = useState(() => () => setTenantDropdownOpen(false));
+  const [closeUser] = useState(() => () => setUserMenuOpen(false));
+  useDismiss(tenantDropdownOpen, closeTenant, tenantRef, tenantTriggerRef);
+  useDismiss(userMenuOpen, closeUser, userRef, userTriggerRef);
 
-  const roles = [
-    { code: 'SUPER_ADMIN', label: 'Super Admin (Vikram Malhotra)', color: '#ef4444', path: '/super-admin', subtitle: 'Platform Governance & Tenants' },
-    { code: 'ORG_ADMIN', label: 'Org Admin (Pooja Sharma)', color: '#6366f1', path: '/organization', subtitle: 'Full Organization & Masters' },
-    { code: 'PLANT_HEAD', label: 'Plant Head (Rajesh Kumar)', color: '#3b82f6', path: '/analytics', subtitle: 'Plant KPIs & Heatmaps' },
-    { code: 'COORDINATOR_5S', label: '5S Coordinator (Sneha Reddy)', color: '#8b5cf6', path: '/schedules', subtitle: 'Schedules & Red Tag Hub' },
-    { code: 'AREA_OWNER', label: 'Area Owner (Arun Patel)', color: '#f59e0b', path: '/area-owner-hub', subtitle: 'Workstation Hub & Defect Rectification' },
-    { code: 'AUDITOR', label: 'Auditor (Amit Joshi)', color: '#10b981', path: '/auditor-hub', subtitle: 'Auditor Review & Desk Workspace' },
-    { code: 'DEPT_HEAD', label: 'Dept Head (Suresh Menon)', color: '#a855f7', path: '/locations', subtitle: 'RCA & CAPA Approvals' },
-  ];
+  const roles = ROLES.map((r) => ({ ...r, path: r.homePath }));
 
-  const availableRoles = roles;
+  // Only roles the signed-in user actually holds can be selected as a workspace view
+  const ownRoleCodes = currentUser ? getAvailableRoles(currentUser) : [];
+  const availableRoles = roles.filter((r) => ownRoleCodes.includes(r.code));
+  const canSwitchRole = availableRoles.length > 1;
+  const canSwitchTenant = currentUser?.isSuperAdmin === true && tenants.length > 0;
+  // The top-bar organization switcher is hidden on phones (styles: .topbar-tenant at 480px), so the profile menu offers it there
+  const tenantSwitchInProfileMenu = useMaxWidth(480) && canSwitchTenant;
 
   const handleLogout = () => {
+    setUserMenuOpen(false);
     logout();
     navigate('/login');
   };
+
+  // "SkilGlobal Precision Manufacturing Ltd" → "SP" (company suffixes ignored)
+  const orgInitials = (name?: string) => {
+    const words = (name || '').split(/\s+/).filter((w) => w && !/^(ltd|limited|inc|llc|pvt|plc|co|corp)\.?$/i.test(w));
+    return words.length ? words.slice(0, 2).map((w) => w[0]).join('').toUpperCase() : '5S';
+  };
+  const sentence = (value: string) => value.charAt(0) + value.slice(1).toLowerCase().replace(/_/g, ' ');
 
   const getInitials = (name?: string) => {
     if (!name) return '5S';
@@ -61,14 +137,15 @@ export const TopNavbar: React.FC = () => {
       .toUpperCase();
   };
 
-  const activeRoleObj = availableRoles.find((r) => r.code === activeUserRole) || availableRoles[0];
+  const activeRoleObj =
+    roles.find((r) => r.code === activeUserRole) ||
+    { code: activeUserRole, label: activeUserRole || t('topbar.user'), color: '#64748b', path: '/', subtitle: '' };
 
   const handleRoleChange = (roleItem: typeof roles[0]) => {
     setActiveUserRole(roleItem.code);
-    setRoleDropdownOpen(false);
+    setUserMenuOpen(false);
     navigate(roleItem.path);
   };
-
 
   return (
     <header
@@ -86,78 +163,56 @@ export const TopNavbar: React.FC = () => {
         zIndex: 100,
       }}
     >
-      {/* Left: Tenant Switcher & Global Search */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-        <div style={{ position: 'relative' }}>
+      {/* Left: menu button (narrow screens), Tenant Switcher & Global Search */}
+      <div className="topbar-group" style={{ display: 'flex', alignItems: 'center', gap: '16px', minWidth: 0 }}>
+        <button type="button" className="app-menu-button btn btn-ghost btn-sm" onClick={onMenuClick} aria-label={t('common.openMenu')}>
+          <Menu size={20} />
+        </button>
+        <div ref={tenantRef} className="topbar-tenant" style={{ position: 'relative', minWidth: 0 }}>
           <button
-            onClick={() => setTenantDropdownOpen(!tenantDropdownOpen)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '10px',
-              padding: '6px 12px',
-              background: 'var(--bg-surface-subtle)',
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-md)',
-              cursor: 'pointer',
-              color: 'var(--text-primary)',
-            }}
+            ref={tenantTriggerRef}
+            type="button"
+            onClick={() => canSwitchTenant && setTenantDropdownOpen(!tenantDropdownOpen)}
+            disabled={!canSwitchTenant}
+            title={currentTenant?.name}
+            aria-label={canSwitchTenant ? `${t('topbar.switchTenant')}: ${currentTenant?.name ?? t('topbar.selectTenant')}` : undefined}
+            aria-haspopup={canSwitchTenant ? 'menu' : undefined}
+            aria-expanded={canSwitchTenant ? tenantDropdownOpen : undefined}
+            className="topbar-org"
+            style={{ cursor: canSwitchTenant ? 'pointer' : 'default' }}
           >
-            {currentTenant?.logoUrl ? (
-              <div
-                style={{
-                  width: '24px',
-                  height: '24px',
-                  borderRadius: 'var(--radius-sm)',
-                  background: '#FFFFFF',
-                  border: '1px solid var(--border-subtle)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: '2px',
-                  overflow: 'hidden',
-                  flexShrink: 0,
-                }}
-              >
-                <img
-                  src={currentTenant.logoUrl}
-                  alt={currentTenant.name}
-                  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                />
-              </div>
-            ) : (
-              <Building2 size={16} color="var(--color-primary)" />
-            )}
-            <div style={{ textAlign: 'left' }}>
-              <div
-                style={{
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  color: 'var(--text-primary)',
-                  maxWidth: '200px',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
-              >
-                {currentTenant?.name || 'Select Tenant'}
-              </div>
-              <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', textTransform: 'uppercase' }}>
-                {currentTenant?.status || 'Tenant'}
-              </div>
-            </div>
-            <ChevronDown size={14} color="var(--text-tertiary)" />
+            {/* Organization mark: its logo, or its initials on a white tile */}
+            <span className="topbar-org-mark" aria-hidden="true">
+              {currentTenant?.logoUrl ? (
+                <img src={currentTenant.logoUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+              ) : (
+                orgInitials(currentTenant?.name)
+              )}
+            </span>
+            <span className="topbar-collapsible topbar-org-text">
+              <span className="topbar-org-name">{currentTenant?.name || t('topbar.selectTenant')}</span>
+              {/* Status only when it needs attention; an active organization is the normal case */}
+              {currentTenant?.status && currentTenant.status !== 'ACTIVE' && (
+                <span className={`topbar-org-status topbar-org-status-${currentTenant.status.toLowerCase()}`}>{sentence(currentTenant.status)}</span>
+              )}
+            </span>
+            {canSwitchTenant && <ChevronDown size={16} className="topbar-org-chevron" aria-hidden="true" />}
           </button>
 
-          {tenantDropdownOpen && (
+          {canSwitchTenant && tenantDropdownOpen && (
             <div
               className="animate-fade-in"
+              role="menu"
+              aria-label={t('topbar.switchTenant')}
               style={{
                 position: 'absolute',
                 top: '100%',
                 left: 0,
                 marginTop: '6px',
                 width: '300px',
+                maxWidth: 'calc(100vw - 32px)',
+                maxHeight: '60vh',
+                overflowY: 'auto',
                 background: 'var(--bg-surface)',
                 border: '1px solid var(--border-subtle)',
                 borderRadius: 'var(--radius-lg)',
@@ -175,212 +230,78 @@ export const TopNavbar: React.FC = () => {
                   textTransform: 'uppercase',
                 }}
               >
-                Switch Organization Tenant
+                {t('topbar.switchTenant')}
               </div>
-              {tenants.map((t) => (
-                <div
-                  key={t.id}
-                  onClick={() => {
-                    setCurrentTenant(t);
-                    setTenantDropdownOpen(false);
-                  }}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    padding: '8px 10px',
-                    borderRadius: 'var(--radius-sm)',
-                    cursor: 'pointer',
-                    background: currentTenant?.id === t.id ? 'var(--color-primary-light)' : 'transparent',
-                    color: currentTenant?.id === t.id ? 'var(--color-primary)' : 'var(--text-primary)',
-                    fontSize: '13px',
-                    gap: '10px',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', overflow: 'hidden' }}>
-                    {t.logoUrl ? (
-                      <div
-                        style={{
-                          width: '26px',
-                          height: '26px',
-                          borderRadius: 'var(--radius-sm)',
-                          background: '#FFFFFF',
-                          border: '1px solid var(--border-subtle)',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          padding: '2px',
-                          overflow: 'hidden',
-                          flexShrink: 0,
-                        }}
-                      >
-                        <img
-                          src={t.logoUrl}
-                          alt={t.name}
-                          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                        />
-                      </div>
-                    ) : (
-                      <Building2 size={16} color="var(--text-tertiary)" style={{ flexShrink: 0 }} />
-                    )}
-                    <div style={{ overflow: 'hidden' }}>
-                      <div style={{ fontWeight: 500, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{t.name}</div>
-                      <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>{t.industry}</div>
-                    </div>
-                  </div>
-                  {currentTenant?.id === t.id && <Check size={14} style={{ flexShrink: 0 }} />}
-                </div>
-              ))}
+              {tenants.map((tenant) => {
+                const selected = currentTenant?.id === tenant.id;
+                return (
+                  <button
+                    key={tenant.id}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={selected}
+                    onClick={() => {
+                      setCurrentTenant(tenant);
+                      setTenantDropdownOpen(false);
+                    }}
+                    style={{
+                      ...menuItemStyle,
+                      background: selected ? 'var(--color-primary-light)' : 'transparent',
+                      color: selected ? 'var(--color-primary)' : 'var(--text-primary)',
+                    }}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '10px', overflow: 'hidden', minWidth: 0 }}>
+                      {tenant.logoUrl ? (
+                        <span
+                          style={{
+                            width: '26px',
+                            height: '26px',
+                            borderRadius: 'var(--radius-sm)',
+                            background: '#FFFFFF',
+                            border: '1px solid var(--border-subtle)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            padding: '2px',
+                            overflow: 'hidden',
+                            flexShrink: 0,
+                          }}
+                        >
+                          <img src={tenant.logoUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                        </span>
+                      ) : (
+                        <Building2 size={16} color="var(--text-tertiary)" style={{ flexShrink: 0 }} aria-hidden="true" />
+                      )}
+                      <span style={{ overflow: 'hidden', minWidth: 0 }}>
+                        <span style={{ display: 'block', fontWeight: 500, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }} title={tenant.name}>
+                          {tenant.name}
+                        </span>
+                        {tenant.industry && <span style={{ display: 'block', fontSize: '11px', color: 'var(--text-tertiary)' }}>{tenant.industry}</span>}
+                      </span>
+                    </span>
+                    {selected && <Check size={14} style={{ flexShrink: 0 }} aria-hidden="true" />}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
 
-        {/* Global Search Bar */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            background: 'var(--bg-surface-subtle)',
-            border: '1px solid var(--border-subtle)',
-            borderRadius: 'var(--radius-md)',
-            padding: '6px 12px',
-            width: '280px',
-          }}
-        >
-          <Search size={14} color="var(--text-tertiary)" />
-          <input
-            type="text"
-            placeholder="Search areas, SOPs, users (Ctrl + K)..."
-            style={{
-              border: 'none',
-              background: 'transparent',
-              outline: 'none',
-              fontSize: '12px',
-              color: 'var(--text-primary)',
-              width: '100%',
-            }}
-          />
-        </div>
+        {/* Global search / command bar (Ctrl/Cmd+K) */}
+        <GlobalSearch />
       </div>
 
-      {/* Right: Role Persona Switcher, Theme Toggle, Profile Menu, Logout */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-        {/* Persona Switcher */}
-        <div style={{ position: 'relative' }}>
-          <button
-            onClick={() => setRoleDropdownOpen(!roleDropdownOpen)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '6px 12px',
-              background: 'var(--bg-surface-subtle)',
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-md)',
-              fontSize: '12px',
-              color: 'var(--text-primary)',
-              cursor: 'pointer',
-              fontWeight: 500,
-            }}
-          >
-            <div
-              style={{
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                background: activeRoleObj.color,
-                boxShadow: `0 0 6px ${activeRoleObj.color}`,
-              }}
-            />
-            <UserCheck size={14} color={activeRoleObj.color} />
-            <span>
-              Role: <strong>{activeRoleObj.label.split(' ')[0]}</strong>
-            </span>
-            <ChevronDown size={12} color="var(--text-tertiary)" />
-          </button>
-
-          {roleDropdownOpen && (
-            <div
-              className="animate-fade-in"
-              style={{
-                position: 'absolute',
-                top: '100%',
-                right: 0,
-                marginTop: '6px',
-                width: '280px',
-                background: 'var(--bg-surface)',
-                border: '1px solid var(--border-subtle)',
-                borderRadius: 'var(--radius-lg)',
-                boxShadow: 'var(--shadow-lg)',
-                zIndex: 200,
-                padding: '6px',
-              }}
-            >
-              <div
-                style={{
-                  padding: '6px 10px',
-                  fontSize: '11px',
-                  fontWeight: 600,
-                  color: 'var(--text-tertiary)',
-                  textTransform: 'uppercase',
-                  borderBottom: '1px solid var(--border-subtle)',
-                  marginBottom: '4px',
-                }}
-              >
-                Switch Role View & Workspace
-              </div>
-              {availableRoles.map((r) => (
-                <div
-                  key={r.code}
-                  onClick={() => handleRoleChange(r)}
-                  style={{
-                    padding: '8px 10px',
-                    borderRadius: 'var(--radius-sm)',
-                    cursor: 'pointer',
-                    fontSize: '12px',
-                    fontWeight: activeUserRole === r.code ? 600 : 400,
-                    background: activeUserRole === r.code ? 'rgba(37, 99, 235, 0.08)' : 'transparent',
-                    color: 'var(--text-primary)',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center',
-                    transition: 'all var(--transition-fast)',
-                  }}
-                  onMouseEnter={(e) => {
-                    if (activeUserRole !== r.code) e.currentTarget.style.background = 'var(--bg-surface-subtle)';
-                  }}
-                  onMouseLeave={(e) => {
-                    if (activeUserRole !== r.code) e.currentTarget.style.background = 'transparent';
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <div
-                      style={{
-                        width: '8px',
-                        height: '8px',
-                        borderRadius: '50%',
-                        background: r.color,
-                        flexShrink: 0,
-                      }}
-                    />
-                    <div>
-                      <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{r.label}</div>
-                      <div style={{ fontSize: '10.5px', color: 'var(--text-tertiary)' }}>{r.subtitle}</div>
-                    </div>
-                  </div>
-                  {activeUserRole === r.code && <Check size={14} color="var(--color-primary)" />}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
+      {/* Right: notifications, theme toggle, profile menu (role switching lives in the profile menu) */}
+      <div className="topbar-group" style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+        {/* Notifications */}
+        <NotificationBell />
 
         {/* Theme Toggle */}
         <button
+          type="button"
           onClick={toggleTheme}
-          title="Toggle Light/Dark Theme"
+          title={t('topbar.toggleTheme')}
+          aria-label={t('topbar.toggleTheme')}
           style={{
             background: 'var(--bg-surface-subtle)',
             border: '1px solid var(--border-subtle)',
@@ -397,9 +318,14 @@ export const TopNavbar: React.FC = () => {
         </button>
 
         {/* User Badge & Profile Menu */}
-        <div style={{ position: 'relative' }}>
+        <div ref={userRef} style={{ position: 'relative' }}>
           <button
+            ref={userTriggerRef}
+            type="button"
             onClick={() => setUserMenuOpen(!userMenuOpen)}
+            aria-label={currentUser?.fullName || t('topbar.user')}
+            aria-haspopup="menu"
+            aria-expanded={userMenuOpen}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -418,24 +344,25 @@ export const TopNavbar: React.FC = () => {
                 width: '32px',
                 height: '32px',
                 borderRadius: 'var(--radius-full)',
-                background: 'linear-gradient(135deg, var(--color-primary) 0%, #1d4ed8 100%)',
-                color: '#FFFFFF',
+                // On the blue band: white disc with brand-blue initials
+                background: '#FFFFFF',
+                color: 'var(--c-primary)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 fontWeight: 700,
                 fontSize: '12px',
-                boxShadow: '0 2px 4px rgba(37,99,235,0.2)',
+                flexShrink: 0,
               }}
             >
               {getInitials(currentUser?.fullName)}
             </div>
-            <div>
+            <div className="topbar-collapsible">
               <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.2 }}>
-                {currentUser?.fullName || 'Pooja Sharma'}
+                {currentUser?.fullName}
               </div>
               <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', lineHeight: 1.2 }}>
-                {currentUser?.jobTitle || 'Administrator'}
+                {currentUser?.jobTitle || activeRoleObj.label}
               </div>
             </div>
             <ChevronDown size={14} color="var(--text-tertiary)" />
@@ -444,12 +371,15 @@ export const TopNavbar: React.FC = () => {
           {userMenuOpen && (
             <div
               className="animate-fade-in"
+              role="menu"
+              aria-label={currentUser?.fullName || t('topbar.user')}
               style={{
                 position: 'absolute',
                 top: '100%',
                 right: 0,
                 marginTop: '8px',
                 width: '260px',
+                maxWidth: 'calc(100vw - 32px)',
                 background: 'var(--bg-surface)',
                 border: '1px solid var(--border-subtle)',
                 borderRadius: 'var(--radius-lg)',
@@ -461,12 +391,12 @@ export const TopNavbar: React.FC = () => {
               <div style={{ paddingBottom: '10px', borderBottom: '1px solid var(--border-subtle)', marginBottom: '8px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
                   <span style={{ fontWeight: 700, fontSize: '14px', color: 'var(--text-primary)' }}>
-                    {currentUser?.fullName || 'Pooja Sharma'}
+                    {currentUser?.fullName}
                   </span>
-                  <BadgeCheck size={16} color="var(--color-primary)" />
+                  <BadgeCheck size={16} color="var(--color-primary)" aria-hidden="true" />
                 </div>
                 <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                  {currentUser?.email || 'admin@skilglobal.com'}
+                  {currentUser?.email}
                 </div>
                 <div style={{ display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' }}>
                   <span
@@ -479,7 +409,7 @@ export const TopNavbar: React.FC = () => {
                       fontWeight: 600,
                     }}
                   >
-                    {currentUser?.roleCode || activeUserRole}
+                    {activeRoleObj.label}
                   </span>
                   {currentUser?.employeeId && (
                     <span
@@ -491,25 +421,207 @@ export const TopNavbar: React.FC = () => {
                         color: 'var(--text-secondary)',
                       }}
                     >
-                      ID: {currentUser.employeeId}
+                      {t('topbar.employeeId', { id: currentUser.employeeId })}
                     </span>
                   )}
                 </div>
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                <div
-                  style={{
-                    padding: '8px 10px',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: '12px',
-                    color: 'var(--text-tertiary)',
-                  }}
-                >
-                  Organization: <strong style={{ color: 'var(--text-primary)' }}>{currentTenant?.name}</strong>
+                {tenantSwitchInProfileMenu ? (
+                  <div role="group" aria-label={t('topbar.switchTenant')} style={{ padding: '4px 0 8px', borderBottom: '1px solid var(--border-subtle)', marginBottom: '4px' }}>
+                    <div style={{ padding: '4px 10px 6px', fontSize: '11px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase' }}>
+                      {t('topbar.switchTenant')}
+                    </div>
+                    <div style={{ maxHeight: '40vh', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      {tenants.map((tenant) => {
+                        const selected = currentTenant?.id === tenant.id;
+                        return (
+                          <button
+                            key={tenant.id}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={selected}
+                            onClick={() => {
+                              setCurrentTenant(tenant);
+                              setUserMenuOpen(false);
+                            }}
+                            style={{
+                              ...menuItemStyle,
+                              minHeight: '40px',
+                              background: selected ? 'var(--color-primary-light)' : 'transparent',
+                              color: selected ? 'var(--color-primary)' : 'var(--text-primary)',
+                            }}
+                          >
+                            <span style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden', minWidth: 0 }}>
+                              <Building2 size={15} color="var(--text-tertiary)" style={{ flexShrink: 0 }} aria-hidden="true" />
+                              <span style={{ fontWeight: 500, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }} title={tenant.name}>
+                                {tenant.name}
+                              </span>
+                            </span>
+                            {selected && <Check size={14} style={{ flexShrink: 0 }} aria-hidden="true" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: '12px',
+                      color: 'var(--text-tertiary)',
+                    }}
+                  >
+                    {t('topbar.organization')} <strong style={{ color: 'var(--text-primary)' }}>{currentTenant?.name}</strong>
+                  </div>
+                )}
+
+                {/* People with more than one role choose which role's view they work in */}
+                {canSwitchRole && (
+                  <div role="group" aria-label={t('topbar.switchView')} style={{ padding: '4px 0 8px', borderBottom: '1px solid var(--border-subtle)', marginBottom: '4px' }}>
+                    <div style={{ padding: '4px 10px 6px', fontSize: '12px', fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('topbar.switchView')}</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                      {availableRoles.map((r) => {
+                        const selected = activeUserRole === r.code;
+                        return (
+                          <button
+                            key={r.code}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={selected}
+                            onClick={() => handleRoleChange(r)}
+                            style={{
+                              ...menuItemStyle,
+                              minHeight: '40px',
+                              background: selected ? 'var(--color-primary-light)' : 'transparent',
+                              color: selected ? 'var(--color-primary)' : 'var(--text-primary)',
+                            }}
+                          >
+                            <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, textAlign: 'left' }}>
+                              <span style={{ fontWeight: selected ? 600 : 500 }}>{r.label}</span>
+                              <span style={{ fontSize: '11.5px', color: 'var(--text-tertiary)' }}>{r.subtitle}</span>
+                            </span>
+                            {selected && <Check size={14} style={{ flexShrink: 0 }} aria-hidden="true" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Language: saved to the user's profile (PATCH /auth/me/preferences); hidden while only one language is offered */}
+                {LOCALE_OPTIONS.length > 1 && (
+                <div style={{ padding: '4px 10px 8px' }}>
+                  <div
+                    id="topbar-language-label"
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', marginBottom: '6px' }}
+                  >
+                    <Languages size={13} /> {t('language.label')}
+                  </div>
+                  <div role="radiogroup" aria-labelledby="topbar-language-label" style={{ display: 'flex', gap: '6px' }}>
+                    {LOCALE_OPTIONS.map((opt) => {
+                      const active = locale === opt.code;
+                      return (
+                        <button
+                          key={opt.code}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          lang={opt.code}
+                          disabled={savingLocale}
+                          onClick={() => {
+                            if (userLocale !== opt.code) setLocale(opt.code);
+                          }}
+                          style={{
+                            flex: 1,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '4px',
+                            padding: '6px 8px',
+                            borderRadius: 'var(--radius-sm)',
+                            border: `1px solid ${active ? 'var(--color-primary)' : 'var(--border-subtle)'}`,
+                            background: active ? 'var(--color-primary-light)' : 'var(--bg-surface)',
+                            color: active ? 'var(--color-primary)' : 'var(--text-primary)',
+                            fontSize: '12.5px',
+                            fontWeight: active ? 700 : 500,
+                            cursor: savingLocale ? 'wait' : 'pointer',
+                          }}
+                        >
+                          {active && <Check size={12} />}
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {userLocale && (
+                    <button
+                      type="button"
+                      disabled={savingLocale}
+                      onClick={() => setLocale(null)}
+                      style={{
+                        marginTop: '6px',
+                        background: 'transparent',
+                        border: 'none',
+                        padding: 0,
+                        fontSize: '11.5px',
+                        color: 'var(--color-primary)',
+                        cursor: 'pointer',
+                        fontWeight: 600,
+                      }}
+                    >
+                      {t('language.orgDefault')}
+                    </button>
+                  )}
                 </div>
+                )}
 
                 <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setUserMenuOpen(false);
+                    navigate('/account/security');
+                  }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    width: '100%',
+                    padding: '9px 12px',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 'var(--radius-md)',
+                    background: 'var(--bg-surface)',
+                    color: 'var(--text-primary)',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    textAlign: 'left',
+                    transition: 'all var(--transition-fast)',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = 'var(--bg-surface-subtle)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = 'var(--bg-surface)';
+                  }}
+                >
+                  {mfaEnrollmentRequired ? (
+                    <ShieldAlert size={15} color="var(--color-warning)" />
+                  ) : (
+                    <ShieldCheck size={15} color={mfaEnabled ? 'var(--color-success)' : 'var(--text-secondary)'} />
+                  )}
+                  <span style={{ flex: 1 }}>{t('topbar.accountSecurity')}</span>
+                  <span style={{ fontSize: '10.5px', fontWeight: 600, color: mfaEnabled ? 'var(--color-success)' : 'var(--text-tertiary)' }}>
+                    {mfaEnrollmentRequired ? t('topbar.mfaRequired') : mfaEnabled ? t('topbar.mfaOn') : t('topbar.mfaOff')}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  role="menuitem"
                   onClick={handleLogout}
                   style={{
                     display: 'flex',
@@ -535,7 +647,7 @@ export const TopNavbar: React.FC = () => {
                   }}
                 >
                   <LogOut size={15} />
-                  <span>Sign Out Session</span>
+                  <span>{t('topbar.signOut')}</span>
                 </button>
               </div>
             </div>

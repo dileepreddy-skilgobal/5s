@@ -1,9 +1,14 @@
-import { IsString, IsNotEmpty, IsOptional, IsArray, IsBoolean, IsDateString } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsArray, IsIn, MaxLength, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { values } from '../../../core/validation/domain-values';
+
+const REFERENCE_PHOTO_TYPES = ['STANDARD_CONDITION', 'CURRENT_CONDITION'];
 
 export class ReferencePhotoDto {
-  @ApiProperty({ example: 'STANDARD_CONDITION', enum: ['STANDARD_CONDITION', 'CURRENT_CONDITION'] })
+  @ApiProperty({ example: 'STANDARD_CONDITION', enum: REFERENCE_PHOTO_TYPES })
   @IsString()
+  @IsIn(REFERENCE_PHOTO_TYPES)
   type: string;
 
   @ApiProperty({ example: 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158' })
@@ -32,14 +37,16 @@ export class CreateStandardDto {
   @IsNotEmpty()
   title: string;
 
-  @ApiProperty({ example: 'S2_SET_IN_ORDER', enum: ['S1_SORT', 'S2_SET_IN_ORDER', 'S3_SHINE', 'S4_STANDARDIZE', 'S5_SUSTAIN', 'S6_SAFETY'] })
+  @ApiProperty({ example: 'S2_SET_IN_ORDER', enum: values('FIVE_S_CATEGORIES') })
   @IsString()
   @IsNotEmpty()
+  @IsIn(values('FIVE_S_CATEGORIES'))
   category: string;
 
-  @ApiPropertyOptional({ example: 'GLOBAL', enum: ['GLOBAL', 'PLANT', 'DEPARTMENT', 'LOCATION_TYPE', 'SPECIFIC_LOCATION'] })
+  @ApiPropertyOptional({ example: 'GLOBAL', enum: values('STANDARD_SCOPES') })
   @IsString()
   @IsOptional()
+  @IsIn(values('STANDARD_SCOPES'))
   scopeType?: string;
 
   @ApiPropertyOptional({ example: 'org-node-uuid' })
@@ -67,10 +74,13 @@ export class CreateStandardDto {
     ],
   })
   @IsArray()
+  @IsString({ each: true })
   rules: string[];
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ type: [ReferencePhotoDto] })
   @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReferencePhotoDto)
   @IsOptional()
   referencePhotos?: ReferencePhotoDto[];
 
@@ -83,6 +93,46 @@ export class CreateStandardDto {
   @IsString()
   @IsOptional()
   sopDocumentUrl?: string;
+}
+
+/**
+ * PATCH /standards/:id - standard metadata and scope; all optional. Rules/photos change through revisions.
+ * `targetOrgNodeId` / `targetLocationId` may be sent as null to clear the scope target.
+ */
+export class UpdateStandardDto {
+  @ApiPropertyOptional({ example: 'CNC Machine Tooling & Shadow Board Standard' })
+  @IsString()
+  @IsNotEmpty()
+  @IsOptional()
+  title?: string;
+
+  @ApiPropertyOptional({ example: 'S2_SET_IN_ORDER', enum: values('FIVE_S_CATEGORIES') })
+  @IsString()
+  @IsOptional()
+  @IsIn(values('FIVE_S_CATEGORIES'))
+  category?: string;
+
+  @ApiPropertyOptional({ example: 'GLOBAL', enum: values('STANDARD_SCOPES') })
+  @IsString()
+  @IsOptional()
+  @IsIn(values('STANDARD_SCOPES'))
+  scopeType?: string;
+
+  @ApiPropertyOptional({ example: 'org-node-uuid', nullable: true })
+  @IsString()
+  @IsOptional()
+  targetOrgNodeId?: string | null;
+
+  @ApiPropertyOptional({ example: 'location-uuid', nullable: true })
+  @IsString()
+  @IsOptional()
+  targetLocationId?: string | null;
+
+  @ApiPropertyOptional({ example: 'PUBLISHED', enum: values('STANDARD_STATUSES') })
+  @IsString()
+  @IsOptional()
+  @IsIn(values('STANDARD_STATUSES'))
+  status?: string;
 }
 
 export class CreateRevisionDto {
@@ -104,10 +154,13 @@ export class CreateRevisionDto {
     ],
   })
   @IsArray()
+  @IsString({ each: true })
   rules: string[];
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ type: [ReferencePhotoDto] })
   @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReferencePhotoDto)
   @IsOptional()
   referencePhotos?: ReferencePhotoDto[];
 
@@ -131,5 +184,15 @@ export class ApproveRevisionDto {
   @ApiPropertyOptional({ example: 'Approved for facility-wide rollout' })
   @IsString()
   @IsOptional()
+  @MaxLength(2000)
   comments?: string;
+}
+
+/** POST /standards/:id/revisions/:revisionId/reject - the reason is shown to the author. */
+export class RejectRevisionDto {
+  @ApiProperty({ example: 'The defect photo does not show the current shadow board layout.' })
+  @IsString()
+  @IsNotEmpty({ message: 'Give the reason for rejecting the revision' })
+  @MaxLength(2000)
+  reason: string;
 }

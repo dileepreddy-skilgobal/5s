@@ -8,7 +8,8 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "requireFullScreen": false
+      "requireFullScreen": false,
+      "bundleIdentifier": "com.skilglobal.fivesmobile"
     },
     "android": {
       "adaptiveIcon": {
@@ -20,9 +21,11 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.CAMERA",
-        "android.permission.RECORD_AUDIO"
+        "android.permission.RECORD_AUDIO",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ],
-      "package": "com.anonymous.skilglobal5smobile"
+      "package": "com.skilglobal.fivesmobile"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -31,19 +34,49 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow SkilGlobal 5S to access your camera to scan shopfloor QR codes and capture inspection photos."
+          "cameraPermission": "Allow SkilGlobal 5S to access your camera to scan shopfloor QR codes and capture inspection photos and videos.",
+          "microphonePermission": "Allow SkilGlobal 5S to use the microphone to record sound with abnormality videos.",
+          "recordAudioAndroid": true
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Allow SkilGlobal 5S to access your photos to attach shopfloor audit evidence.",
-          "cameraPermission": "Allow SkilGlobal 5S to access your camera to capture shopfloor audit evidence photos."
+          "photosPermission": "Allow SkilGlobal 5S to access your photos and videos to attach shopfloor audit evidence and abnormality reports.",
+          "cameraPermission": "Allow SkilGlobal 5S to access your camera to capture shopfloor evidence photos and short videos.",
+          "microphonePermission": "Allow SkilGlobal 5S to use the microphone to record sound with abnormality videos."
         }
-      ]
+      ],
+      "expo-secure-store",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow SkilGlobal 5S to use the microphone to record voice notes for abnormality reports.",
+          "recordAudioAndroid": true,
+          "enableBackgroundRecording": false,
+          "enableBackgroundPlayback": false
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow SkilGlobal 5S to use your location while the app is open to tag abnormality reports with where they were found.",
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationAlwaysPermission": false,
+          "isIosBackgroundLocationEnabled": false,
+          "isAndroidBackgroundLocationEnabled": false
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#FF6433",
+          "defaultChannel": "default"
+        }
+      ],
+      "expo-asset"
     ],
     "extra": {
-      "tenantId": "skilglobal-mfg",
       "appName": "SkilGlobal 5S Enterprise",
       "version": "1.0.0"
     }

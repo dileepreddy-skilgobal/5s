@@ -1,35 +1,31 @@
-import { IsString, IsNotEmpty, IsArray, IsOptional, IsNumber } from 'class-validator';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsString, IsNotEmpty, IsObject, IsBoolean, MaxLength } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
 
 export class SubmitQuizDto {
-  @ApiProperty({ example: { q1: 0, q2: 2, q3: 1 } })
+  /**
+   * Question id -> the text of the chosen option. Options are shuffled on every attempt, so answers are
+   * matched by text rather than by position. The certificate goes to the signed-in user.
+   */
+  @ApiProperty({ example: { q1: 'Attach a Red Tag, log the item and move it to the Red Tag holding area.' } })
+  @IsObject()
   @IsNotEmpty()
-  answers: Record<string, number>;
-
-  @ApiPropertyOptional({ example: 'Pooja Sharma' })
-  @IsString()
-  @IsOptional()
-  traineeName?: string;
-
-  @ApiPropertyOptional({ example: 'admin@skilglobal.com' })
-  @IsString()
-  @IsOptional()
-  traineeEmail?: string;
+  answers: Record<string, string>;
 }
 
-export class TrackLessonProgressDto {
-  @ApiProperty({ example: 'course-01' })
+export class UpdateLessonProgressDto {
+  @ApiProperty({ example: 'course-5s-foundations' })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(100)
   courseId: string;
 
-  @ApiProperty({ example: 'lesson-01' })
+  @ApiProperty({ example: 'foundations-sort' })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(100)
   lessonId: string;
 
-  @ApiPropertyOptional({ example: 100 })
-  @IsNumber()
-  @IsOptional()
-  progressPercent?: number;
+  @ApiProperty({ example: true, description: 'true marks the lesson done, false marks it not done' })
+  @IsBoolean()
+  completed: boolean;
 }

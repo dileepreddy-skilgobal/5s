@@ -23,7 +23,7 @@ export const Button: React.FC<ButtonProps> = ({
     secondary: 'btn-secondary',
     ghost: 'btn-ghost',
     danger: 'btn-danger',
-    outline: 'btn-secondary',
+    outline: 'btn-outline',
   };
 
   const sizeClasses = {
@@ -34,8 +34,9 @@ export const Button: React.FC<ButtonProps> = ({
 
   return (
     <button
-      className={`btn ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
+      className={`btn ${variantClasses[variant]} ${sizeClasses[size]} ${!children && icon ? 'btn-icon' : ''} ${className}`}
       disabled={disabled || loading}
+      aria-busy={loading || undefined}
       {...props}
     >
       {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : icon}

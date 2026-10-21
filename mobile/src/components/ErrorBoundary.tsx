@@ -1,7 +1,7 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '../constants/theme';
+import { COLORS, RADIUS, SHADOWS, SPACING, TYPE } from '../constants/theme';
 
 interface Props {
   children: ReactNode;
@@ -33,25 +33,33 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.hasError) {
       return (
         <View style={styles.container}>
-          <View style={styles.card}>
+          <View style={styles.card} accessibilityRole="alert">
             <View style={styles.iconCircle}>
-              <Ionicons name="warning-outline" size={32} color="#DC2626" />
+              <Ionicons name="warning-outline" size={28} color={COLORS.danger} />
             </View>
-            <Text style={styles.title}>Workspace Exception Caught</Text>
-            <Text style={styles.subtitle}>
-              An unexpected issue occurred while rendering. Your offline inspection data remains safe in device storage.
+            <Text style={styles.title} accessibilityRole="header">
+              Something went wrong
             </Text>
-            {this.state.error?.message && (
+            <Text style={styles.subtitle}>
+              This screen could not be shown. Audits, reports and red tags saved on this device are not lost.
+            </Text>
+            {this.state.error?.message ? (
               <View style={styles.errorBox}>
-                <Text style={styles.errorText} numberOfLines={3}>
+                <Text style={styles.errorLabel}>Error details</Text>
+                <Text style={styles.errorText} numberOfLines={4}>
                   {this.state.error.message}
                 </Text>
               </View>
-            )}
-            <TouchableOpacity style={styles.retryBtn} onPress={this.handleReset} activeOpacity={0.8}>
-              <Ionicons name="refresh" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-              <Text style={styles.retryText}>Reload 5S Application</Text>
-            </TouchableOpacity>
+            ) : null}
+            <Pressable
+              style={({ pressed }) => [styles.retryBtn, pressed && { backgroundColor: COLORS.primaryDark }]}
+              onPress={this.handleReset}
+              accessibilityRole="button"
+              accessibilityLabel="Try again"
+            >
+              <Ionicons name="refresh" size={18} color={COLORS.textInverse} />
+              <Text style={styles.retryText}>Try again</Text>
+            </Pressable>
           </View>
         </View>
       );
@@ -64,67 +72,54 @@ export class ErrorBoundary extends Component<Props, State> {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0F172A',
+    backgroundColor: COLORS.background,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 20,
+    padding: SPACING.screen,
   },
   card: {
     width: '100%',
     maxWidth: 480,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 24,
-    padding: 24,
+    backgroundColor: COLORS.card,
+    borderRadius: RADIUS.xl,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: SPACING.xxl,
     alignItems: 'center',
+    ...SHADOWS.card,
   },
   iconCircle: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: '#FEE2E2',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: COLORS.dangerSoft,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 16,
+    marginBottom: SPACING.lg,
   },
-  title: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: '#0F172A',
-    marginBottom: 8,
-    textAlign: 'center',
-  },
-  subtitle: {
-    fontSize: 12,
-    color: '#64748B',
-    textAlign: 'center',
-    lineHeight: 18,
-    marginBottom: 16,
-  },
+  title: { ...TYPE.title, color: COLORS.textDark, textAlign: 'center', marginBottom: SPACING.sm },
+  subtitle: { ...TYPE.body, color: COLORS.textMedium, textAlign: 'center', marginBottom: SPACING.lg },
   errorBox: {
     width: '100%',
-    backgroundColor: '#F8FAFC',
-    borderRadius: 12,
-    padding: 10,
+    backgroundColor: COLORS.cardSecondary,
+    borderRadius: RADIUS.md,
+    padding: SPACING.md,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
-    marginBottom: 16,
+    borderColor: COLORS.border,
+    marginBottom: SPACING.lg,
   },
-  errorText: {
-    fontSize: 11,
-    color: '#DC2626',
-    fontFamily: 'monospace',
-  },
+  errorLabel: { ...TYPE.captionStrong, color: COLORS.textMedium, marginBottom: 2 },
+  errorText: { ...TYPE.caption, color: COLORS.danger },
   retryBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.sm,
+    minHeight: 48,
+    alignSelf: 'stretch',
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 14,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: SPACING.xl,
   },
-  retryText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
+  retryText: { ...TYPE.bodyStrong, color: COLORS.textInverse },
 });

@@ -1,47 +1,58 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Headers, Res } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query, Res, ParseUUIDPipe, HttpCode, HttpStatus } from '@nestjs/common';
+import { RoleGroups } from '../../core/guards/role-groups';
+import { TenantId, CurrentUserId } from '../../core/auth/current-user.decorator';
+import { ApiBearerAuth, ApiTags, ApiOperation } from '@nestjs/swagger';
 import { AuditSchedulesService } from './audit-schedules.service';
-import { CreateScheduleDto } from './dto/audit-schedule.dto';
+import {
+  CancelInstanceDto,
+  CreateScheduleDto,
+  RescheduleInstanceDto,
+  UpdateScheduleDto,
+  UpdateScheduledInstanceDto,
+} from './dto/audit-schedule.dto';
 import { Roles } from '../../core/guards/roles.decorator';
 
-@ApiTags('Audit Scheduling & Recurrence Engine')
+@ApiTags('Audit schedules')
+@ApiBearerAuth()
 @Controller('api/v1/audit-schedules')
 export class AuditSchedulesController {
   constructor(private readonly schedulesService: AuditSchedulesService) {}
 
-  private extractTenantId(tenantHeader?: string): string {
-    return tenantHeader || 'default-tenant-skilglobal';
-  }
-
   @Get()
   @ApiOperation({ summary: 'List all recurring audit schedules' })
-  getSchedules(@Headers('x-tenant-id') tenantId: string) {
-    return this.schedulesService.getSchedules(this.extractTenantId(tenantId));
+  getSchedules(@TenantId() tenantId: string) {
+    return this.schedulesService.getSchedules(tenantId);
   }
 
   @Get('instances')
   @ApiOperation({ summary: 'Get all scheduled audit instances (Calendar & Table View)' })
   getScheduledAudits(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Query('status') status?: string,
     @Query('auditorId') auditorId?: string,
     @Query('locationId') locationId?: string,
   ) {
-    return this.schedulesService.getScheduledAudits(this.extractTenantId(tenantId), {
+    return this.schedulesService.getScheduledAudits(tenantId, {
       status,
       auditorId,
       locationId,
     });
   }
 
+  @Get('instances/:instanceId')
+  @ApiOperation({ summary: 'One scheduled audit instance with its location, auditor and template version' })
+  getScheduledInstance(@TenantId() tenantId: string, @Param('instanceId', new ParseUUIDPipe()) instanceId: string) {
+    return this.schedulesService.getScheduledInstance(tenantId, instanceId);
+  }
+
   @Get('calendar/export.ics')
   @ApiOperation({ summary: 'Export universal iCalendar (.ics) file for Google Calendar, Apple Calendar, and Outlook' })
   async exportIcsCalendar(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Query('instanceId') instanceId?: string,
     @Res() res?: any,
   ) {
-    const icsContent = await this.schedulesService.generateIcsCalendar(this.extractTenantId(tenantId), instanceId);
+    const icsContent = await this.schedulesService.generateIcsCalendar(tenantId, instanceId);
     if (res) {
       res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
       res.setHeader('Content-Disposition', 'attachment; filename="5S-Audit-Schedules.ics"');
@@ -50,61 +61,86 @@ export class AuditSchedulesController {
     return icsContent;
   }
 
-  @Post('calendar/gmail-sync')
-  @ApiOperation({ summary: 'Sync scheduled audit instances with Gmail and Google Workspace Calendar' })
-  syncGmailCalendar(
-    @Headers('x-tenant-id') tenantId: string,
-    @Body() payload: { instanceIds?: string[]; emailToSync?: string; notifyAttendees?: boolean },
+  @Post('generate-due')
+  @HttpCode(HttpStatus.OK)
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
+  @ApiOperation({ summary: 'Create the upcoming audits of every active schedule whose next cycle is within its lead time (same pass as the background generator)' })
+  generateDue(@TenantId() tenantId: string) {
+    return this.schedulesService.generateDueSchedules(tenantId);
+  }
+
+  @Post('instances/:instanceId/reschedule')
+  @HttpCode(HttpStatus.OK)
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
+  @ApiOperation({ summary: 'Move one scheduled audit that has not started to a new date' })
+  rescheduleInstance(
+    @TenantId() tenantId: string,
+    @CurrentUserId() actorId: string,
+    @Param('instanceId', new ParseUUIDPipe()) instanceId: string,
+    @Body() dto: RescheduleInstanceDto,
   ) {
-    return this.schedulesService.syncGmailCalendar(this.extractTenantId(tenantId), payload);
+    return this.schedulesService.rescheduleInstance(tenantId, instanceId, dto, actorId);
+  }
+
+  @Post('instances/:instanceId/cancel')
+  @HttpCode(HttpStatus.OK)
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
+  @ApiOperation({ summary: 'Cancel one scheduled audit that has not started (reason required)' })
+  cancelInstance(
+    @TenantId() tenantId: string,
+    @CurrentUserId() actorId: string,
+    @Param('instanceId', new ParseUUIDPipe()) instanceId: string,
+    @Body() dto: CancelInstanceDto,
+  ) {
+    return this.schedulesService.cancelInstance(tenantId, instanceId, dto, actorId);
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get schedule details with generated instances history' })
-  getScheduleById(@Headers('x-tenant-id') tenantId: string, @Param('id') id: string) {
-    return this.schedulesService.getScheduleById(this.extractTenantId(tenantId), id);
+  getScheduleById(@TenantId() tenantId: string, @Param('id') id: string) {
+    return this.schedulesService.getScheduleById(tenantId, id);
   }
 
   @Post()
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Create recurring audit schedule with auditor rotation rules' })
-  createSchedule(@Headers('x-tenant-id') tenantId: string, @Body() dto: CreateScheduleDto) {
-    return this.schedulesService.createSchedule(this.extractTenantId(tenantId), dto);
+  createSchedule(@TenantId() tenantId: string, @Body() dto: CreateScheduleDto) {
+    return this.schedulesService.createSchedule(tenantId, dto);
   }
 
   @Post(':id/generate')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Trigger on-demand generation of scheduled audits for next cycle' })
-  generateAudits(@Headers('x-tenant-id') tenantId: string, @Param('id') scheduleId: string) {
-    return this.schedulesService.generateAuditsForSchedule(this.extractTenantId(tenantId), scheduleId);
+  generateAudits(@TenantId() tenantId: string, @Param('id') scheduleId: string) {
+    return this.schedulesService.generateAuditsForSchedule(tenantId, scheduleId);
   }
 
   @Patch(':id')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Update audit schedule parameters' })
   updateSchedule(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Param('id') id: string,
-    @Body() data: any,
+    @Body() data: UpdateScheduleDto,
   ) {
-    return this.schedulesService.updateSchedule(this.extractTenantId(tenantId), id, data);
+    return this.schedulesService.updateSchedule(tenantId, id, data);
   }
 
   @Patch('instances/:instanceId')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Update scheduled audit instance (reassign auditor, change due date, update status)' })
   updateScheduledInstance(
-    @Headers('x-tenant-id') tenantId: string,
+    @TenantId() tenantId: string,
     @Param('instanceId') instanceId: string,
-    @Body() data: any,
+    @Body() data: UpdateScheduledInstanceDto,
   ) {
-    return this.schedulesService.updateScheduledInstance(this.extractTenantId(tenantId), instanceId, data);
+    return this.schedulesService.updateScheduledInstance(tenantId, instanceId, data);
   }
 
   @Delete(':id')
-  @Roles('SUPER_ADMIN', 'ORG_ADMIN', 'COORDINATOR_5S')
+  @Roles(...RoleGroups.PROGRAM_MANAGERS)
   @ApiOperation({ summary: 'Delete audit schedule' })
-  deleteSchedule(@Headers('x-tenant-id') tenantId: string, @Param('id') id: string) {
-    return this.schedulesService.deleteSchedule(this.extractTenantId(tenantId), id);
+  deleteSchedule(@TenantId() tenantId: string, @CurrentUserId() actorId: string, @Param('id') id: string) {
+    return this.schedulesService.deleteSchedule(tenantId, id, actorId);
   }
 }

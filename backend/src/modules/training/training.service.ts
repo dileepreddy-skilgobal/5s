@@ -1,17 +1,39 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { TrainingCertificate, TrainingProgress } from '@prisma/client';
+import { TenantSettingsService } from '../../core/config/tenant-settings.service';
 import { PrismaService } from '../../core/database/prisma.service';
-import { SubmitQuizDto, TrackLessonProgressDto } from './dto/training.dto';
+import { SubmitQuizDto, UpdateLessonProgressDto } from './dto/training.dto';
 import * as crypto from 'crypto';
+import { getFrontendUrl } from '../../core/config/app-url';
 
-export interface QuizQuestion {
+type QuizCategory = '1S' | '2S' | '3S' | '4S' | '5S' | 'AUDIT' | 'CAPA' | 'SAFETY' | 'RED_TAG';
+
+/** Question bank entry. The correct option is kept apart from the distractors so no position ever marks it. */
+interface QuizBankQuestion {
   id: string;
-  category: '1S' | '2S' | '3S' | '4S' | '5S' | 'AUDIT' | 'CAPA' | 'SAFETY' | 'RED_TAG';
+  category: QuizCategory;
   question: string;
-  scenario?: string;
-  options: string[];
-  correctIndex: number;
+  answer: string;
+  distractors: string[];
   explanation: string;
   points: number;
+}
+
+/** A question as served to a trainee: options in a fresh random order, no answer, no explanation. */
+export interface QuizQuestion {
+  id: string;
+  category: QuizCategory;
+  question: string;
+  options: string[];
+  points: number;
+}
+
+export interface TrainingLesson {
+  id: string;
+  title: string;
+  summary: string;
+  /** Start position (mm:ss) inside the course video; only set once the course has a real video. */
+  videoStart?: string;
 }
 
 export interface TrainingCourse {
@@ -20,272 +42,265 @@ export interface TrainingCourse {
   subtitle: string;
   description: string;
   category: 'FOUNDATIONS' | 'AUDITING' | 'RCA_CAPA' | 'RED_TAG';
-  durationMinutes: number;
-  videoUrl: string;
-  thumbnailUrl: string;
   badgeText: string;
-  chapters: {
-    time: string;
-    title: string;
-    description: string;
-  }[];
+  /** Null until a real recorded lesson exists; the app then shows the lessons as reading material. */
+  videoUrl: string | null;
+  /** WebVTT captions for the video. */
+  captionsUrl: string | null;
+  lessons: TrainingLesson[];
   keyTakeaways: string[];
-  jobAidTitle: string;
-  jobAidUrl: string;
+  /** Null until a real downloadable job aid exists. */
+  jobAidTitle: string | null;
+  jobAidUrl: string | null;
+}
+
+export interface CourseProgress {
+  courseId: string;
+  completedLessonIds: string[];
+  totalLessons: number;
+  percent: number;
+  completed: boolean;
+  completedAt: string | null;
 }
 
 @Injectable()
 export class TrainingService {
-  constructor(private readonly prisma: PrismaService) {}
-
-  // In-memory certificate cache for instant fast verification lookup
-  private certificates = new Map<string, any>();
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly settingsService: TenantSettingsService,
+  ) {}
 
   private readonly courses: TrainingCourse[] = [
     {
       id: 'course-5s-foundations',
-      title: '5S Foundations: From Workplace Disorder to Visual Excellence',
-      subtitle: 'Sort, Set in Order, Shine, Standardize, and Sustain across manufacturing environments',
-      description: 'Master the core 5 pillars of workplace organization with practical shop-floor examples. Learn how to identify clutter, create dedicated visual tool stations, establish autonomous cleaning rhythms, and sustain audit discipline across multiple shifts.',
+      title: '5S foundations: from workplace disorder to visual control',
+      subtitle: 'Sort, Set in Order, Shine, Standardize and Sustain on the shop floor',
+      description: 'The five pillars of workplace organization with practical shop-floor examples: identifying clutter, setting up tool stations, cleaning as inspection, and keeping the standard across shifts.',
       category: 'FOUNDATIONS',
-      durationMinutes: 14,
-      videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-      thumbnailUrl: '/assets/5s/cnc_workstation_clean.jpg',
-      badgeText: 'Core Essential',
-      chapters: [
-        { time: '00:00', title: '1. Introduction & The True Cost of Clutter', description: 'Why 5S is the foundation of Operational Excellence (OpEx).' },
-        { time: '02:45', title: '2. 1S (Sort): Red Tag Quarantine Criteria', description: 'Separating necessary from unnecessary tools, parts, and obsolete jigs.' },
-        { time: '05:30', title: '3. 2S (Set in Order): 30-Second Rule & Shadow Boards', description: 'A place for everything, everything in its place with color boundaries.' },
-        { time: '08:15', title: '4. 3S (Shine): Cleaning is Inspection', description: 'Detecting oil leaks, loose bolts, and hydraulic defects early.' },
-        { time: '11:00', title: '5. 4S & 5S: Standardization, Kamishibai & Governance', description: 'Maintaining visual controls through standardized shift handovers.' },
+      badgeText: 'Core',
+      videoUrl: null,
+      captionsUrl: null,
+      lessons: [
+        { id: 'foundations-intro', title: 'Introduction: the cost of clutter', summary: 'Why 5S is the foundation of every other improvement: clutter hides defects, wastes search time and creates safety hazards.' },
+        { id: 'foundations-sort', title: '1S Sort: separating needed from unneeded', summary: 'Separate the tools, parts and jigs needed for current work from everything else, and red-tag what is not needed.' },
+        { id: 'foundations-set', title: '2S Set in Order: a place for everything', summary: 'Shadow boards, labels and floor marking so any item can be found and returned quickly.' },
+        { id: 'foundations-shine', title: '3S Shine: cleaning is inspection', summary: 'Cleaning by hand lets operators spot oil leaks, loose bolts and abnormal wear early.' },
+        { id: 'foundations-standardize-sustain', title: '4S Standardize and 5S Sustain', summary: 'Visual standards make the right condition obvious; short, regular checks keep it from slipping back.' },
       ],
       keyTakeaways: [
-        '1S (Sort): If an item has not been used in the past 30 days, move it to the Red Tag holding area.',
-        '2S (Set in Order): Any critical tooling bit or gauge must be locatable and returnable in under 30 seconds.',
-        '3S (Shine): Autonomous maintenance means cleaning with purpose to spot defects before machine failure.',
-        '4S (Standardize): Visual boundaries (hazard tape, shadow foam) make abnormalities instantly visible.',
-        '5S (Sustain): Daily 5-minute Kamishibai routines build operational muscle memory.',
+        '1S (Sort): if an item has not been used in the past 30 days, move it to the red tag holding area.',
+        '2S (Set in Order): any critical tool or gauge should be locatable and returnable in under 30 seconds.',
+        '3S (Shine): cleaning with purpose reveals defects before they cause a breakdown.',
+        '4S (Standardize): visual boundaries (floor tape, shadow foam) make abnormalities easy to see.',
+        '5S (Sustain): short daily checks at shift handover build the habit.',
       ],
-      jobAidTitle: '5S Shop-Floor Visual Standards & Color Code Pocket Guide (PDF)',
-      jobAidUrl: '/assets/5s/5s_standards_guide.pdf',
+      jobAidTitle: null,
+      jobAidUrl: null,
     },
     {
       id: 'course-mobile-auditing',
-      title: 'Certified Mobile 5S Auditor Execution & Photographic Evidence',
-      subtitle: 'Conducting objective inspections, score weighting, and geotagged evidence capture',
-      description: 'Learn how to use the Mobile Audit Runner on tablets and smartphones. Understand scoring criteria (0-4 scale), safety override caps, and how to take unambiguous before/after evidence photos that drive rapid shop-floor accountability.',
+      title: 'Conducting a 5S audit and capturing evidence',
+      subtitle: 'Objective inspections, consistent scoring and clear photo evidence',
+      description: 'How to run an objective 5S inspection: scoring against the checklist without bias, treating safety items seriously, and taking before/after photos that make findings clear to the area owner.',
       category: 'AUDITING',
-      durationMinutes: 11,
-      videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-      thumbnailUrl: '/assets/5s/shadow_board_std.jpg',
-      badgeText: 'Auditor Track',
-      chapters: [
-        { time: '00:00', title: '1. Audit Runner Initiation & QR Station Check-in', description: 'Scanning machine/cell QR code for timestamped physical presence verification.' },
-        { time: '02:15', title: '2. Section-by-Section Scoring & Severity Weights', description: 'Applying objective 0 to 4 rubric ratings without personal bias.' },
-        { time: '05:00', title: '3. Evidence Photography & Defect Annotation', description: 'Capturing clear photos with arrow/circle annotations to highlight issues.' },
-        { time: '07:45', title: '4. Critical Safety Zero-Tolerance Triggers', description: 'How blocked fire exits or electrical hazards immediately trigger safety alerts.' },
-        { time: '09:30', title: '5. Audit Submission & Automated Abnormality Dispatch', description: 'Auto-generating observations and assigning immediate area owner actions.' },
+      badgeText: 'Auditor',
+      videoUrl: null,
+      captionsUrl: null,
+      lessons: [
+        { id: 'auditing-prepare', title: 'Preparing for the audit', summary: 'Confirm the location, the checklist and the area owner before you start; audit what you see on the floor, not what you are told.' },
+        { id: 'auditing-scoring', title: 'Scoring section by section', summary: 'Apply the scoring scale consistently, question by question, and record the reason for every low score.' },
+        { id: 'auditing-evidence', title: 'Photo evidence', summary: 'Take a wide shot for context and a close-up of the issue so anyone can see what needs fixing.' },
+        { id: 'auditing-safety', title: 'Critical safety items', summary: 'Blocked fire exits, extinguishers or electrical panels are critical findings that need immediate attention, not a note for later.' },
+        { id: 'auditing-submit', title: 'Submitting and following up', summary: 'Every non-conformance needs a clear description and an owner so it can be corrected and verified.' },
       ],
       keyTakeaways: [
-        'Always scan the location QR code to verify physical presence on the factory floor.',
-        'Photograph defects from a wide angle first, then a close-up annotated detail shot.',
-        'Never assign a non-conformance without clear corrective notes and designated area ownership.',
-        'Critical safety violations trigger instant plant manager alerts and automated CAPA generation.',
+        'Audit at the location itself and record what you observe.',
+        'Photograph defects from a wide angle first, then take a close-up of the detail.',
+        'Never record a non-conformance without a clear description and an area owner.',
+        'Critical safety findings are escalated immediately.',
       ],
-      jobAidTitle: 'Certified Auditor Scoring Rubric & Photographic Evidence Checklist (PDF)',
-      jobAidUrl: '/assets/5s/auditor_scoring_rubric.pdf',
+      jobAidTitle: null,
+      jobAidUrl: null,
     },
     {
       id: 'course-rca-capa',
-      title: 'Root Cause Analysis (5-Why) & Permanent Countermeasure Planning',
-      subtitle: 'Eliminating repeat abnormalities through systemic process & poka-yoke fixes',
-      description: 'Move beyond temporary band-aids. Master the Ishikawa 5-Why drill-down methodology to identify underlying machine, method, or material flaws, and construct robust permanent countermeasures with supervisor sign-off.',
+      title: 'Root cause analysis (5 Whys) and permanent corrective actions',
+      subtitle: 'Stopping repeat problems with process fixes instead of quick clean-ups',
+      description: 'Go beyond temporary fixes: use the 5 Whys and the Ishikawa (fishbone) categories to find the machine, method or material cause, and plan a permanent corrective action that is verified before closure.',
       category: 'RCA_CAPA',
-      durationMinutes: 12,
-      videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-      thumbnailUrl: '/assets/5s/oil_leak_defect.jpg',
-      badgeText: 'Quality & CAPA',
-      chapters: [
-        { time: '00:00', title: '1. The Problem with Superficial Fixes', description: 'Why cleaning oil without replacing the gasket guarantees repeat failure.' },
-        { time: '03:10', title: '2. Ishikawa 6M Category Mapping', description: 'Classifying root causes across Method, Machine, Material, Manpower, Measurement, and Environment.' },
-        { time: '06:00', title: '3. The 5-Why Iterative Drill-Down Technique', description: 'Asking "Why" five times to transition from symptom to systemic gap.' },
-        { time: '08:45', title: '4. Formulating Permanent Countermeasures & SOP Revisions', description: 'Lockout/Tagout, upgraded seal specs, and Poka-Yoke fixture design.' },
-        { time: '10:30', title: '5. Independent Verification Sign-Off', description: 'Two-person verification rule to permanently close high-severity CAPAs.' },
+      badgeText: 'Quality',
+      videoUrl: null,
+      captionsUrl: null,
+      lessons: [
+        { id: 'rca-superficial', title: 'The problem with superficial fixes', summary: 'Wiping up oil without replacing the gasket guarantees the leak comes back.' },
+        { id: 'rca-ishikawa', title: 'Fishbone (Ishikawa) categories', summary: 'Group possible causes under method, machine, material, people, measurement and environment.' },
+        { id: 'rca-five-whys', title: 'The 5 Whys', summary: 'Keep asking "why" until you move from the symptom to the gap in the process.' },
+        { id: 'rca-countermeasures', title: 'Permanent countermeasures', summary: 'Fix the process: update maintenance intervals, materials, fixtures (poka-yoke) and the work instruction.' },
+        { id: 'rca-verification', title: 'Verification before closure', summary: 'Someone other than the person who did the fix checks that it works before the action is closed.' },
       ],
       keyTakeaways: [
-        'A good 5-Why analysis always stops at a process or mechanical root cause, never "operator error".',
-        'Every CAPA must include a permanent engineering fix and an updated Standard Operating Procedure (SOP).',
-        'Closure requires dual-party verification: the area owner remedies the issue, and an independent auditor verifies.',
+        'A good 5 Whys analysis ends at a process or equipment cause, never at "operator error".',
+        'A permanent corrective action changes the process and, where needed, the standard work instruction.',
+        'Closure needs independent verification: the owner fixes the issue and someone else verifies it.',
       ],
-      jobAidTitle: '5-Why Root Cause Analysis & Countermeasure Template (PDF)',
-      jobAidUrl: '/assets/5s/5why_capa_jobaid.pdf',
+      jobAidTitle: null,
+      jobAidUrl: null,
     },
     {
       id: 'course-red-tag-program',
-      title: 'Red Tag Quarantine Program & Scrap Capital Recovery',
-      subtitle: 'Digital tagging, holding area management, and financial scrap recovery workflow',
-      description: 'Learn how to execute a high-impact Red Tag campaign. Track physical holding areas, establish 14-day disposition countdowns, recover working capital from surplus assets, and safely scrap obsolete tooling.',
+      title: 'Running a red tag program',
+      subtitle: 'Tagging unneeded items, managing the holding area and deciding what happens to them',
+      description: 'How to run a red tag campaign: what to tag, how to manage the holding area, setting a disposition deadline, and recovering value from surplus items.',
       category: 'RED_TAG',
-      durationMinutes: 9,
-      videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4',
-      thumbnailUrl: '/assets/5s/red_tag_holding_area.jpg',
-      badgeText: 'Shop-Floor Action',
-      chapters: [
-        { time: '00:00', title: '1. What Qualifies for a Red Tag?', description: 'Unused tooling, damaged pallets, scrap surplus, and unlabelled chemicals.' },
-        { time: '02:00', title: '2. Digital Tag Creation & QR Tag Attachment', description: 'Logging item description, estimated purchase value, and reason for tagging.' },
-        { time: '04:15', title: '3. Red Tag Holding Area Quarantine Protocols', description: 'Physical quarantine boundaries, inventory logging, and aging clocks.' },
-        { time: '06:30', title: '4. The 8 Disposition Pathways', description: 'Keep, Relocate, Repair, Reuse, Return to Vendor, Sell, Scrap, or Dispose.' },
-        { time: '08:00', title: '5. Capital Recovery & Financial Dashboard Reporting', description: 'Demonstrating ROI and recovered floor space to executive leadership.' },
+      badgeText: 'Sort',
+      videoUrl: null,
+      captionsUrl: null,
+      lessons: [
+        { id: 'redtag-qualify', title: 'What qualifies for a red tag?', summary: 'Unused tools, damaged pallets, surplus stock and unlabelled containers.' },
+        { id: 'redtag-create', title: 'Creating the tag', summary: 'Record what the item is, why it was tagged, the quantity and, where known, its value.' },
+        { id: 'redtag-holding', title: 'The holding area', summary: 'Keep tagged items in a marked area with a log, so nothing disappears and nothing stays forever.' },
+        { id: 'redtag-disposition', title: 'Deciding what happens to the item', summary: 'Typical outcomes: keep with a justification, relocate, repair, reuse, return to the vendor, sell or scrap.' },
+        { id: 'redtag-value', title: 'Showing the benefit', summary: 'Track floor space freed and value recovered to show what the program delivers.' },
       ],
       keyTakeaways: [
-        'Items in the Red Tag area must have a firm 14-day target disposition deadline.',
-        'Tagging is not punishment; it is an active method to liberate valuable factory floor space.',
-        'Track purchase value and scrap recovery to demonstrate tangible financial ROI from 5S.',
+        'Items in the holding area need a firm disposition deadline.',
+        'Tagging is not a punishment; it frees up workspace.',
+        'Tracking value and space recovered shows the benefit of 5S.',
       ],
-      jobAidTitle: 'Red Tag Decision Matrix & Quarantine Zone Standard Layout (PDF)',
-      jobAidUrl: '/assets/5s/red_tag_matrix.pdf',
+      jobAidTitle: null,
+      jobAidUrl: null,
     },
   ];
 
-  private readonly quizBank: QuizQuestion[] = [
+  private readonly quizBank: QuizBankQuestion[] = [
     {
       id: 'q1',
       category: '1S',
       question: 'During a 1S (Sort) audit in a machining cell, an operator finds 12 rusted clamps that have not been used for over 60 days. What is the standard action?',
-      options: [
+      answer: 'Attach a red tag, log the item and move the clamps to the red tag holding area.',
+      distractors: [
         'Store them under the machine bench out of sight so the area looks clean.',
-        'Attach a Red Tag, log the item into the digital system, and move them to the Red Tag Holding Area.',
-        'Leave them on the machine table in case a rare legacy job arrives next month.',
-        'Discard them immediately into the general scrap bin without logging.',
+        'Leave them on the machine table in case a rare job arrives next month.',
+        'Throw them into the general scrap bin straight away without logging them.',
       ],
-      correctIndex: 1,
-      explanation: 'Under 1S (Sort) standards, all unused or redundant items must be digitally Red Tagged, logged with justification, and moved to physical quarantine for formal disposition.',
+      explanation: 'Under 1S (Sort), unneeded items are red-tagged, logged with a reason and moved to the holding area so a deliberate disposition decision can be made.',
       points: 10,
     },
     {
       id: 'q2',
       category: '2S',
-      question: 'What is the primary objective of 2S (Set in Order) with respect to shop-floor efficiency?',
-      options: [
-        'Painting the floor in decorative corporate colors.',
-        'Ensuring any required tool, gauge, or part can be found, used, and returned in under 30 seconds.',
-        'Hiding all hand tools inside locked metal cabinets so only supervisors have access.',
-        'Buying new tools whenever an existing tool cannot be located immediately.',
+      question: 'What is the main objective of 2S (Set in Order) for shop-floor efficiency?',
+      answer: 'Any required tool, gauge or part can be found, used and returned in under 30 seconds.',
+      distractors: [
+        'Painting the floor in corporate colours.',
+        'Locking all hand tools in cabinets so only supervisors have access.',
+        'Buying new tools whenever an existing tool cannot be found immediately.',
       ],
-      correctIndex: 1,
-      explanation: 'The fundamental benchmark of 2S (Set in Order) is the 30-Second Rule: clear visual shadow boards, labels, and floor demarcation allow instant tool retrieval and return.',
+      explanation: 'The usual benchmark for 2S is the 30-second rule: shadow boards, labels and floor marking let anyone retrieve and return an item quickly.',
       points: 10,
     },
     {
       id: 'q3',
       category: '3S',
-      question: 'In World-Class 5S methodology, what does the phrase "Shine is Inspection" mean?',
-      options: [
-        'Wiping surfaces only right before a customer visit arrives.',
-        'Cleaning with purpose to actively detect early defects like oil leaks, loose bolts, vibration, and thermal wear.',
-        'Hiring an external janitorial crew to clean machines after the shift ends.',
-        'Applying polish to make old machinery look brand new without checking mechanics.',
+      question: 'What does the phrase "Shine is inspection" mean?',
+      answer: 'Cleaning with purpose to detect early defects such as oil leaks, loose bolts, vibration and wear.',
+      distractors: [
+        'Wiping surfaces just before a customer visit.',
+        'Hiring an external cleaning crew to clean machines after the shift.',
+        'Polishing old machinery so it looks new, without checking how it runs.',
       ],
-      correctIndex: 1,
-      explanation: '3S (Shine) is autonomous maintenance: the act of hands-on cleaning allows operators to spot hydraulic leaks, loose fasteners, and abnormal wear before catastrophic breakdown.',
+      explanation: 'In 3S (Shine), hands-on cleaning lets operators spot hydraulic leaks, loose fasteners and abnormal wear before a breakdown.',
       points: 10,
     },
     {
       id: 'q4',
       category: '4S',
-      question: 'Which of the following represents an effective 4S (Standardization) mechanism?',
-      options: [
+      question: 'Which of these is an effective 4S (Standardize) mechanism?',
+      answer: 'Visual workplace controls: colour-coded boundaries, labels and clear standard work instructions at the point of use.',
+      distractors: [
         'Telling operators verbally how they should clean their workstations.',
-        'Posting standardized visual workplace controls, color-coded demarcation boundaries, and clear digital SOPs.',
-        'Allowing each shift to arrange their tools according to personal preference.',
-        'Writing a 100-page manual stored in an office bookshelf that operators cannot access.',
+        'Letting each shift arrange tools according to personal preference.',
+        'A 100-page manual kept on an office bookshelf that operators cannot reach.',
       ],
-      correctIndex: 1,
-      explanation: '4S (Standardize) creates visual management rules (color codes, shadow boards, photo standards, laminated SOPs) so any deviation is obvious to anyone in 5 seconds.',
+      explanation: '4S (Standardize) creates visual rules (colour codes, shadow boards, photo standards) so any deviation is obvious to anyone within seconds.',
       points: 10,
     },
     {
       id: 'q5',
       category: '5S',
-      question: 'What is the purpose of daily 5-minute Kamishibai routines in 5S (Sustain)?',
-      options: [
+      question: 'What is the purpose of a short daily check routine (for example a Kamishibai board) in 5S (Sustain)?',
+      answer: 'Building the habit through short, rotating visual self-checks at shift handover.',
+      distractors: [
         'Disciplining operators who made mistakes on previous shifts.',
-        'Building daily operational muscle memory through short, rotating, visual self-check routines at shift handover.',
-        'Replacing annual ISO 9001 and IATF audits completely.',
-        'Filling out complex paperwork for management review.',
+        'Replacing external quality-system audits completely.',
+        'Producing paperwork for management review.',
       ],
-      correctIndex: 1,
-      explanation: '5S (Sustain) relies on micro-habits like Kamishibai visual boards to ensure workplace discipline is maintained every single shift without backsliding.',
+      explanation: '5S (Sustain) relies on small, regular habits such as visual check boards so the standard is kept every shift.',
       points: 10,
     },
     {
       id: 'q6',
       category: 'AUDIT',
-      question: 'When an auditor identifies a blocked emergency fire extinguisher during a mobile audit, what action occurs?',
-      options: [
+      question: 'During an audit you find an emergency fire extinguisher blocked by pallets. What should happen?',
+      answer: 'Record it as a critical safety finding, escalate it immediately and assign an urgent corrective action.',
+      distractors: [
         'Score the section 3 out of 4 and mention it in the monthly report.',
-        'Immediately trigger a Critical Safety Zero-Tolerance alert, cap the section score, and assign an urgent CAPA.',
-        'Ignore the fire extinguisher if the machining line is producing high-quality parts.',
-        'Wait until the annual audit cycle to review the fire safety equipment.',
+        'Ignore it if the line is producing good parts.',
+        'Wait until the annual audit to review fire safety equipment.',
       ],
-      correctIndex: 1,
-      explanation: 'Blocked emergency equipment (fire extinguishers, eyewash stations, electrical panels) represents a critical safety hazard with automatic score capping and immediate escalation.',
+      explanation: 'Blocked emergency equipment (fire extinguishers, eyewash stations, electrical panels) is a critical safety hazard that is escalated straight away, not left for a later report.',
       points: 10,
     },
     {
       id: 'q7',
       category: 'CAPA',
-      question: 'In a 5-Why Root Cause Analysis for an oil leak, Why #5 reveals that the preventative maintenance schedule lacked a gasket replacement interval. What is the permanent solution?',
-      options: [
+      question: 'In a 5 Whys analysis of an oil leak, the fifth "why" shows that the preventive maintenance schedule has no gasket replacement interval. What is the permanent solution?',
+      answer: 'Revise the preventive maintenance procedure to include a gasket replacement interval and train the maintenance technicians.',
+      distractors: [
         'Tell the operator to wipe the oil pan twice per shift.',
-        'Revise the PM SOP to include mandatory high-temp Viton gasket replacement every 500 operating hours and train maintenance technicians.',
         'Place an absorbent sock around the machine base permanently.',
-        'Turn down the hydraulic pump pressure so oil does not leak as fast.',
+        'Turn down the hydraulic pressure so the oil leaks more slowly.',
       ],
-      correctIndex: 1,
-      explanation: 'A permanent corrective countermeasure fixes the underlying systemic gap (updating the PM schedule, replacing standard with Viton material, and standardizing the SOP) rather than treating symptoms.',
+      explanation: 'A permanent corrective action closes the gap in the process (here, the maintenance schedule) instead of treating the symptom.',
       points: 10,
     },
     {
       id: 'q8',
       category: 'AUDIT',
-      question: 'What is the required standard for closing out an assigned 5S CAPA in the system?',
-      options: [
-        'The assignee checks the "Done" box without evidence.',
-        'The assignee uploads mandatory photographic "After" evidence and notes, followed by independent verification and sign-off by a designated supervisor/auditor.',
-        'The action automatically closes after 7 days if nobody complains.',
-        'The plant director signs off without viewing the physical workstation.',
+      question: 'What is good practice for closing a 5S corrective action?',
+      answer: 'The assignee records "after" photo evidence and notes, and someone independent verifies the fix before closure.',
+      distractors: [
+        'The assignee ticks a "Done" box without evidence.',
+        'The action closes automatically after 7 days if nobody complains.',
+        'A manager signs it off without looking at the workstation.',
       ],
-      correctIndex: 1,
-      explanation: 'BRD Section 33 & 34 requires dual-party verification: mandatory "After" photograph evidence and independent verification sign-off before a CAPA can be closed.',
+      explanation: 'Closing on evidence plus independent verification confirms the problem was actually fixed, not just reported as fixed.',
       points: 10,
     },
     {
       id: 'q9',
       category: 'SAFETY',
-      question: 'What standard color floor marking is universally required for physical aisles and pedestrian walkways?',
-      options: [
-        'Solid Red lines.',
-        'High-visibility Yellow or White boundary lines with unobstructed clearance.',
-        'No floor markings are required if operators know where to walk.',
-        'Blue and Green decorative checkerboard patterns.',
+      question: 'Which floor marking is commonly used for aisles and pedestrian walkways?',
+      answer: 'Solid yellow or white boundary lines with the walkway kept clear.',
+      distractors: [
+        'Solid red lines.',
+        'No markings, as long as operators know where to walk.',
+        'Blue and green checkerboard patterns.',
       ],
-      correctIndex: 1,
-      explanation: 'OSHA / 5S Visual standards dictate solid yellow or white boundary lines for pedestrian paths and traffic lanes to ensure safe, unobstructed shop-floor movement.',
+      explanation: 'Common visual-workplace practice is solid yellow (or white) lines for walkways and traffic lanes. Follow your site and local regulations where they differ.',
       points: 10,
     },
     {
       id: 'q10',
       category: 'RED_TAG',
-      question: 'What is the maximum recommended aging limit for items placed in a Red Tag Holding Area before final disposition?',
-      options: [
+      question: 'What is a typical maximum time for items to stay in a red tag holding area before a decision is made?',
+      answer: '14 to 30 days, after which the item is relocated, sold, repaired or scrapped.',
+      distractors: [
         '6 months to 1 year.',
-        '14 to 30 days maximum, after which the item must be relocated, sold, repaired, or scrapped.',
-        'Indefinitely until someone asks for the item.',
-        '24 hours regardless of item value.',
+        'Indefinitely, until someone asks for the item.',
+        '24 hours, regardless of the item.',
       ],
-      correctIndex: 1,
-      explanation: 'BRD Section 38 specifies active aging tracking: Red Tag items must have target disposition decisions within 14-30 days to prevent holding areas from becoming permanent junk piles.',
+      explanation: 'A short, firm deadline (typically 14 to 30 days) stops the holding area from turning into a permanent storage pile.',
       points: 10,
     },
   ];
@@ -302,61 +317,98 @@ export class TrainingService {
     return course;
   }
 
-  async getQuizQuestions(): Promise<Omit<QuizQuestion, 'correctIndex'>[]> {
-    // Return questions without the correctIndex to prevent inspect cheating
-    return this.quizBank.map(({ correctIndex, ...rest }) => rest);
+  /** Questions with their options in a new random order on every call; answers and explanations stay on the server. */
+  async getQuizQuestions(): Promise<QuizQuestion[]> {
+    return this.quizBank.map((q) => ({
+      id: q.id,
+      category: q.category,
+      question: q.question,
+      options: shuffle([q.answer, ...q.distractors]),
+      points: q.points,
+    }));
   }
 
-  async submitQuiz(dto: SubmitQuizDto, tenantId: string) {
+  async submitQuiz(dto: SubmitQuizDto, tenantId: string, userId: string) {
+    // The certificate is issued to the authenticated user, never to a name supplied by the client
+    const trainee = await this.prisma.user.findFirst({
+      where: { id: userId },
+      select: { firstName: true, lastName: true, email: true },
+    });
+    const answers = dto.answers ?? {};
     let totalScore = 0;
-    const maxScore = this.quizBank.length * 10;
+    const maxScore = this.quizBank.reduce((sum, q) => sum + q.points, 0);
     const results: {
       questionId: string;
       question: string;
-      selectedAnswer: number;
-      correctAnswer: number;
+      /** Text of the option the trainee chose; null when unanswered. */
+      selectedAnswer: string | null;
+      correctAnswer: string;
       isCorrect: boolean;
       explanation: string;
     }[] = [];
 
     for (const q of this.quizBank) {
-      const selected = dto.answers[q.id];
-      const isCorrect = selected === q.correctIndex;
-      if (isCorrect) {
-        totalScore += q.points;
-      }
+      const raw = answers[q.id];
+      const selected = typeof raw === 'string' && raw.trim() !== '' ? raw : null;
+      const isCorrect = selected !== null && normalizeOption(selected) === normalizeOption(q.answer);
+      if (isCorrect) totalScore += q.points;
       results.push({
         questionId: q.id,
         question: q.question,
         selectedAnswer: selected,
-        correctAnswer: q.correctIndex,
+        correctAnswer: q.answer,
         isCorrect,
         explanation: q.explanation,
       });
     }
 
-    const percentage = Math.round((totalScore / maxScore) * 100);
-    const passed = percentage >= 80;
+    const percentage = maxScore > 0 ? Math.round((totalScore / maxScore) * 100) : 0;
+    const { competency } = await this.settingsService.get(tenantId);
+    const passed = percentage >= competency.quizPassPercent;
 
-    let certificate: any = null;
-    if (passed) {
-      const certId = `CERT-5S-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-      certificate = {
-        certificateId: certId,
-        traineeName: dto.traineeName || 'Certified 5S Practitioner',
-        traineeEmail: dto.traineeEmail || 'trainee@skilglobal.com',
-        tenantId,
-        scorePercent: percentage,
-        issueDate: new Date().toISOString(),
-        validUntil: new Date(Date.now() + 365 * 86400000).toISOString(),
-        credentialTitle: 'Certified 5S Practitioner & Operational Discipline Auditor',
-        verificationUrl: `http://localhost:5173/training?cert=${certId}`,
-        authorizedSignatures: [
-          { name: 'Sarah Jenkins', title: 'Lead 5S Program Champion' },
-          { name: 'Rajesh Kumar', title: 'Plant Operations Director' },
-        ],
-      };
-      this.certificates.set(certId, certificate);
+    let certificate: ReturnType<TrainingService['toCertificateView']> | null = null;
+    let certificateRenewed = false;
+    if (passed && trainee) {
+      const now = new Date();
+      const validUntil = new Date(now);
+      validUntil.setMonth(validUntil.getMonth() + competency.certificateValidityMonths);
+      const traineeName = `${trainee.firstName} ${trainee.lastName}`.trim();
+
+      // A passing retake renews the current valid certificate (same code) instead of issuing a duplicate
+      const { record, renewed } = await this.prisma.$transaction(async (tx) => {
+        const current = await tx.trainingCertificate.findFirst({
+          where: { tenantId, userId, revokedAt: null, validUntil: { gt: now } },
+          orderBy: { validUntil: 'desc' },
+        });
+        if (current) {
+          const updated = await tx.trainingCertificate.update({
+            where: { id: current.id },
+            data: {
+              validUntil: validUntil > current.validUntil ? validUntil : current.validUntil,
+              scorePercent: percentage,
+              traineeName,
+              traineeEmail: trainee.email,
+              credentialTitle: competency.certificateTitle,
+            },
+          });
+          return { record: updated, renewed: true };
+        }
+        const created = await tx.trainingCertificate.create({
+          data: {
+            tenantId,
+            userId,
+            certificateCode: `CERT-5S-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+            traineeName,
+            traineeEmail: trainee.email,
+            credentialTitle: competency.certificateTitle,
+            scorePercent: percentage,
+            validUntil,
+          },
+        });
+        return { record: created, renewed: false };
+      });
+      certificateRenewed = renewed;
+      certificate = this.toCertificateView(record, competency.signatories);
     }
 
     return {
@@ -364,33 +416,127 @@ export class TrainingService {
       percentage,
       score: totalScore,
       maxScore,
+      passPercent: competency.quizPassPercent,
       correctCount: results.filter((r) => r.isCorrect).length,
       totalQuestions: this.quizBank.length,
       results,
       certificate,
+      /** True when an existing valid certificate was extended rather than a new one issued. */
+      certificateRenewed,
     };
   }
 
-  async getCertificate(certId: string) {
-    const cert = this.certificates.get(certId);
-    if (!cert) {
-      // Generate deterministic sample certificate if requested
-      return {
-        certificateId: certId,
-        traineeName: 'Pooja Sharma',
-        traineeEmail: 'admin@skilglobal.com',
-        tenantId: 'skilglobal-mfg',
-        scorePercent: 100,
-        issueDate: new Date().toISOString(),
-        validUntil: new Date(Date.now() + 365 * 86400000).toISOString(),
-        credentialTitle: 'Certified 5S Practitioner & Operational Discipline Auditor',
-        verificationUrl: `http://localhost:5173/training?cert=${certId}`,
-        authorizedSignatures: [
-          { name: 'Sneha Reddy', title: 'Lead 5S Program Champion' },
-          { name: 'Rajesh Kumar', title: 'Plant Operations Director' },
-        ],
-      };
+  /** The signed-in user's progress for every course (courses not started show no completed lessons). */
+  async getProgress(tenantId: string, userId: string): Promise<CourseProgress[]> {
+    const rows = await this.prisma.trainingProgress.findMany({ where: { tenantId, userId } });
+    const byCourse = new Map(rows.map((r) => [r.courseId, r]));
+    return this.courses.map((c) => this.toProgressView(c, byCourse.get(c.id)));
+  }
+
+  /** Marks one lesson done or not done; the course is complete once every lesson is done. */
+  async updateProgress(tenantId: string, userId: string, dto: UpdateLessonProgressDto): Promise<CourseProgress> {
+    const course = this.courses.find((c) => c.id === dto.courseId);
+    if (!course) throw new NotFoundException(`Training course '${dto.courseId}' not found`);
+    if (!course.lessons.some((l) => l.id === dto.lessonId)) {
+      throw new BadRequestException(`Lesson '${dto.lessonId}' is not part of course '${dto.courseId}'`);
     }
-    return cert;
+
+    const row = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.trainingProgress.findUnique({ where: { userId_courseId: { userId, courseId: course.id } } });
+      const done = new Set(parseLessonIds(existing?.completedLessonIds));
+      if (dto.completed) done.add(dto.lessonId);
+      else done.delete(dto.lessonId);
+      // Keep course order and drop ids of lessons that no longer exist
+      const completedLessonIds = course.lessons.map((l) => l.id).filter((id) => done.has(id));
+      const allDone = completedLessonIds.length === course.lessons.length;
+      const completedAt = allDone ? (existing?.completedAt ?? new Date()) : null;
+      const data = { completedLessonIds: JSON.stringify(completedLessonIds), completedAt };
+      return existing
+        ? tx.trainingProgress.update({ where: { id: existing.id }, data })
+        : tx.trainingProgress.create({ data: { tenantId, userId, courseId: course.id, ...data } });
+    });
+    return this.toProgressView(course, row);
+  }
+
+  private toProgressView(course: TrainingCourse, row?: TrainingProgress): CourseProgress {
+    const done = new Set(parseLessonIds(row?.completedLessonIds));
+    const completedLessonIds = course.lessons.map((l) => l.id).filter((id) => done.has(id));
+    const totalLessons = course.lessons.length;
+    const completed = totalLessons > 0 && completedLessonIds.length === totalLessons;
+    return {
+      courseId: course.id,
+      completedLessonIds,
+      totalLessons,
+      percent: totalLessons > 0 ? Math.round((completedLessonIds.length / totalLessons) * 100) : 0,
+      completed,
+      completedAt: completed && row?.completedAt ? row.completedAt.toISOString() : null,
+    };
+  }
+
+  /** API shape of a certificate; signatories come from the tenant's competency settings. */
+  private toCertificateView(c: TrainingCertificate, signatories: Array<{ name: string; title: string }>) {
+    return {
+      certificateId: c.certificateCode,
+      userId: c.userId,
+      traineeName: c.traineeName,
+      traineeEmail: c.traineeEmail,
+      tenantId: c.tenantId,
+      scorePercent: c.scorePercent,
+      issueDate: c.issuedAt.toISOString(),
+      validUntil: c.validUntil.toISOString(),
+      credentialTitle: c.credentialTitle,
+      status: c.revokedAt ? 'REVOKED' : c.validUntil < new Date() ? 'EXPIRED' : 'VALID',
+      revokedAt: c.revokedAt ? c.revokedAt.toISOString() : null,
+      verificationUrl: `${getFrontendUrl()}/training?cert=${c.certificateCode}`,
+      authorizedSignatures: signatories,
+    };
+  }
+
+  async getCertificate(tenantId: string, certId: string) {
+    const cert = await this.prisma.trainingCertificate.findFirst({ where: { tenantId, certificateCode: certId } });
+    if (!cert) {
+      throw new NotFoundException(`Certificate '${certId}' not found`);
+    }
+    const { competency } = await this.settingsService.get(tenantId);
+    return this.toCertificateView(cert, competency.signatories);
+  }
+
+  /** Certificates of one user, newest first. */
+  async listCertificates(tenantId: string, userId?: string) {
+    const [certs, { competency }] = await Promise.all([
+      this.prisma.trainingCertificate.findMany({ where: { tenantId, ...(userId ? { userId } : {}) }, orderBy: { issuedAt: 'desc' } }),
+      this.settingsService.get(tenantId),
+    ]);
+    return certs.map((c) => this.toCertificateView(c, competency.signatories));
+  }
+
+  async revokeCertificate(tenantId: string, certId: string, revokedById: string) {
+    const cert = await this.prisma.trainingCertificate.findFirst({ where: { tenantId, certificateCode: certId } });
+    if (!cert) throw new NotFoundException(`Certificate '${certId}' not found`);
+    if (cert.revokedAt) throw new ConflictException(`Certificate ${certId} is already revoked`);
+    await this.prisma.trainingCertificate.update({ where: { id: cert.id }, data: { revokedAt: new Date(), revokedById } });
+    return this.getCertificate(tenantId, certId);
+  }
+}
+
+/** Fisher-Yates shuffle with a cryptographic RNG, so the correct option's position cannot be predicted. */
+function shuffle<T>(items: T[]): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+const normalizeOption = (text: string): string => text.trim().replace(/\s+/g, ' ').toLowerCase();
+
+function parseLessonIds(json: string | null | undefined): string[] {
+  if (!json) return [];
+  try {
+    const parsed: unknown = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
   }
 }

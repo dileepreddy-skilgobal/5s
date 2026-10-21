@@ -19,3 +19,10 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+
+# Uploaded evidence files (local disk storage driver)
+backend/storage/
+
+# End-to-end test build output
+backend/test/e2e/.mobile-lib/
+mobile/dist-web/

@@ -1,7 +1,11 @@
 import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
 import { PrismaService } from '../../core/database/prisma.service';
+import { SubscriptionService } from '../../core/subscription/subscription.service';
+import { TenantReferenceService } from '../../core/database/tenant-reference.service';
 import { CreateOrgNodeDto, UpdateOrgNodeDto, MoveOrgNodeDto } from './dto/organization.dto';
-import * as QRCode from 'qrcode';
+import { OrgNode } from '@prisma/client';
+import { buildLocationQrPayload, defaultMilestoneRows } from '../locations/location-qr';
+import { NodeTypeOption, isAllowedNodeType, nodeTypeOptions } from './node-types';
 
 export interface OrgTreeNode {
   id: string;
@@ -15,33 +19,36 @@ export interface OrgTreeNode {
   parentId: string | null;
   children: OrgTreeNode[];
   locationCount: number;
-  qrCodeData?: string | null;
 }
 
 @Injectable()
 export class OrganizationService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly subscription: SubscriptionService,
+    private readonly tenantRefs: TenantReferenceService,
+  ) {}
 
-  private async resolveTenantId(tenantIdOrSlug: string): Promise<string> {
-    if (!tenantIdOrSlug) return '39aa6fa6-fb16-44f6-81cf-05f3670f1df6';
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantIdOrSlug);
-    if (isUuid) {
-      return tenantIdOrSlug;
-    }
-    const tenant = await this.prisma.tenant.findUnique({
-      where: { slug: tenantIdOrSlug },
-    });
-    return tenant ? tenant.id : tenantIdOrSlug;
+  /** Node types this organization may use: its configured hierarchy levels first, then the built-in types. */
+  async getNodeTypes(tenantId: string): Promise<NodeTypeOption[]> {
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { hierarchyConfig: true } });
+    return nodeTypeOptions(tenant?.hierarchyConfig);
   }
 
-  async getTreeByTenant(rawTenantId: string): Promise<OrgTreeNode[]> {
-    const tenantId = await this.resolveTenantId(rawTenantId);
+  private async assertNodeType(tenantId: string, nodeType: string) {
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { hierarchyConfig: true } });
+    if (!isAllowedNodeType(tenant?.hierarchyConfig, nodeType)) {
+      throw new BadRequestException(`'${nodeType}' is not one of this organization's hierarchy levels. Add it under Settings → Hierarchy levels first.`);
+    }
+  }
+
+  async getTreeByTenant(tenantId: string): Promise<OrgTreeNode[]> {
     const nodes = await this.prisma.orgNode.findMany({
       where: { tenantId },
       orderBy: [{ depth: 'asc' }, { sortOrder: 'asc' }, { name: 'asc' }],
       include: {
         _count: {
-          select: { locations: true },
+          select: { locations: { where: { deletedAt: null } } },
         },
       },
     });
@@ -49,23 +56,8 @@ export class OrganizationService {
     const nodeMap = new Map<string, OrgTreeNode>();
     const roots: OrgTreeNode[] = [];
 
-    // Map all nodes
+    // Map all nodes. Org units have no QR tag: the scanner only opens locations.
     for (const n of nodes) {
-      const qrPayload = JSON.stringify({
-        type: '5S_ORG_NODE',
-        tenantId,
-        nodeId: n.id,
-        code: n.code,
-        name: n.name,
-        nodeType: n.nodeType,
-      });
-      let qrCodeData: string | null = null;
-      try {
-        qrCodeData = await QRCode.toDataURL(qrPayload, { width: 300, margin: 2 });
-      } catch (e) {
-        qrCodeData = null;
-      }
-
       nodeMap.set(n.id, {
         id: n.id,
         name: n.name,
@@ -78,7 +70,6 @@ export class OrganizationService {
         parentId: n.parentId,
         children: [],
         locationCount: n._count.locations,
-        qrCodeData,
       });
     }
 
@@ -95,53 +86,32 @@ export class OrganizationService {
     return roots;
   }
 
-  async getAllNodesFlat(rawTenantId: string) {
-    const tenantId = await this.resolveTenantId(rawTenantId);
+  async getAllNodesFlat(tenantId: string) {
     const nodes = await this.prisma.orgNode.findMany({
       where: { tenantId },
       orderBy: [{ depth: 'asc' }, { sortOrder: 'asc' }],
       include: {
         parent: { select: { id: true, name: true, code: true, nodeType: true } },
-        _count: { select: { locations: true, children: true } },
+        _count: { select: { locations: { where: { deletedAt: null } }, children: { where: { deletedAt: null } } } },
       },
     });
 
-    return Promise.all(
-      nodes.map(async (n) => {
-        const qrPayload = JSON.stringify({
-          type: '5S_ORG_NODE',
-          tenantId,
-          nodeId: n.id,
-          code: n.code,
-          name: n.name,
-          nodeType: n.nodeType,
-        });
-        let qrCodeData: string | null = null;
-        try {
-          qrCodeData = await QRCode.toDataURL(qrPayload, { width: 300, margin: 2 });
-        } catch (e) {
-          qrCodeData = null;
-        }
-        return {
-          ...n,
-          qrCodeData,
-        };
-      }),
-    );
+    return nodes;
   }
 
-  async getNodeById(rawTenantId: string, id: string) {
-    const tenantId = await this.resolveTenantId(rawTenantId);
+  async getNodeById(tenantId: string, id: string) {
     const node = await this.prisma.orgNode.findFirst({
       where: { id, tenantId },
       include: {
         parent: true,
         children: {
+          where: { deletedAt: null },
           include: {
-            _count: { select: { locations: true } },
+            _count: { select: { locations: { where: { deletedAt: null } } } },
           },
         },
         locations: {
+          where: { deletedAt: null },
           include: {
             owner: { select: { id: true, firstName: true, lastName: true } },
           },
@@ -152,29 +122,10 @@ export class OrganizationService {
       throw new NotFoundException(`Organizational node with ID '${id}' not found`);
     }
 
-    const qrPayload = JSON.stringify({
-      type: '5S_ORG_NODE',
-      tenantId,
-      nodeId: node.id,
-      code: node.code,
-      name: node.name,
-      nodeType: node.nodeType,
-    });
-    let qrCodeData: string | null = null;
-    try {
-      qrCodeData = await QRCode.toDataURL(qrPayload, { width: 300, margin: 2 });
-    } catch (e) {
-      qrCodeData = null;
-    }
-
-    return {
-      ...node,
-      qrCodeData,
-    };
+    return node;
   }
 
-  async generateNextOrgNodeCode(rawTenantId: string, nodeType: string, parentId?: string): Promise<string> {
-    const tenantId = await this.resolveTenantId(rawTenantId);
+  async generateNextOrgNodeCode(tenantId: string, nodeType: string, parentId?: string): Promise<string> {
 
     const prefixMap: Record<string, string> = {
       ENTERPRISE: 'ENT',
@@ -191,7 +142,8 @@ export class OrganizationService {
       SUB_SECTION: 'SEC',
     };
 
-    const typePrefix = prefixMap[nodeType] || 'NOD';
+    // Configured levels without a mapped prefix use their first letters (COUNTRY → COU)
+    const typePrefix = prefixMap[nodeType] || nodeType.replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase() || 'NOD';
 
     let parentPrefix = '';
     if (parentId) {
@@ -209,6 +161,7 @@ export class OrganizationService {
       where: {
         tenantId,
         code: { startsWith: basePrefix },
+        deletedAt: undefined, // soft-deleted codes stay reserved
       },
       select: { code: true },
     });
@@ -228,25 +181,27 @@ export class OrganizationService {
     return `${basePrefix}-${formattedNum}`;
   }
 
-  async createNode(rawTenantId: string, dto: CreateOrgNodeDto) {
-    const tenantId = await this.resolveTenantId(rawTenantId);
+  async createNode(tenantId: string, dto: CreateOrgNodeDto, actorId?: string) {
+    await this.tenantRefs.assertOptional(tenantId, 'user', dto.ownerId, 'Owner');
+    await this.assertNodeType(tenantId, dto.nodeType);
 
     let code = dto.code ? dto.code.trim().toUpperCase().replace(/\s+/g, '-') : '';
     if (!code) {
       code = await this.generateNextOrgNodeCode(tenantId, dto.nodeType, dto.parentId);
     }
 
-    // Ensure uniqueness within tenant
-    let existing = await this.prisma.orgNode.findFirst({
-      where: { tenantId, code },
+    // Codes are unique within the tenant; a typed code is reported, never silently replaced
+    const existing = await this.prisma.orgNode.findFirst({
+      where: { tenantId, code, deletedAt: undefined },
+      select: { id: true },
     });
     if (existing) {
-      code = await this.generateNextOrgNodeCode(tenantId, dto.nodeType, dto.parentId);
+      throw new ConflictException(`Org node code '${code}' is already in use`);
     }
 
     let parentPath = `/${tenantId}/`;
     let depth = 0;
-    let parentNode: any = null;
+    let parentNode: OrgNode | null = null;
 
     if (dto.parentId) {
       parentNode = await this.prisma.orgNode.findFirst({
@@ -276,41 +231,47 @@ export class OrganizationService {
 
     // Auto-create Location in Location & Area Master Directory if requested
     if (dto.autoCreateLocation) {
-      let areaCode = `LOC-${dto.code}`;
+      let areaCode = `LOC-${code}`;
       while (await this.prisma.location.findFirst({ where: { tenantId, areaCode } })) {
-        areaCode = `LOC-${dto.code}-${Math.floor(100 + Math.random() * 900)}`;
+        areaCode = `LOC-${code}-${Math.floor(100 + Math.random() * 900)}`;
       }
 
-      const qrPayload = JSON.stringify({
-        type: '5S_LOCATION_AUDIT',
-        tenantId,
-        areaCode,
-        locationName: dto.name,
-        nodeType: dto.nodeType,
-        orgNodeId: createdNode.id,
-      });
-      const locQrCodeData = await QRCode.toDataURL(qrPayload, { width: 300, margin: 2 });
+      // An explicit location type always wins; the node type only suggests one when none was chosen
+      const suggestedType: Record<string, string> = {
+        STORAGE_RACK: 'WAREHOUSE_BAY',
+        QUARANTINE_ZONE: 'RED_TAG_ZONE',
+        WORKBENCH: 'WORKSHOP',
+      };
+      const locationType = dto.locationType || suggestedType[dto.nodeType] || 'PRODUCTION_LINE';
 
-      let mappedLocType = dto.locationType || 'PRODUCTION_LINE';
-      if (dto.nodeType === 'STORAGE_RACK') mappedLocType = 'WAREHOUSE_BAY';
-      else if (dto.nodeType === 'QUARANTINE_ZONE') mappedLocType = 'RED_TAG_ZONE';
-      else if (dto.nodeType === 'WORKBENCH') mappedLocType = 'WORKSHOP';
-
-      await this.prisma.location.create({
+      await this.subscription.assertWithinLimit(tenantId, 'locations');
+      const location = await this.prisma.location.create({
         data: {
           tenantId,
           orgNodeId: createdNode.id,
           areaCode,
           name: dto.name,
-          locationType: mappedLocType,
+          locationType,
           riskLevel: dto.riskLevel || 'MEDIUM',
           auditFrequency: dto.auditFrequency || 'WEEKLY',
-          building: dto.building || (parentNode?.name ? `${parentNode.name}` : 'Main Plant'),
-          floor: dto.floor || 'Ground Floor',
-          description: dto.description || `${dto.nodeType.replace(/_/g, ' ')} registered under ${parentNode?.name || 'Enterprise'}`,
+          building: dto.building?.trim() || null,
+          floor: dto.floor?.trim() || null,
+          description: dto.description?.trim() || null,
           ownerId: dto.ownerId || null,
-          qrCodeData: locQrCodeData,
+          qrCodeData: buildLocationQrPayload(tenantId, areaCode),
           status: 'ACTIVE',
+        },
+      });
+      await this.prisma.locationTimeline.createMany({
+        data: defaultMilestoneRows(tenantId, location.id, 'Standard 5S Implementation Roadmap'),
+      });
+      await this.prisma.locationAuditLog.create({
+        data: {
+          tenantId,
+          locationId: location.id,
+          userId: actorId ?? null,
+          actionType: 'CREATED',
+          details: JSON.stringify({ action: 'Created with organization unit', areaCode, name: location.name, orgNode: code }),
         },
       });
     }
@@ -318,94 +279,108 @@ export class OrganizationService {
     return this.getNodeById(tenantId, createdNode.id);
   }
 
-  async updateNode(rawTenantId: string, id: string, dto: UpdateOrgNodeDto) {
-    const tenantId = await this.resolveTenantId(rawTenantId);
+  async updateNode(tenantId: string, id: string, dto: UpdateOrgNodeDto) {
     const node = await this.getNodeById(tenantId, id);
+    // A unit keeps its current type even if that level was later removed from the settings
+    if (dto.nodeType && dto.nodeType !== node.nodeType) await this.assertNodeType(tenantId, dto.nodeType);
 
-    // If code changed, update current and all child paths
+    const newCode = dto.code ? dto.code.trim().toUpperCase().replace(/\s+/g, '-') : undefined;
+
+    // If code changed, update current and all descendant paths
     let newPath = node.path;
-    if (dto.code && dto.code !== node.code) {
-      const oldCodeSegment = `${node.code}/`;
-      const newCodeSegment = `${dto.code}/`;
-      newPath = node.path.replace(new RegExp(`${oldCodeSegment}$`), newCodeSegment);
-
-      // Update descendants
-      const children = await this.prisma.orgNode.findMany({
-        where: { tenantId, path: { startsWith: node.path } },
+    const codeChanged = !!newCode && newCode !== node.code;
+    if (codeChanged) {
+      const clash = await this.prisma.orgNode.findFirst({
+        where: { tenantId, code: newCode, NOT: { id } },
+        select: { id: true },
       });
-
-      for (const child of children) {
-        if (child.id !== node.id) {
-          const updatedChildPath = child.path.replace(node.path, newPath);
-          await this.prisma.orgNode.update({
-            where: { id: child.id },
-            data: { path: updatedChildPath },
-          });
-        }
+      if (clash) {
+        throw new ConflictException(`Org node code '${newCode}' is already in use`);
       }
+      // Paths end with "<code>/"; replace only that trailing segment (plain string ops, no regex on user input)
+      const oldSegment = `${node.code}/`;
+      newPath = node.path.endsWith(oldSegment) ? `${node.path.slice(0, -oldSegment.length)}${newCode}/` : node.path;
     }
 
-    return this.prisma.orgNode.update({
-      where: { id },
-      data: {
-        name: dto.name,
-        code: dto.code,
-        nodeType: dto.nodeType,
-        sortOrder: dto.sortOrder,
-        status: dto.status,
-        path: newPath,
-      },
-    });
+    const descendants = codeChanged
+      ? await this.prisma.orgNode.findMany({
+          where: { tenantId, path: { startsWith: node.path }, NOT: { id } },
+          select: { id: true, path: true },
+        })
+      : [];
+
+    // Node and descendant paths change together or not at all
+    const updates = descendants.map((child) =>
+      this.prisma.orgNode.update({
+        where: { id: child.id },
+        data: { path: newPath + child.path.slice(node.path.length) },
+      }),
+    );
+    const results = await this.prisma.$transaction([
+      ...updates,
+      this.prisma.orgNode.update({
+        where: { id },
+        data: {
+          name: dto.name,
+          code: codeChanged ? newCode : undefined,
+          nodeType: dto.nodeType,
+          sortOrder: dto.sortOrder,
+          status: dto.status,
+          path: newPath,
+        },
+      }),
+    ]);
+    return results[results.length - 1];
   }
 
-  async moveNode(rawTenantId: string, id: string, dto: MoveOrgNodeDto) {
-    const tenantId = await this.resolveTenantId(rawTenantId);
+  /** Moves a node (with its sub-tree) under another node, or to the top level when no new parent is given. */
+  async moveNode(tenantId: string, id: string, dto: MoveOrgNodeDto) {
     const node = await this.getNodeById(tenantId, id);
-    const newParent = await this.getNodeById(tenantId, dto.newParentId);
+    const newParent = dto.newParentId ? await this.getNodeById(tenantId, dto.newParentId) : null;
 
-    if (newParent.path.startsWith(node.path)) {
-      throw new BadRequestException('Cannot move a node inside one of its own descendants.');
+    if (newParent && (newParent.id === node.id || newParent.path.startsWith(node.path))) {
+      throw new BadRequestException('Cannot move a node inside itself or one of its own descendants.');
     }
 
-    const newDepth = newParent.depth + 1;
+    const newDepth = newParent ? newParent.depth + 1 : 0;
     const oldPath = node.path;
-    const newPath = `${newParent.path}${node.code}/`;
+    const newPath = `${newParent ? newParent.path : `/${tenantId}/`}${node.code}/`;
 
-    // Update node
-    await this.prisma.orgNode.update({
-      where: { id },
-      data: {
-        parentId: newParent.id,
-        depth: newDepth,
-        path: newPath,
-      },
-    });
-
-    // Update all descendants
     const descendants = await this.prisma.orgNode.findMany({
-      where: { tenantId, path: { startsWith: oldPath } },
+      where: { tenantId, path: { startsWith: oldPath }, NOT: { id } },
+      select: { id: true, path: true, depth: true },
     });
 
-    for (const d of descendants) {
-      if (d.id !== id) {
-        const depthDiff = d.depth - node.depth;
-        const updatedPath = d.path.replace(oldPath, newPath);
-        await this.prisma.orgNode.update({
+    // The node and its whole sub-tree move together or not at all
+    await this.prisma.$transaction([
+      this.prisma.orgNode.update({
+        where: { id },
+        data: {
+          parentId: newParent ? newParent.id : null,
+          depth: newDepth,
+          path: newPath,
+        },
+      }),
+      ...descendants.map((d) =>
+        this.prisma.orgNode.update({
           where: { id: d.id },
           data: {
-            path: updatedPath,
-            depth: newDepth + depthDiff,
+            path: newPath + d.path.slice(oldPath.length),
+            depth: newDepth + (d.depth - node.depth),
           },
-        });
-      }
-    }
+        }),
+      ),
+    ]);
 
     return this.getNodeById(tenantId, id);
   }
 
-  async deleteNode(rawTenantId: string, id: string) {
-    const tenantId = await this.resolveTenantId(rawTenantId);
+  async deleteNode(tenantId: string, id: string, actorId: string) {
     const node = await this.getNodeById(tenantId, id);
+    const childNodes = await this.prisma.orgNode.count({ where: { tenantId, parentId: id } });
+    if (childNodes > 0) {
+      throw new BadRequestException(`Cannot delete node '${node.name}' because it has ${childNodes} child node(s). Delete or move them first.`);
+    }
     const childLocations = await this.prisma.location.count({
       where: { tenantId, orgNodeId: id },
     });
@@ -413,8 +388,6 @@ export class OrganizationService {
       throw new BadRequestException(`Cannot delete node '${node.name}' because it contains ${childLocations} active locations. Reassign locations first.`);
     }
 
-    return this.prisma.orgNode.delete({
-      where: { id },
-    });
+    return this.prisma.orgNode.update({ where: { id }, data: { deletedAt: new Date(), deletedById: actorId } });
   }
 }

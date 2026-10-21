@@ -5,8 +5,6 @@ import { CheckCircle2, AlertCircle, Info, AlertTriangle, X } from 'lucide-react'
 export const ToastContainer: React.FC = () => {
   const { toasts, removeToast } = useApp();
 
-  if (toasts.length === 0) return null;
-
   const getIcon = (type: string) => {
     switch (type) {
       case 'success':
@@ -21,7 +19,10 @@ export const ToastContainer: React.FC = () => {
   };
 
   return (
+    // Always mounted so screen readers announce toasts as they arrive
     <div
+      role="status"
+      aria-live="polite"
       style={{
         position: 'fixed',
         bottom: '24px',
@@ -30,8 +31,8 @@ export const ToastContainer: React.FC = () => {
         display: 'flex',
         flexDirection: 'column',
         gap: '10px',
-        maxWidth: '380px',
-        width: '100%',
+        width: 'min(380px, calc(100vw - 48px))',
+        pointerEvents: toasts.length ? 'auto' : 'none',
       }}
     >
       {toasts.map((t) => (
@@ -50,11 +51,13 @@ export const ToastContainer: React.FC = () => {
           }}
         >
           <div style={{ marginTop: '2px' }}>{getIcon(t.type)}</div>
-          <div style={{ flex: 1 }}>
+          <div style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
             {t.title && <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>{t.title}</div>}
             <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>{t.message}</div>
           </div>
           <button
+            type="button"
+            aria-label="Dismiss"
             onClick={() => removeToast(t.id)}
             style={{
               background: 'transparent',

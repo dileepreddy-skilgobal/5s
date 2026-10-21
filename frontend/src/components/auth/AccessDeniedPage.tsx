@@ -1,26 +1,17 @@
 import React from 'react';
+import { roleHomePath, roleLabel } from '../../constants/roles';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { Card } from '../ui/Card';
 import { Button } from '../ui/Button';
 import { Badge } from '../ui/Badge';
+import { PageHeader } from '../ui/PageHeader';
 import { ShieldAlert, ArrowLeft, Home, Lock } from 'lucide-react';
 
 interface AccessDeniedPageProps {
   resourceName?: string;
   allowedRoles?: string[];
 }
-
-const ROLE_DISPLAY_NAMES: Record<string, string> = {
-  SUPER_ADMIN: 'SaaS Super Administrator',
-  ORG_ADMIN: 'Organization Administrator',
-  PLANT_HEAD: 'Plant Head / Director',
-  COORDINATOR_5S: '5S Lean Coordinator',
-  DEPT_HEAD: 'Department Head',
-  AREA_OWNER: 'Area Owner / Cell Leader',
-  AUDITOR: 'Certified 5S Auditor',
-  EXTERNAL_AUDITOR: 'External 5S Consultant',
-};
 
 export const AccessDeniedPage: React.FC<AccessDeniedPageProps> = ({
   resourceName = 'this corporate resource',
@@ -29,109 +20,83 @@ export const AccessDeniedPage: React.FC<AccessDeniedPageProps> = ({
   const navigate = useNavigate();
   const { activeUserRole, currentUser } = useApp();
 
-  const currentRoleName = ROLE_DISPLAY_NAMES[activeUserRole] || activeUserRole;
-  const allowedRoleNames = allowedRoles.map((r) => ROLE_DISPLAY_NAMES[r] || r).join(', ');
+  const currentRoleName = roleLabel(activeUserRole);
+  const allowedRoleNames = allowedRoles.filter((r) => r !== 'SUPER_ADMIN').map(roleLabel).join(', ');
 
-  const getHomePath = () => {
-    if (activeUserRole === 'SUPER_ADMIN') return '/super-admin';
-    if (activeUserRole === 'AREA_OWNER') return '/area-owner-hub';
-    if (activeUserRole === 'AUDITOR' || activeUserRole === 'EXTERNAL_AUDITOR') return '/auditor-hub';
-    return '/locations';
-  };
+  const getHomePath = () => roleHomePath(activeUserRole || currentUser?.primaryRole);
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: '70vh',
-        padding: '24px',
-      }}
-    >
-      <Card noPadding>
-        <div
-          style={{
-            maxWidth: '560px',
-            padding: '36px 32px',
-            textAlign: 'center',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: '16px',
-          }}
-        >
-          <div
-            style={{
-              width: '64px',
-              height: '64px',
-              borderRadius: '50%',
-              background: 'rgba(239, 68, 68, 0.1)',
-              color: 'var(--color-danger)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 20px rgba(239, 68, 68, 0.15)',
-            }}
-          >
-            <ShieldAlert size={32} />
-          </div>
+    <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      <PageHeader
+        title="You don't have access to this page"
+        meta={<Badge variant="danger">No access</Badge>}
+        description="Your role doesn't include this page. Ask your organization admin if you need it."
+      />
 
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '8px' }}>
-              <Badge variant="danger">403 Restricted</Badge>
-              <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', fontWeight: 600 }}>
-                Enterprise Access Control
+      <div style={{ maxWidth: '640px', width: '100%' }}>
+        <Card>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+              <span
+                aria-hidden="true"
+                style={{
+                  width: '40px',
+                  height: '40px',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'var(--color-danger-bg)',
+                  border: '1px solid var(--color-danger-border)',
+                  color: 'var(--color-danger)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  flexShrink: 0,
+                }}
+              >
+                <ShieldAlert size={20} />
               </span>
+              <p style={{ fontSize: '14px', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.55, minWidth: 0, overflowWrap: 'anywhere' }}>
+                Your role (<strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{currentRoleName}</strong>) can't open{' '}
+                <strong style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{resourceName}</strong>. Ask your organization admin if you need it.
+              </p>
             </div>
-            <h2 style={{ fontSize: '20px', fontWeight: 800, color: 'var(--text-primary)', margin: 0 }}>
-              Access Permission Denied
-            </h2>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '8px', lineHeight: 1.5 }}>
-              Your current profile role <strong>({currentRoleName})</strong> is not authorized to access <strong>{resourceName}</strong>.
-            </p>
-          </div>
 
-          {allowedRoles.length > 0 && (
+            {allowedRoles.length > 0 && (
+              <div
+                style={{
+                  padding: '12px 16px',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'var(--bg-surface-subtle)',
+                  border: '1px solid var(--border-subtle)',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12.5px', color: 'var(--text-secondary)', marginBottom: '4px' }}>
+                  <Lock size={14} aria-hidden="true" />
+                  <span>Available to</span>
+                </div>
+                <div style={{ fontSize: '14px', color: 'var(--text-primary)', fontWeight: 600 }}>{allowedRoleNames}</div>
+              </div>
+            )}
+
             <div
               style={{
-                width: '100%',
-                padding: '12px 16px',
-                borderRadius: 'var(--radius-md)',
-                background: 'var(--bg-surface-subtle)',
-                border: '1px solid var(--border-subtle)',
-                fontSize: '12px',
-                textAlign: 'left',
+                display: 'flex',
+                gap: '12px',
+                flexWrap: 'wrap',
+                justifyContent: 'flex-end',
+                paddingTop: '16px',
+                borderTop: '1px solid var(--border-subtle)',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-tertiary)', fontWeight: 600, marginBottom: '4px' }}>
-                <Lock size={13} />
-                <span>Required Clearance:</span>
-              </div>
-              <div style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
-                {allowedRoleNames}
-              </div>
+              <Button variant="secondary" icon={<ArrowLeft size={16} />} onClick={() => navigate(-1)}>
+                Go back
+              </Button>
+              <Button variant="primary" icon={<Home size={16} />} onClick={() => navigate(getHomePath())}>
+                Go to my home page
+              </Button>
             </div>
-          )}
-
-          <div style={{ display: 'flex', gap: '12px', marginTop: '8px', width: '100%', justifyContent: 'center' }}>
-            <Button
-              variant="secondary"
-              icon={<ArrowLeft size={15} />}
-              onClick={() => navigate(-1)}
-            >
-              Go Back
-            </Button>
-            <Button
-              variant="primary"
-              icon={<Home size={15} />}
-              onClick={() => navigate(getHomePath())}
-            >
-              Return to Workspace
-            </Button>
           </div>
-        </div>
-      </Card>
+        </Card>
+      </div>
     </div>
   );
 };

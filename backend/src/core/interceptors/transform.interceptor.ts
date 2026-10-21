@@ -1,4 +1,5 @@
 import {
+  StreamableFile,
   Injectable,
   NestInterceptor,
   ExecutionContext,
@@ -18,6 +19,8 @@ export class TransformInterceptor<T> implements NestInterceptor<T, any> {
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     return next.handle().pipe(
       map((data) => {
+        // File downloads are streamed as-is
+        if (data instanceof StreamableFile) return data;
         if (data && typeof data === 'object' && 'success' in data && 'data' in data) {
           return {
             success: data.success,

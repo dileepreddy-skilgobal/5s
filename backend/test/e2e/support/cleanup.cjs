@@ -1,0 +1,41 @@
+// Removes ONLY test fixtures whose codes start with "ISO-" (created by the e2e scripts). Run from backend dir.
+const path = require('path');
+const { PrismaClient } = require(path.join(process.argv[2] || process.cwd(), 'node_modules/@prisma/client'));
+const p = new PrismaClient();
+(async () => {
+  const locs = await p.location.findMany({ where: { OR: [{ areaCode: { startsWith: 'ISO-' } }, { name: { startsWith: 'ISO ' } }], deletedAt: undefined }, select: { id: true } });
+  const locIds = locs.map((l) => l.id);
+  const execs = await p.auditExecution.findMany({ where: { locationId: { in: locIds }, deletedAt: undefined }, select: { id: true } });
+  const execIds = execs.map((e) => e.id);
+  const actions = await p.correctiveAction.findMany({ where: { locationId: { in: locIds }, deletedAt: undefined }, select: { id: true } });
+  const actionIds = actions.map((a) => a.id);
+  const r = {};
+  r.kudos = (await p.kudos.deleteMany({ where: { message: { startsWith: 'ISO-' } } })).count;
+  r.trophyAwards = (await p.trophyAward.deleteMany({ where: { citation: { startsWith: 'ISO-' } } })).count;
+  r.notifications = (await p.notification.deleteMany({ where: { OR: [{ entityId: { in: [...actionIds, ...execIds, ...locIds] } }, { body: { contains: 'ISO-' } }, { title: { contains: 'ISO-' } }] } })).count;
+  // Test observations raised at real locations (e.g. mobile contract tests) carry an ISO- title
+  const isoObs = await p.observation.findMany({ where: { title: { startsWith: 'ISO-' }, deletedAt: undefined }, select: { id: true } });
+  const isoObsIds = isoObs.map((o) => o.id);
+  const isoActs = await p.correctiveAction.findMany({ where: { observationId: { in: isoObsIds }, deletedAt: undefined }, select: { id: true } });
+  await p.actionHistoryLog.deleteMany({ where: { actionId: { in: isoActs.map((a) => a.id) } } });
+  await p.correctiveAction.deleteMany({ where: { id: { in: isoActs.map((a) => a.id) } } });
+  r.isoTitledObservations = (await p.observation.deleteMany({ where: { id: { in: isoObsIds } } })).count;
+  r.apiKeys = (await p.apiKey.deleteMany({ where: { name: { startsWith: 'ISO' } } })).count;
+  r.webhooks = (await p.webhookEndpoint.deleteMany({ where: { description: { startsWith: 'ISO' } } })).count;
+  r.history = (await p.actionHistoryLog.deleteMany({ where: { actionId: { in: actionIds } } })).count;
+  r.actions = (await p.correctiveAction.deleteMany({ where: { id: { in: actionIds } } })).count;
+  r.observations = (await p.observation.deleteMany({ where: { locationId: { in: locIds } } })).count;
+  r.answers = (await p.auditAnswer.deleteMany({ where: { executionId: { in: execIds } } })).count;
+  r.executions = (await p.auditExecution.deleteMany({ where: { id: { in: execIds } } })).count;
+  r.instances = (await p.scheduledAuditInstance.deleteMany({ where: { OR: [{ locationId: { in: locIds } }, { schedule: { scheduleCode: { startsWith: 'ISO-' } } }] } })).count;
+  r.schedules = (await p.auditSchedule.deleteMany({ where: { scheduleCode: { startsWith: 'ISO-' } } })).count;
+  r.redTags = (await p.redTag.deleteMany({ where: { locationId: { in: locIds } } })).count;
+  r.timelines = (await p.locationTimeline.deleteMany({ where: { locationId: { in: locIds } } })).count;
+  r.logs = (await p.locationAuditLog.deleteMany({ where: { locationId: { in: locIds } } })).count;
+  r.locations = (await p.location.deleteMany({ where: { id: { in: locIds } } })).count;
+  r.standards = (await p.standard.deleteMany({ where: { code: { startsWith: 'ISO-' } } })).count;
+  r.templates = (await p.auditTemplate.deleteMany({ where: { code: { startsWith: 'ISO-' } } })).count;
+  r.users = (await p.user.deleteMany({ where: { email: { contains: 'iso-softdel-' } } })).count;
+  await p.user.updateMany({ where: { email: 'planthead.blr@skilglobal.com' }, data: { failedLoginAttempts: 0, lockedUntil: null } });
+  console.log('cleanup', JSON.stringify(r));
+})().finally(() => p.$disconnect());

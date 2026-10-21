@@ -1,5 +1,17 @@
-import { IsString, IsOptional, IsArray, IsNumber, IsBoolean, ValidateNested } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsArray,
+  IsNumber,
+  IsIn,
+  IsDateString,
+  Min,
+  Max,
+  ValidateNested,
+} from 'class-validator';
 import { Type } from 'class-transformer';
+import { values } from '../../../core/validation/domain-values';
+import { EmptyToUndefined } from '../../../core/validation/transforms';
 
 export class StartExecutionDto {
   @IsOptional()
@@ -18,7 +30,8 @@ export class StartExecutionDto {
 
   @IsOptional()
   @IsString()
-  auditType?: string; // ROUTINE, SELF, LAYERED, MANAGEMENT, SURPRISE, AD_HOC
+  @IsIn(values('AUDIT_TYPES'))
+  auditType?: string;
 
   @IsOptional()
   @IsString()
@@ -32,27 +45,41 @@ export class AnswerItemDto {
   @IsString()
   sectionId: string;
 
+  /** Weighted points earned; the upper bound depends on the question's weightage (maxScore = weightage x 5). */
   @IsNumber()
+  @Min(0)
   score: number;
 
   @IsOptional()
   @IsNumber()
+  @Min(0)
   maxScore?: number;
 
   @IsOptional()
   @IsString()
-  status?: string; // CONFORMING, MINOR_NC, MAJOR_NC, CRITICAL_FAIL, NOT_APPLICABLE
+  @IsIn(values('ANSWER_STATUSES'))
+  status?: string;
 
   @IsOptional()
   @IsString()
   notes?: string;
 
+  /** Array of URL strings, or an already-serialised JSON string (the service accepts both). */
   @IsOptional()
-  evidenceUrls?: string[] | any; // Array of strings or JSON
+  evidenceUrls?: string[] | string;
 
   @IsOptional()
   @IsString()
   voiceNoteUrl?: string;
+
+  /**
+   * Severity the auditor assigns to the finding this answer raises (web runner finding editor).
+   * Optional: without it the server derives the severity from the status and the question's default.
+   */
+  @IsOptional()
+  @IsString()
+  @IsIn(values('QUESTION_SEVERITIES'))
+  findingSeverity?: string;
 }
 
 export class SaveDraftDto {
@@ -84,15 +111,19 @@ export class SubmitAuditDto {
   @IsString()
   auditorName?: string;
 
+  @EmptyToUndefined()
   @IsOptional()
-  @IsString()
+  @IsDateString()
   completedAt?: string;
 }
 
 export class AcknowledgeAuditDto {
+  /** Ignored: the signatory is always the signed-in user (kept optional for older clients). */
+  @IsOptional()
   @IsString()
-  acknowledgedByName: string;
+  acknowledgedByName?: string;
 
+  /** Ignored, see acknowledgedByName. */
   @IsOptional()
   @IsString()
   acknowledgedById?: string;
@@ -104,37 +135,45 @@ export class AcknowledgeAuditDto {
   @IsString()
   acknowledgementNotes: string;
 
+  @EmptyToUndefined()
   @IsOptional()
-  @IsString()
+  @IsDateString()
   targetResolutionDate?: string;
 }
 
 export class DisputeAuditDto {
+  /** Ignored: the disputing party is always the signed-in user (kept optional for older clients). */
+  @IsOptional()
   @IsString()
-  disputedByName: string;
+  disputedByName?: string;
 
+  /** Ignored, see disputedByName. */
   @IsOptional()
   @IsString()
   disputedById?: string;
 
   @IsString()
-  disputeReason: string; // SCHEDULED_CHANGEOVER, OUT_OF_SCOPE, INACCURATE_EVIDENCE, FORCE_MAJEURE, OTHER
+  @IsIn(values('DISPUTE_REASONS'))
+  disputeReason: string;
 
   @IsString()
   disputeNotes: string;
 
   @IsOptional()
   @IsArray()
+  @IsString({ each: true })
   disputedQuestionIds?: string[];
 
   @IsOptional()
   @IsArray()
+  @IsString({ each: true })
   counterEvidenceUrls?: string[];
 }
 
 export class ResolveDisputeDto {
   @IsString()
-  decision: string; // ACCEPT_DISPUTE, REJECT_DISPUTE
+  @IsIn(values('DISPUTE_DECISIONS'))
+  decision: string;
 
   @IsString()
   resolutionNotes: string;
@@ -145,5 +184,7 @@ export class ResolveDisputeDto {
 
   @IsOptional()
   @IsNumber()
+  @Min(0)
+  @Max(100)
   adjustedScore?: number;
 }

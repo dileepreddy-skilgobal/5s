@@ -1,6 +1,8 @@
-import React from 'react';
-import { NavLink, useNavigate } from 'react-router-dom';
+import React, { useEffect } from 'react';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
+import { roleLabel } from '../../constants/roles';
+import { MessageKey, useI18n } from '../../i18n';
 import {
   Layers,
   ShieldCheck,
@@ -8,45 +10,77 @@ import {
   MapPin,
   QrCode,
   FileSpreadsheet,
-  Sparkles,
   Users,
   Compass,
   FileCheck,
-  CheckCircle,
   BarChart3,
-  ChevronRight,
   FileText,
   Calendar,
   AlertTriangle,
   Tag,
   LogOut,
-  User,
+  X,
   GraduationCap,
   LayoutDashboard,
   ClipboardCheck,
-  ShieldAlert,
-  Wrench,
-  CheckSquare,
   Trophy,
+  History,
+  Settings,
+  FileBarChart,
+  CreditCard,
+  Plug,
+  UserCog,
 } from 'lucide-react';
+import { useRecognitionSettings } from '../../pages/gamification/recognitionSettings';
 
 interface NavItem {
   path: string;
-  label: string;
+  /** Translated with the organization's terminology (see nav.* in src/i18n/messages). */
+  labelKey: MessageKey;
   icon: React.ReactNode;
-  badge?: string;
-  disabled?: boolean;
-  tag?: string;
 }
 
 interface NavSection {
-  title: string;
+  titleKey: MessageKey;
   items: NavItem[];
 }
 
-export const Sidebar: React.FC = () => {
-  const { currentUser, logout, activeUserRole } = useApp();
+/**
+ * Menu labels in sentence case ("Corrective Actions" → "Corrective actions"). Terminology terms arrive
+ * title-cased; acronyms (all capitals, e.g. "CAPA", "5S") are kept as written.
+ */
+const sentenceCase = (label: string): string =>
+  label
+    .split(' ')
+    .map((word, i) => (i === 0 || word === word.toUpperCase() ? word : word.toLowerCase()))
+    .join(' ');
+
+interface SidebarProps {
+  /** Drawer state on narrow screens (always visible from 1024px up). */
+  open?: boolean;
+  onClose?: () => void;
+}
+
+export const Sidebar: React.FC<SidebarProps> = ({ open = false, onClose }) => {
+  const { currentUser, logout, activeUserRole, can } = useApp();
+  // Recognition can be switched off per organization (Settings → Recognition)
+  const { settings: recognition, loaded: recognitionLoaded } = useRecognitionSettings();
+  const recognitionHidden = recognitionLoaded && !recognition.enabled;
+  const { t } = useI18n();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+
+  // The drawer closes after navigating and on Escape
+  useEffect(() => {
+    onClose?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose?.();
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
 
   const handleLogout = () => {
     logout();
@@ -55,463 +89,191 @@ export const Sidebar: React.FC = () => {
 
   const currentRole = activeUserRole || currentUser?.primaryRole || 'ORG_ADMIN';
 
-  // Generate dynamic, role-tailored navigation sections
+  // Activity trail is restricted to org admins (super admins pass too); the route and API enforce the same rule
+  const activityLogItems: NavItem[] = can('AUDIT_TRAIL_VIEWERS')
+    ? [{ path: '/activity-log', labelKey: 'nav.activityLog', icon: <History size={18} /> }]
+    : [];
+
+  // Organization configuration is edited by org admins only (route and PATCH /settings enforce the same rule)
+  const settingsItems: NavItem[] = can('ORG_ADMINS')
+    ? [
+        { path: '/settings', labelKey: 'nav.orgSettings', icon: <Settings size={18} /> },
+        { path: '/integrations', labelKey: 'nav.integrations', icon: <Plug size={18} /> },
+        // Plan & usage belongs to the organization; platform super admins manage plans in their console
+        ...(currentUser?.isSuperAdmin ? [] : [{ path: '/subscription', labelKey: 'nav.planUsage' as const, icon: <CreditCard size={18} /> }]),
+      ]
+    : [];
+
+  // Registers & export for report viewers (route and API enforce the same group)
+  const reportItems: NavItem[] = can('REPORT_VIEWERS')
+    ? [{ path: '/reports', labelKey: 'nav.reportsExport', icon: <FileBarChart size={18} /> }]
+    : [];
+
+  // Generate role-tailored navigation sections; each page keeps the same plain label for every role
   const getNavSections = (): NavSection[] => {
+    const item = {
+      actionHub: { path: '/area-owner-hub', labelKey: 'nav.actionHub', icon: <LayoutDashboard size={18} /> },
+      auditorHub: { path: '/auditor-hub', labelKey: 'nav.home', icon: <ClipboardCheck size={18} /> },
+      organizations: { path: '/super-admin', labelKey: 'nav.organizations', icon: <ShieldCheck size={18} /> },
+      newOrganization: { path: '/onboarding', labelKey: 'nav.newOrganization', icon: <Compass size={18} /> },
+      organization: { path: '/organization', labelKey: 'nav.organization', icon: <Building size={18} /> },
+      users: { path: '/users', labelKey: 'nav.users', icon: <UserCog size={18} /> },
+      roles: { path: '/roles-permissions', labelKey: 'nav.rolesPermissions', icon: <Users size={18} /> },
+      locations: { path: '/locations', labelKey: 'nav.locations', icon: <MapPin size={18} /> },
+      qrCodes: { path: '/qr-studio', labelKey: 'nav.qrCodes', icon: <QrCode size={18} /> },
+      bulkImport: { path: '/imports', labelKey: 'nav.bulkImport', icon: <FileSpreadsheet size={18} /> },
+      standards: { path: '/standards', labelKey: 'nav.standards', icon: <FileText size={18} /> },
+      templates: { path: '/templates', labelKey: 'nav.auditTemplates', icon: <FileCheck size={18} /> },
+      schedules: { path: '/schedules', labelKey: 'nav.auditSchedules', icon: <Calendar size={18} /> },
+      observations: { path: '/observations', labelKey: 'nav.observations', icon: <AlertTriangle size={18} /> },
+      actions: { path: '/capa', labelKey: 'nav.correctiveActions', icon: <Layers size={18} /> },
+      redTags: { path: '/red-tags', labelKey: 'nav.redTags', icon: <Tag size={18} /> },
+      analytics: { path: '/analytics', labelKey: 'nav.analytics', icon: <BarChart3 size={18} /> },
+      recognition: { path: '/recognition', labelKey: 'nav.recognition', icon: <Trophy size={18} /> },
+      training: { path: '/training', labelKey: 'nav.training', icon: <GraduationCap size={18} /> },
+    } satisfies Record<string, NavItem>;
+
     if (currentRole === 'SUPER_ADMIN') {
       return [
         {
-          title: 'PLATFORM GOVERNANCE',
-          items: [
-            { path: '/super-admin', label: 'Super Admin Console', icon: <ShieldCheck size={18} /> },
-            { path: '/onboarding', label: 'Tenant Provisioning', icon: <Compass size={18} /> },
-            { path: '/roles-permissions', label: 'Global RBAC Matrix', icon: <Users size={18} /> },
-          ],
+          titleKey: 'navSection.platform',
+          items: [item.organizations, item.newOrganization, item.roles, ...settingsItems, ...activityLogItems],
         },
-        {
-          title: 'GLOBAL BENCHMARKS',
-          items: [
-            { path: '/templates', label: 'Master 5S Templates', icon: <FileCheck size={18} /> },
-            { path: '/training', label: '5S Training Academy', icon: <GraduationCap size={18} /> },
-          ],
-        },
+        { titleKey: 'navSection.program', items: [item.templates, item.training] },
       ];
     }
 
     if (currentRole === 'ORG_ADMIN') {
       return [
         {
-          title: 'ORGANIZATION & RBAC',
-          items: [
-            { path: '/organization', label: 'Organization Hierarchy', icon: <Building size={18} /> },
-            { path: '/roles-permissions', label: 'Roles & RBAC Matrix', icon: <Users size={18} /> },
-            { path: '/locations', label: 'Location & Area Master', icon: <MapPin size={18} /> },
-            { path: '/qr-studio', label: 'QR Code Studio', icon: <QrCode size={18} /> },
-            { path: '/imports', label: 'Excel Bulk Ingestion', icon: <FileSpreadsheet size={18} /> },
-          ],
+          titleKey: 'navSection.setup',
+          items: [item.organization, item.users, item.roles, item.locations, item.qrCodes, item.bulkImport, ...settingsItems, ...activityLogItems],
         },
-        {
-          title: '5S PROGRAM GOVERNANCE',
-          items: [
-            { path: '/templates', label: 'Audit Template Builder', icon: <FileCheck size={18} /> },
-            { path: '/schedules', label: 'Audit Schedules & Rotation', icon: <Calendar size={18} /> },
-            { path: '/standards', label: '5S Standards Library', icon: <FileText size={18} /> },
-          ],
-        },
-        {
-          title: 'OPERATIONAL OVERSIGHT',
-          items: [
-            { path: '/capa', label: 'CAPA & SLA Escalation', icon: <Layers size={18} /> },
-            { path: '/observations', label: 'Observations & Abnormalities', icon: <AlertTriangle size={18} /> },
-            { path: '/red-tags', label: 'Red Tag & Holding Area', icon: <Tag size={18} /> },
-          ],
-        },
-        {
-          title: 'MATURITY & ENGAGEMENT',
-          items: [
-            { path: '/analytics', label: 'Maturity & Heat Maps', icon: <BarChart3 size={18} /> },
-            { path: '/recognition', label: 'Trophies & Gamification', icon: <Trophy size={18} /> },
-            { path: '/training', label: '5S Training & Academy', icon: <GraduationCap size={18} /> },
-          ],
-        },
+        { titleKey: 'navSection.program', items: [item.templates, item.schedules, item.standards] },
+        { titleKey: 'navSection.followUp', items: [item.actions, item.observations, item.redTags] },
+        { titleKey: 'navSection.results', items: [item.analytics, ...reportItems, item.recognition, item.training] },
       ];
     }
 
     if (currentRole === 'PLANT_HEAD') {
       return [
-        {
-          title: 'EXECUTIVE INTELLIGENCE',
-          items: [
-            { path: '/analytics', label: 'Maturity & Heat Maps', icon: <BarChart3 size={18} /> },
-            { path: '/locations', label: 'Plant Areas & Workstations', icon: <MapPin size={18} /> },
-          ],
-        },
-        {
-          title: 'OPERATIONAL GOVERNANCE',
-          items: [
-            { path: '/capa', label: 'CAPA & SLA Escalation', icon: <Layers size={18} /> },
-            { path: '/red-tags', label: 'Red Tag & Holding Area', icon: <Tag size={18} /> },
-            { path: '/observations', label: 'Observations & Defects', icon: <AlertTriangle size={18} /> },
-            { path: '/schedules', label: 'Audit Compliance & Schedules', icon: <Calendar size={18} /> },
-          ],
-        },
-        {
-          title: 'LEAN CULTURE & STANDARDS',
-          items: [
-            { path: '/recognition', label: '5S Trophies & Gamification', icon: <Trophy size={18} /> },
-            { path: '/standards', label: '5S Standards Library', icon: <FileText size={18} /> },
-            { path: '/training', label: '5S Training Academy', icon: <GraduationCap size={18} /> },
-          ],
-        },
+        { titleKey: 'navSection.results', items: [item.analytics, ...reportItems] },
+        { titleKey: 'navSection.areas', items: [item.organization, item.locations, item.qrCodes, item.roles] },
+        { titleKey: 'navSection.followUp', items: [item.actions, item.redTags, item.observations, item.schedules, item.templates] },
+        { titleKey: 'navSection.learning', items: [item.recognition, item.standards, item.training] },
       ];
     }
 
     if (currentRole === 'COORDINATOR_5S') {
       return [
-        {
-          title: '5S AUDIT PLANNING & ROTATION',
-          items: [
-            { path: '/schedules', label: 'Audit Schedules & Rotation', icon: <Calendar size={18} /> },
-            { path: '/templates', label: 'Audit Template Builder', icon: <FileCheck size={18} /> },
-            { path: '/standards', label: '5S Standards Library', icon: <FileText size={18} /> },
-          ],
-        },
-        {
-          title: 'REMEDIATION & DISCIPLINE',
-          items: [
-            { path: '/capa', label: 'CAPA & SLA Escalation', icon: <Layers size={18} /> },
-            { path: '/red-tags', label: 'Red Tag & Holding Area', icon: <Tag size={18} /> },
-            { path: '/observations', label: 'Observations & Abnormalities', icon: <AlertTriangle size={18} /> },
-          ],
-        },
-        {
-          title: 'PLANT AREAS & QR',
-          items: [
-            { path: '/locations', label: 'Location & Area Master', icon: <MapPin size={18} /> },
-            { path: '/qr-studio', label: 'QR Code Studio', icon: <QrCode size={18} /> },
-          ],
-        },
-        {
-          title: 'CONTINUOUS IMPROVEMENT',
-          items: [
-            { path: '/analytics', label: 'Maturity & Heat Maps', icon: <BarChart3 size={18} /> },
-            { path: '/recognition', label: 'Trophies & Gamification', icon: <Trophy size={18} /> },
-            { path: '/training', label: '5S Training & Academy', icon: <GraduationCap size={18} /> },
-          ],
-        },
+        { titleKey: 'navSection.program', items: [item.schedules, item.templates, item.standards] },
+        { titleKey: 'navSection.followUp', items: [item.actions, item.redTags, item.observations] },
+        { titleKey: 'navSection.areas', items: [item.organization, item.locations, item.qrCodes, item.roles] },
+        { titleKey: 'navSection.results', items: [item.analytics, ...reportItems, item.recognition, item.training] },
       ];
     }
 
     if (currentRole === 'DEPT_HEAD') {
       return [
-        {
-          title: 'DEPARTMENT GEMBA',
-          items: [
-            { path: '/area-owner-hub', label: 'Department Action Hub', icon: <LayoutDashboard size={18} /> },
-            { path: '/locations', label: 'Department Areas & Stations', icon: <MapPin size={18} /> },
-            { path: '/observations', label: 'Department Abnormalities', icon: <AlertTriangle size={18} /> },
-          ],
-        },
-        {
-          title: 'ACTION RESOLUTION',
-          items: [
-            { path: '/capa', label: 'CAPA Approvals & Root Cause', icon: <Layers size={18} /> },
-            { path: '/red-tags', label: 'Red Tag Quarantine Area', icon: <Tag size={18} /> },
-            { path: '/schedules', label: 'Department Audit Rounds', icon: <Calendar size={18} /> },
-          ],
-        },
-        {
-          title: 'STANDARDS & RECOGNITION',
-          items: [
-            { path: '/recognition', label: 'Team Points & Leaderboard', icon: <Trophy size={18} /> },
-            { path: '/standards', label: '5S Standards Library', icon: <FileText size={18} /> },
-            { path: '/training', label: '5S Training Academy', icon: <GraduationCap size={18} /> },
-          ],
-        },
+        { titleKey: 'navSection.myWork', items: [item.actionHub, item.locations, item.qrCodes, item.observations] },
+        { titleKey: 'navSection.followUp', items: [item.actions, item.redTags, item.schedules] },
+        { titleKey: 'navSection.results', items: [item.analytics, ...reportItems, item.organization] },
+        { titleKey: 'navSection.learning', items: [item.recognition, item.standards, item.training] },
       ];
     }
 
     if (currentRole === 'AREA_OWNER') {
       return [
-        {
-          title: 'MY WORKSTATION & GEMBA',
-          items: [
-            { path: '/area-owner-hub', label: 'Area Action Hub', icon: <LayoutDashboard size={18} /> },
-            { path: '/locations', label: 'My Areas & Shadow Boards', icon: <MapPin size={18} /> },
-          ],
-        },
-        {
-          title: 'ACTION & DEFECT RESOLUTION',
-          items: [
-            { path: '/capa', label: 'My Assigned CAPAs & 5-Why', icon: <Layers size={18} /> },
-            { path: '/observations', label: 'Workstation Abnormalities', icon: <AlertTriangle size={18} /> },
-            { path: '/red-tags', label: 'Red Tag Holding Area', icon: <Tag size={18} /> },
-          ],
-        },
-        {
-          title: 'RECOGNITION & LEARNING',
-          items: [
-            { path: '/recognition', label: 'My Points & Trophies', icon: <Trophy size={18} /> },
-            { path: '/standards', label: 'Visual 5S Standards', icon: <FileText size={18} /> },
-            { path: '/training', label: '5S Training Academy', icon: <GraduationCap size={18} /> },
-          ],
-        },
+        { titleKey: 'navSection.myWork', items: [item.actionHub, item.locations] },
+        { titleKey: 'navSection.followUp', items: [item.actions, item.observations, item.redTags] },
+        { titleKey: 'navSection.learning', items: [item.recognition, item.standards, item.training] },
       ];
     }
 
     if (currentRole === 'AUDITOR' || currentRole === 'EXTERNAL_AUDITOR') {
       return [
+        // The schedules page is not open to external auditors (see App.tsx)
+        { titleKey: 'navSection.auditing', items: [item.auditorHub, ...(currentRole === 'AUDITOR' ? [item.schedules] : [])] },
+        { titleKey: 'navSection.followUp', items: [item.observations, item.actions, item.redTags, ...reportItems] },
         {
-          title: 'AUDITOR INSPECTION WORKSPACE',
-          items: [
-            { path: '/auditor-hub', label: 'Auditor Workspace', icon: <ClipboardCheck size={18} /> },
-            { path: '/schedules', label: 'Audit Schedules & Rounds', icon: <Calendar size={18} /> },
-          ],
-        },
-        {
-          title: 'NON-CONFORMANCE & EVIDENCE',
-          items: [
-            { path: '/observations', label: 'Observations & Defect Log', icon: <AlertTriangle size={18} /> },
-            { path: '/capa', label: 'CAPA Verification & Closure', icon: <Layers size={18} /> },
-            { path: '/red-tags', label: 'Red Tag Quarantine Audit', icon: <Tag size={18} /> },
-          ],
-        },
-        {
-          title: 'STANDARDS & CAPABILITY',
-          items: [
-            { path: '/standards', label: '5S Standards Library', icon: <FileText size={18} /> },
-            { path: '/templates', label: 'Audit Checklists & Templates', icon: <FileCheck size={18} /> },
-            { path: '/recognition', label: 'Leaderboard & Recognition', icon: <Trophy size={18} /> },
-            { path: '/training', label: 'Auditor Certification & Quiz', icon: <GraduationCap size={18} /> },
-          ],
+          titleKey: 'navSection.learning',
+          items: [item.standards, ...(currentRole === 'AUDITOR' ? [item.templates] : []), item.recognition, item.training],
         },
       ];
     }
 
-    // Default fallback
+    if (currentRole === 'EXECUTIVE') {
+      // View-only leadership role (BRD 9.9): dashboards, registers and the areas behind them
+      return [
+        { titleKey: 'navSection.results', items: [item.analytics, ...reportItems, item.recognition] },
+        { titleKey: 'navSection.areas', items: [item.organization, item.locations, item.standards] },
+      ];
+    }
+
+    // Default fallback (employees and any custom role)
     return [
-      {
-        title: 'OPERATIONAL EXECUTION',
-        items: [
-          { path: '/observations', label: 'Observations & Defects', icon: <AlertTriangle size={18} /> },
-          { path: '/capa', label: 'CAPA & SLA Actions', icon: <Layers size={18} /> },
-          { path: '/red-tags', label: 'Red Tag & Holding Area', icon: <Tag size={18} /> },
-          { path: '/standards', label: '5S Standards Library', icon: <FileText size={18} /> },
-        ],
-      },
+      { titleKey: 'navSection.myWork', items: [item.observations, item.actions, item.redTags, item.standards] },
+      { titleKey: 'navSection.learning', items: [item.recognition, item.training] },
     ];
   };
 
-  const navSections = getNavSections();
+  // Labels are translated; configurable nouns follow the organization's terminology (e.g. a renamed 'Red Tag')
+  const navSections = getNavSections().map((section) => ({
+    title: t(section.titleKey),
+    items: section.items
+      .filter((item) => !(recognitionHidden && item.path === '/recognition'))
+      .map((item) => ({ ...item, label: sentenceCase(t(item.labelKey)) })),
+  }));
+
+  const initials = currentUser?.fullName
+    ? currentUser.fullName
+        .split(' ')
+        .map((n) => n[0])
+        .slice(0, 2)
+        .join('')
+    : '5S';
 
   return (
-    <aside
-      className="app-sidebar"
-      style={{
-        width: 'var(--sidebar-width)',
-        minWidth: 'var(--sidebar-width)',
-        height: '100vh',
-        background: 'var(--bg-sidebar)',
-        display: 'flex',
-        flexDirection: 'column',
-        position: 'sticky',
-        top: 0,
-        zIndex: 100,
-        borderRight: '1px solid rgba(255, 255, 255, 0.08)',
-      }}
-    >
-      {/* Brand Header */}
-      <div
-        style={{
-          padding: '20px 24px',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '12px',
-        }}
-      >
-        <div
-          style={{
-            width: '36px',
-            height: '36px',
-            borderRadius: 'var(--radius-md)',
-            background: 'linear-gradient(135deg, #2563EB 0%, #1E3A8A 100%)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: '0 4px 10px rgba(37, 99, 235, 0.4)',
-          }}
-        >
-          <span style={{ fontSize: '18px', fontWeight: 800, color: '#FFFFFF', letterSpacing: '-0.05em' }}>5S</span>
+    <aside className={`app-sidebar${open ? ' is-open' : ''}`} aria-label={t('common.navigation')}>
+      {/* Brand block: lines up with the blue top bar to form one brand band */}
+      <div className="sidebar-brand">
+        <div className="sidebar-brand-mark" aria-hidden="true">
+          5S
         </div>
-        <div>
-          <div style={{ fontSize: '15px', fontWeight: 700, color: '#FFFFFF', letterSpacing: '-0.02em' }}>
-            SkilGlobal 5S
-          </div>
-        </div>
+        <div className="sidebar-brand-name">SkilGlobal 5S</div>
+        <button type="button" className="app-menu-button btn btn-ghost btn-sm btn-icon sidebar-brand-close" onClick={onClose} aria-label={t('common.closeMenu')}>
+          <X size={18} />
+        </button>
       </div>
 
-      {/* Nav List */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 12px' }}>
-        {navSections.map((section, idx) => (
-          <div key={idx} style={{ marginBottom: '24px' }}>
-            <div
-              style={{
-                fontSize: '10px',
-                fontWeight: 700,
-                color: 'var(--text-sidebar-muted)',
-                letterSpacing: '0.08em',
-                padding: '0 12px 8px 12px',
-              }}
-            >
-              {section.title}
-            </div>
+      <nav className="sidebar-nav">
+        {navSections.map((section) => (
+          <div key={section.title} className="sidebar-section">
+            <div className="sidebar-section-title">{section.title}</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-              {section.items.map((item, itemIdx) => {
-                if (item.disabled) {
-                  return (
-                    <div
-                      key={itemIdx}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        padding: '9px 12px',
-                        borderRadius: 'var(--radius-md)',
-                        fontSize: '13px',
-                        color: 'rgba(255, 255, 255, 0.35)',
-                        cursor: 'not-allowed',
-                      }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                        {item.icon}
-                        <span>{item.label}</span>
-                      </div>
-                      <span
-                        style={{
-                          fontSize: '10px',
-                          padding: '1px 6px',
-                          borderRadius: 'var(--radius-xs)',
-                          background: 'rgba(255, 255, 255, 0.08)',
-                          color: 'rgba(255, 255, 255, 0.5)',
-                        }}
-                      >
-                        {item.tag || 'Module'}
-                      </span>
-                    </div>
-                  );
-                }
-
-                return (
-                  <NavLink
-                    key={itemIdx}
-                    to={item.path}
-                    style={({ isActive }) => ({
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '9px 12px',
-                      borderRadius: 'var(--radius-md)',
-                      fontSize: '13px',
-                      fontWeight: isActive ? 600 : 500,
-                      color: isActive ? '#FFFFFF' : 'var(--text-sidebar)',
-                      background: isActive ? 'var(--color-primary)' : 'transparent',
-                      textDecoration: 'none',
-                      transition: 'all var(--transition-fast)',
-                    })}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      {item.icon}
-                      <span>{item.label}</span>
-                    </div>
-                    {item.badge && (
-                      <span
-                        style={{
-                          fontSize: '10px',
-                          fontWeight: 700,
-                          padding: '1px 6px',
-                          borderRadius: 'var(--radius-xs)',
-                          background: 'rgba(255, 255, 255, 0.2)',
-                          color: '#FFFFFF',
-                        }}
-                      >
-                        {item.badge}
-                      </span>
-                    )}
-                  </NavLink>
-                );
-              })}
+              {section.items.map((item) => (
+                <NavLink key={item.path} to={item.path} className={({ isActive }) => `sidebar-link${isActive ? ' active' : ''}`}>
+                  {item.icon}
+                  <span>{item.label}</span>
+                </NavLink>
+              ))}
             </div>
           </div>
         ))}
-      </div>
+      </nav>
 
-      {/* User info & Sign out Footer */}
-      <div
-        style={{
-          padding: '12px 16px',
-          borderTop: '1px solid rgba(255, 255, 255, 0.08)',
-          background: 'rgba(0, 0, 0, 0.3)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '10px',
-        }}
-      >
+      {/* Signed-in user and sign out */}
+      <div className="sidebar-footer">
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
-          <div
-            style={{
-              width: '32px',
-              height: '32px',
-              borderRadius: 'var(--radius-full)',
-              background: 'linear-gradient(135deg, var(--color-primary) 0%, #1d4ed8 100%)',
-              color: '#FFFFFF',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontWeight: 700,
-              fontSize: '11px',
-              flexShrink: 0,
-            }}
-          >
-            {currentUser?.fullName
-              ? currentUser.fullName
-                  .split(' ')
-                  .map((n) => n[0])
-                  .slice(0, 2)
-                  .join('')
-              : '5S'}
+          <div className="sidebar-avatar" aria-hidden="true">
+            {initials}
           </div>
           <div style={{ minWidth: 0, flex: 1 }}>
-            <div
-              style={{
-                fontSize: '12px',
-                fontWeight: 600,
-                color: '#FFFFFF',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {currentUser?.fullName || 'Pooja Sharma'}
-            </div>
-            <div
-              style={{
-                fontSize: '10px',
-                color: 'var(--text-sidebar-muted)',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {currentUser?.roleCode || activeUserRole}
-            </div>
+            <div className="sidebar-user-name">{currentUser?.fullName}</div>
+            <div className="sidebar-user-role">{roleLabel(activeUserRole || currentUser?.roleCode)}</div>
           </div>
         </div>
-
-        <button
-          onClick={handleLogout}
-          title="Sign Out"
-          style={{
-            background: 'rgba(255, 255, 255, 0.08)',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            borderRadius: 'var(--radius-sm)',
-            padding: '6px',
-            cursor: 'pointer',
-            color: 'rgba(255, 255, 255, 0.7)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            transition: 'all var(--transition-fast)',
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(239, 68, 68, 0.25)';
-            e.currentTarget.style.color = '#ef4444';
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)';
-            e.currentTarget.style.color = 'rgba(255, 255, 255, 0.7)';
-          }}
-        >
+        <button type="button" onClick={handleLogout} title={t('nav.signOut')} aria-label={t('nav.signOut')} className="sidebar-signout">
           <LogOut size={15} />
         </button>
       </div>

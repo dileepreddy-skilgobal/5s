@@ -6,6 +6,8 @@ interface ProgressBarProps {
   height?: number;
   color?: 'primary' | 'success' | 'warning' | 'danger';
   className?: string;
+  /** What the bar measures, for screen readers (e.g. "Pillar score"). */
+  ariaLabel?: string;
 }
 
 export const ProgressBar: React.FC<ProgressBarProps> = ({
@@ -14,6 +16,7 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   height = 8,
   color,
   className = '',
+  ariaLabel,
 }) => {
   const clampedValue = Math.min(100, Math.max(0, value));
 
@@ -32,6 +35,11 @@ export const ProgressBar: React.FC<ProgressBarProps> = ({
   return (
     <div className={`flex items-center gap-2 ${className}`} style={{ width: '100%' }}>
       <div
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(clampedValue)}
+        aria-label={ariaLabel}
         style={{
           flex: 1,
           height: `${height}px`,

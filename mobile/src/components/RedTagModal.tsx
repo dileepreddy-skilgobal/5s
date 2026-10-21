@@ -1,36 +1,44 @@
-import React, { useState } from 'react';
-import {
-  View,
-  Text,
-  Modal,
-  StyleSheet,
-  TouchableOpacity,
-  TextInput,
-  ScrollView,
-  Alert,
-} from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, StyleSheet, Pressable, Image, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, SHADOWS } from '../constants/theme';
-import { DispositionType, LocationMaster, RedTagRecord } from '../types';
-import { MOCK_LOCATIONS } from '../constants/mockData';
+import * as ImagePicker from 'expo-image-picker';
+import { COLORS, RADIUS, SPACING, TOUCH_TARGET, TYPE } from '../constants/theme';
+import { DispositionType, LocationMaster, RedTagCategory, RedTagRecord } from '../types';
 import { useUser } from '../context/UserContext';
+import { prepareEvidencePhoto } from '../services/imageEvidence';
+import { Button, Chip, FormField, TextField } from './ui';
+import { AreaPicker, ChipGroup, IconButton, InlineMessage, Sheet } from './SheetLayout';
 
 interface RedTagModalProps {
   visible: boolean;
   onClose: () => void;
-  onSave: (record: RedTagRecord) => void;
+  /** Persists the tag (sent now, or queued while offline). */
+  onSave: (record: RedTagRecord) => Promise<void>;
   initialLocation?: LocationMaster | null;
   locations?: LocationMaster[];
 }
 
-const DISPOSITIONS: { type: DispositionType; label: string; icon: string }[] = [
-  { type: 'SCRAP', label: 'Scrap & Recycle', icon: 'trash-outline' },
-  { type: 'RELOCATE', label: 'Relocate', icon: 'swap-horizontal-outline' },
-  { type: 'REPAIR', label: 'Repair & Calibrate', icon: 'construct-outline' },
-  { type: 'RETURN', label: 'Return to Vendor', icon: 'return-up-back-outline' },
-  { type: 'SELL', label: 'Surplus Sale', icon: 'pricetag-outline' },
-  { type: 'KEEP', label: 'Retain & Re-standardize', icon: 'shield-checkmark-outline' },
+const CATEGORIES: { type: RedTagCategory; label: string }[] = [
+  { type: 'UNNEEDED_TOOL', label: 'Unneeded tool' },
+  { type: 'SURPLUS_INVENTORY', label: 'Surplus stock' },
+  { type: 'BROKEN_EQUIPMENT', label: 'Broken equipment' },
+  { type: 'SCRAP_WASTE', label: 'Scrap or waste' },
+  { type: 'UNLABELLED_MATERIAL', label: 'Unlabelled material' },
+  { type: 'EXPIRED_ITEM', label: 'Expired item' },
+  { type: 'OTHER', label: 'Other' },
 ];
+
+const DISPOSITIONS: { type: DispositionType; label: string }[] = [
+  { type: 'DISPOSE_SCRAP', label: 'Scrap and dispose' },
+  { type: 'RELOCATE', label: 'Move elsewhere' },
+  { type: 'REUSE', label: 'Reuse elsewhere' },
+  { type: 'REPAIR_RESTORE', label: 'Repair' },
+  { type: 'RETURN_TO_VENDOR', label: 'Return to supplier' },
+  { type: 'AUCTION_SELL', label: 'Sell surplus' },
+  { type: 'KEEP_JUSTIFIED', label: 'Keep (justified)' },
+];
+
+type FieldErrors = { area?: string; item?: string; quantity?: string; value?: string; reason?: string };
 
 export const RedTagModal: React.FC<RedTagModalProps> = ({
   visible,
@@ -39,370 +47,343 @@ export const RedTagModal: React.FC<RedTagModalProps> = ({
   initialLocation,
   locations = [],
 }) => {
-  const { currentUser } = useUser();
-  const availableLocations = locations.length > 0 ? locations : MOCK_LOCATIONS;
-  const [selectedLocation, setSelectedLocation] = useState<LocationMaster>(
-    initialLocation || availableLocations[0]
-  );
+  const { currentUser, can } = useUser();
+  const canProposeDisposition = can('RED_TAG_REVIEWERS');
+  const canApproveDisposition = can('RED_TAG_CLOSERS');
+
+  const [selectedLocationId, setSelectedLocationId] = useState<string>('');
   const [itemName, setItemName] = useState('');
+  const [category, setCategory] = useState<RedTagCategory>('UNNEEDED_TOOL');
   const [quantity, setQuantity] = useState('1');
   const [reason, setReason] = useState('');
-  const [disposition, setDisposition] = useState<DispositionType>('SCRAP');
-  const [estValue, setEstValue] = useState('50');
-  const [hasPhoto, setHasPhoto] = useState(false);
+  const [disposition, setDisposition] = useState<DispositionType | null>(null);
+  const [approveNow, setApproveNow] = useState(false);
+  const [estValue, setEstValue] = useState('');
+  const [photo, setPhoto] = useState<{ uri: string; dataUrl: string } | null>(null);
+  const [processingPhoto, setProcessingPhoto] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  /** Shown inline: alerts do not appear in the web preview. */
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
-  const handleQuickSubmit = () => {
-    if (!itemName.trim()) {
-      Alert.alert('Required Field', 'Please enter the item name or abnormality description.');
+  // Pre-select the scanned/selected area each time the sheet opens
+  useEffect(() => {
+    if (visible) {
+      setSelectedLocationId(initialLocation?.id ?? locations[0]?.id ?? '');
+      setFieldErrors({});
+      setFormError(null);
+      setPhotoError(null);
+    }
+  }, [visible, initialLocation, locations]);
+
+  const selectedLocation = locations.find((l) => l.id === selectedLocationId) ?? null;
+
+  const resetForm = () => {
+    setItemName('');
+    setCategory('UNNEEDED_TOOL');
+    setQuantity('1');
+    setReason('');
+    setDisposition(null);
+    setApproveNow(false);
+    setEstValue('');
+    setPhoto(null);
+    setFieldErrors({});
+    setFormError(null);
+    setPhotoError(null);
+  };
+
+  const clearFieldError = (key: keyof FieldErrors) => {
+    if (fieldErrors[key]) setFieldErrors((e) => ({ ...e, [key]: undefined }));
+  };
+
+  const handleCapturePhoto = async (source: 'camera' | 'library') => {
+    setPhotoError(null);
+    try {
+      const perm = source === 'camera' ? await ImagePicker.requestCameraPermissionsAsync() : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        setPhotoError(
+          source === 'camera'
+            ? 'Allow camera access in your device settings to attach a photo.'
+            : 'Allow photo library access in your device settings to choose a photo.',
+        );
+        return;
+      }
+      const options: ImagePicker.ImagePickerOptions = { mediaTypes: ['images'], quality: 0.9 };
+      const result = source === 'camera' ? await ImagePicker.launchCameraAsync(options) : await ImagePicker.launchImageLibraryAsync(options);
+      const asset = result.canceled ? null : result.assets?.[0];
+      if (!asset?.uri) return;
+      setProcessingPhoto(true);
+      setPhoto(await prepareEvidencePhoto(asset.uri, { width: asset.width, height: asset.height }));
+    } catch {
+      setPhotoError('Could not attach the photo. Please try again.');
+    } finally {
+      setProcessingPhoto(false);
+    }
+  };
+
+  const handleSubmit = async () => {
+    const qty = Number.parseInt(quantity, 10);
+    const value = estValue.trim() === '' ? undefined : Number.parseFloat(estValue);
+
+    // All field problems are shown at once, next to the fields
+    const errors: FieldErrors = {};
+    if (!selectedLocation) errors.area = 'Choose the area where the item was found.';
+    if (!itemName.trim()) errors.item = 'Enter the item you are tagging.';
+    if (!Number.isInteger(qty) || qty < 1 || !/^\d+$/.test(quantity.trim())) errors.quantity = 'Enter a whole number of 1 or more.';
+    if (value !== undefined && (!Number.isFinite(value) || value < 0)) errors.value = 'Enter zero or a positive number.';
+    if (!reason.trim()) errors.reason = 'Enter why the item is tagged.';
+    setFieldErrors(errors);
+    setFormError(null);
+    if (!selectedLocation || Object.values(errors).some(Boolean)) {
+      setFormError('Check the highlighted fields.');
       return;
     }
 
-    const currentYear = new Date().getFullYear();
-    const tagNumber = `RT-${currentYear}-${Math.floor(1000 + Math.random() * 9000)}`;
-    const targetDateObj = new Date(Date.now() + 14 * 86400000);
-    const targetDateStr = targetDateObj.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-    const tagDateStr = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-
-    const newRecord: RedTagRecord = {
-      id: `rt-${Date.now()}`,
-      tagNumber,
+    const record: RedTagRecord = {
+      id: `local-rt-${Date.now()}`,
+      tagNumber: 'Pending',
       areaId: selectedLocation.id,
       areaName: selectedLocation.name,
-      itemName,
-      quantity: parseInt(quantity, 10) || 1,
-      reason: reason || 'Unneeded item identified during 5S Sort inspection',
-      taggedBy: `${currentUser.firstName} ${currentUser.lastName} (${currentUser.jobTitle})`,
-      tagDate: tagDateStr,
-      disposition,
-      estimatedValue: parseFloat(estValue) || 0,
-      targetDate: targetDateStr,
-      status: 'ACTIVE',
-      photoUri: hasPhoto ? 'mock-evidence-photo' : undefined,
+      itemName: itemName.trim(),
+      category,
+      quantity: qty,
+      reason: reason.trim(),
+      taggedBy: `${currentUser.firstName} ${currentUser.lastName}`,
+      tagDate: new Date().toLocaleDateString('en-GB'),
+      disposition: canProposeDisposition && disposition ? disposition : undefined,
+      approveDisposition: canApproveDisposition && approveNow,
+      estimatedValue: value,
+      photoUri: photo?.uri,
+      photoDataUrl: photo?.dataUrl,
+      status: 'PENDING_SYNC',
     };
 
-    onSave(newRecord);
-    // Reset
-    setItemName('');
-    setReason('');
-    onClose();
+    setSubmitting(true);
+    try {
+      await onSave(record);
+      resetForm();
+      onClose();
+    } catch {
+      setFormError('The red tag could not be saved on this device. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
-    <Modal visible={visible} animationType="slide" transparent>
-      <View style={styles.backdrop}>
-        <View style={styles.sheetContainer}>
-          {/* Header */}
-          <View style={styles.header}>
-            <View style={styles.headerLeft}>
-              <View style={styles.tagBadge}>
-                <Ionicons name="pricetag" size={16} color="#DC2626" />
-                <Text style={styles.tagBadgeText}>RED TAG / ABNORMALITY</Text>
-              </View>
-              <Text style={styles.title}>Rapid 30-Sec Report</Text>
-            </View>
-            <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
-              <Ionicons name="close" size={22} color={COLORS.textDark} />
-            </TouchableOpacity>
-          </View>
+    <Sheet
+      visible={visible}
+      onRequestClose={onClose}
+      title="Red tag an item"
+      subtitle="Tag items that are not needed or out of place (1S Sort)."
+      closeLabel="Close red tag"
+      footer={
+        <Button
+          label={submitting ? 'Saving…' : 'Save red tag'}
+          icon="pricetag"
+          variant="danger"
+          size="lg"
+          onPress={handleSubmit}
+          loading={submitting}
+          disabled={submitting || processingPhoto || !selectedLocation}
+          fullWidth
+        />
+      }
+    >
+      {/* Area */}
+      <FormField label="Area" required error={fieldErrors.area}>
+        <AreaPicker
+          locations={locations}
+          selectedId={selectedLocationId}
+          onSelect={(id) => {
+            setSelectedLocationId(id);
+            clearFieldError('area');
+          }}
+          invalid={!!fieldErrors.area}
+        />
+      </FormField>
 
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-            {/* Area Selector */}
-            <Text style={styles.inputLabel}>Workstation / Area</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.areaScroll}>
-              {MOCK_LOCATIONS.map((loc) => (
-                <TouchableOpacity
-                  key={loc.id}
-                  style={[
-                    styles.areaChip,
-                    selectedLocation.id === loc.id && styles.areaChipActive,
-                  ]}
-                  onPress={() => setSelectedLocation(loc)}
-                >
-                  <Text
-                    style={[
-                      styles.areaChipText,
-                      selectedLocation.id === loc.id && styles.areaChipTextActive,
-                    ]}
-                  >
-                    {loc.name}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
+      {/* Item */}
+      <FormField label="Item" required error={fieldErrors.item}>
+        <TextField
+          placeholder="e.g. Unmarked chemical container"
+          value={itemName}
+          onChangeText={(v) => {
+            setItemName(v);
+            clearFieldError('item');
+          }}
+          invalid={!!fieldErrors.item}
+          accessibilityLabel="Item"
+        />
+      </FormField>
 
-            {/* Item Name */}
-            <Text style={styles.inputLabel}>Item Description / Non-Conformance</Text>
-            <TextInput
-              style={styles.inputField}
-              placeholder="e.g. Unmarked chemical container, surplus pallets..."
-              placeholderTextColor={COLORS.textMuted}
-              value={itemName}
-              onChangeText={setItemName}
+      {/* Category */}
+      <FormField label="Category">
+        <ChipGroup>
+          {CATEGORIES.map((c) => (
+            <Chip key={c.type} label={c.label} selected={category === c.type} onPress={() => setCategory(c.type)} />
+          ))}
+        </ChipGroup>
+      </FormField>
+
+      {/* Quantity & estimated value */}
+      <View style={styles.rowTwo}>
+        <View style={styles.flexOne}>
+          <FormField label="Quantity" required error={fieldErrors.quantity}>
+            <TextField
+              keyboardType="number-pad"
+              inputMode="numeric"
+              value={quantity}
+              onChangeText={(v) => {
+                setQuantity(v.replace(/[^0-9]/g, ''));
+                clearFieldError('quantity');
+              }}
+              invalid={!!fieldErrors.quantity}
+              accessibilityLabel="Quantity"
+              maxLength={6}
             />
-
-            {/* Quantity & Estimated Value Row */}
-            <View style={styles.rowTwo}>
-              <View style={styles.flexOne}>
-                <Text style={styles.inputLabel}>Quantity</Text>
-                <TextInput
-                  style={styles.inputField}
-                  keyboardType="numeric"
-                  value={quantity}
-                  onChangeText={setQuantity}
-                />
-              </View>
-              <View style={styles.flexOne}>
-                <Text style={styles.inputLabel}>Est. Value ($)</Text>
-                <TextInput
-                  style={styles.inputField}
-                  keyboardType="numeric"
-                  value={estValue}
-                  onChangeText={setEstValue}
-                />
-              </View>
-            </View>
-
-            {/* Reason */}
-            <Text style={styles.inputLabel}>Reason for Tagging</Text>
-            <TextInput
-              style={[styles.inputField, styles.textArea]}
-              placeholder="Why is this item unneeded or abnormal? (S1 Sort violation)"
-              placeholderTextColor={COLORS.textMuted}
-              multiline
-              numberOfLines={2}
-              value={reason}
-              onChangeText={setReason}
+          </FormField>
+        </View>
+        <View style={styles.flexOne}>
+          <FormField label="Estimated value" hint="Optional" error={fieldErrors.value}>
+            <TextField
+              keyboardType="decimal-pad"
+              inputMode="decimal"
+              value={estValue}
+              onChangeText={(v) => {
+                setEstValue(v.replace(',', '.'));
+                clearFieldError('value');
+              }}
+              placeholder="0"
+              invalid={!!fieldErrors.value}
+              accessibilityLabel="Estimated value, optional"
             />
-
-            {/* Disposition recommendation chips */}
-            <Text style={styles.inputLabel}>Proposed Disposition Action</Text>
-            <View style={styles.dispositionGrid}>
-              {DISPOSITIONS.map((d) => (
-                <TouchableOpacity
-                  key={d.type}
-                  style={[
-                    styles.dispChip,
-                    disposition === d.type && styles.dispChipActive,
-                  ]}
-                  onPress={() => setDisposition(d.type)}
-                >
-                  <Ionicons
-                    name={d.icon as any}
-                    size={16}
-                    color={disposition === d.type ? '#FFFFFF' : COLORS.textDark}
-                  />
-                  <Text
-                    style={[
-                      styles.dispChipText,
-                      disposition === d.type && styles.dispChipTextActive,
-                    ]}
-                  >
-                    {d.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {/* Photo Capture quick toggle */}
-            <TouchableOpacity
-              style={[styles.photoBox, hasPhoto && styles.photoBoxActive]}
-              onPress={() => setHasPhoto(!hasPhoto)}
-            >
-              <Ionicons
-                name={hasPhoto ? 'checkmark-circle' : 'camera-outline'}
-                size={22}
-                color={hasPhoto ? '#0E9F6E' : COLORS.primary}
-              />
-              <Text style={styles.photoBoxText}>
-                {hasPhoto ? 'Evidence Photo Attached (Tap to remove)' : 'Tap to Attach Photographic Proof'}
-              </Text>
-            </TouchableOpacity>
-          </ScrollView>
-
-          {/* Action Footer */}
-          <View style={styles.footer}>
-            <TouchableOpacity style={styles.submitBtn} onPress={handleQuickSubmit} activeOpacity={0.85}>
-              <Ionicons name="pricetag" size={18} color="#FFFFFF" />
-              <Text style={styles.submitBtnText}>Print & Apply Red Tag (30s)</Text>
-            </TouchableOpacity>
-          </View>
+          </FormField>
         </View>
       </View>
-    </Modal>
+
+      {/* Reason */}
+      <FormField label="Why is it tagged?" required error={fieldErrors.reason}>
+        <TextField
+          placeholder="e.g. Not used in this area for months"
+          multiline
+          value={reason}
+          onChangeText={(v) => {
+            setReason(v);
+            clearFieldError('reason');
+          }}
+          invalid={!!fieldErrors.reason}
+          accessibilityLabel="Why is it tagged?"
+        />
+      </FormField>
+
+      {/* Disposition (roles allowed to review red tags) */}
+      {canProposeDisposition && (
+        <FormField label="Proposed action" hint="Optional. Tap again to clear.">
+          <ChipGroup>
+            {DISPOSITIONS.map((d) => (
+              <Chip
+                key={d.type}
+                label={d.label}
+                selected={disposition === d.type}
+                onPress={() => {
+                  const next = disposition === d.type ? null : d.type;
+                  setDisposition(next);
+                  if (!next) setApproveNow(false);
+                }}
+              />
+            ))}
+          </ChipGroup>
+          {canApproveDisposition && disposition && (
+            <Pressable
+              style={({ pressed }) => [styles.checkRow, pressed && { opacity: 0.8 }]}
+              onPress={() => setApproveNow(!approveNow)}
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked: approveNow }}
+              accessibilityLabel="Approve this action now"
+            >
+              <Ionicons name={approveNow ? 'checkbox' : 'square-outline'} size={24} color={COLORS.primary} />
+              <Text style={styles.checkText}>Approve this action now</Text>
+            </Pressable>
+          )}
+        </FormField>
+      )}
+
+      {/* Photo evidence */}
+      <FormField label="Photo" hint={photo ? undefined : 'Optional, but helps others find the item.'}>
+        {photo ? (
+          <View style={styles.photoRow}>
+            <Image source={{ uri: photo.uri }} style={styles.photoThumb} accessibilityLabel="Photo of the item" />
+            <Text style={[styles.photoText, styles.flexOne]}>Photo attached</Text>
+            <IconButton icon="trash-outline" color={COLORS.danger} size={20} onPress={() => setPhoto(null)} accessibilityLabel="Remove photo" />
+          </View>
+        ) : processingPhoto ? (
+          <View style={styles.photoRow}>
+            <ActivityIndicator color={COLORS.primary} />
+            <Text style={styles.photoText}>Preparing photo…</Text>
+          </View>
+        ) : (
+          <View style={styles.rowTwo}>
+            <Button label="Take photo" icon="camera-outline" variant="secondary" onPress={() => handleCapturePhoto('camera')} style={styles.flexOne} />
+            <Button label="From gallery" icon="images-outline" variant="secondary" onPress={() => handleCapturePhoto('library')} style={styles.flexOne} />
+          </View>
+        )}
+        {photoError ? (
+          <Text style={styles.inlineError} accessibilityRole="alert">
+            {photoError}
+          </Text>
+        ) : null}
+      </FormField>
+
+      {formError ? <InlineMessage tone="danger" message={formError} /> : null}
+    </Sheet>
   );
 };
 
 const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(17, 24, 39, 0.7)',
-    justifyContent: 'flex-end',
-  },
-  sheetContainer: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    padding: 22,
-    maxHeight: '90%',
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 16,
-  },
-  headerLeft: {
-    flex: 1,
-  },
-  tagBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FEE2E2',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-    alignSelf: 'flex-start',
-    gap: 4,
-    marginBottom: 4,
-  },
-  tagBadgeText: {
-    color: '#DC2626',
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.8,
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  closeBtn: {
-    padding: 6,
-    borderRadius: 20,
-    backgroundColor: '#F3F4F6',
-  },
-  scrollContent: {
-    paddingBottom: 20,
-  },
-  inputLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.textDark,
-    marginBottom: 6,
-    marginTop: 8,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  areaScroll: {
-    marginBottom: 10,
-  },
-  areaChip: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 16,
-    backgroundColor: '#F3F4F6',
-    marginRight: 8,
-  },
-  areaChipActive: {
-    backgroundColor: COLORS.textDark,
-  },
-  areaChipText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.textMedium,
-  },
-  areaChipTextActive: {
-    color: '#FFFFFF',
-  },
-  inputField: {
-    backgroundColor: '#F8F9FA',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 13,
-    color: COLORS.textDark,
-    marginBottom: 8,
-  },
-  textArea: {
-    height: 60,
-    textAlignVertical: 'top',
-  },
   rowTwo: {
     flexDirection: 'row',
-    gap: 12,
+    gap: SPACING.md,
   },
   flexOne: {
     flex: 1,
   },
-  dispositionGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 12,
-  },
-  dispChip: {
+  checkRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 12,
-    backgroundColor: '#F3F4F6',
-    gap: 6,
+    gap: SPACING.sm,
+    minHeight: TOUCH_TARGET,
+    marginTop: SPACING.sm,
   },
-  dispChipActive: {
-    backgroundColor: COLORS.primary,
-  },
-  dispChipText: {
-    fontSize: 11,
-    fontWeight: '700',
+  checkText: {
+    ...TYPE.body,
     color: COLORS.textDark,
+    flex: 1,
   },
-  dispChipTextActive: {
-    color: '#FFFFFF',
-  },
-  photoBox: {
+  photoRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    borderRadius: 12,
+    gap: SPACING.md,
+    padding: SPACING.sm,
+    minHeight: 64,
+    borderRadius: RADIUS.md,
     borderWidth: 1,
-    borderColor: '#FED7AA',
-    backgroundColor: '#FFF7ED',
-    gap: 8,
-    marginTop: 6,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.cardSecondary,
   },
-  photoBoxActive: {
-    backgroundColor: '#ECFDF5',
-    borderColor: '#A7F3D0',
+  photoThumb: {
+    width: 48,
+    height: 48,
+    borderRadius: RADIUS.sm,
   },
-  photoBoxText: {
-    fontSize: 12,
-    fontWeight: '700',
+  photoText: {
+    ...TYPE.bodyStrong,
     color: COLORS.textDark,
   },
-  footer: {
-    marginTop: 10,
-  },
-  submitBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#DC2626', // Red Tag theme
-    paddingVertical: 14,
-    borderRadius: 16,
-    gap: 8,
-    shadowColor: '#DC2626',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.25,
-    shadowRadius: 10,
-    elevation: 4,
-  },
-  submitBtnText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: '800',
+  inlineError: {
+    ...TYPE.caption,
+    color: COLORS.danger,
+    marginTop: SPACING.sm,
   },
 });

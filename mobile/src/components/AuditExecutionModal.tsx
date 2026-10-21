@@ -1,125 +1,190 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
   Modal,
   StyleSheet,
-  TouchableOpacity,
+  Pressable,
   ScrollView,
-  TextInput,
   Alert,
   Image,
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { COLORS, SHADOWS } from '../constants/theme';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { COLORS, RADIUS, SHADOWS, SPACING, TOUCH_TARGET, TYPE } from '../constants/theme';
 import {
   AuditExecution,
+  AuditSubmissionPayload,
+  AuditTemplateSnapshot,
   FiveSCategory,
-  FiveSQuestion,
-  Observation,
   PhotoAnnotation,
   QuestionAnswer,
   SeverityLevel,
+  TemplateQuestion,
 } from '../types';
-import { MOCK_QUESTIONS } from '../constants/mockData';
+import { PILLARS } from '../constants/pillars';
 import { PhotoAnnotatorModal } from './PhotoAnnotatorModal';
 import { useUser } from '../context/UserContext';
 import { useResponsive } from '../hooks/useResponsive';
+import { allQuestions, buildSubmission, computeScores, MAX_RATING } from '../services/auditScoring';
+import { prepareEvidencePhoto } from '../services/imageEvidence';
+import { RemoteImage } from './RemoteImage';
+import { useWorkspace } from '../context/WorkspaceContext';
+import { Badge, Button, Chip, FormField, TextField } from './ui';
 
 interface AuditExecutionModalProps {
   visible: boolean;
   audit: AuditExecution;
-  onClose: () => void;
-  onSubmit: (completedAudit: AuditExecution) => void;
+  /** Exact template version this audit runs on. */
+  template: AuditTemplateSnapshot;
+  /** Called with the current answers when the auditor leaves the audit (answers are kept as a draft). */
+  onClose: (answers: Record<string, QuestionAnswer>) => void;
+  /** Persists in-progress answers (debounced) so nothing is lost if the app is closed. */
+  onDraftChange: (answers: Record<string, QuestionAnswer>) => void;
+  onSubmit: (audit: AuditExecution, payload: AuditSubmissionPayload) => Promise<void>;
 }
 
-const CATEGORIES: { key: FiveSCategory; label: string; full: string }[] = [
-  { key: 'S1', label: '1S Sort', full: '1S — Sort (Seiri)' },
-  { key: 'S2', label: '2S Order', full: '2S — Set In Order (Seiton)' },
-  { key: 'S3', label: '3S Shine', full: '3S — Shine (Seiso)' },
-  { key: 'S4', label: '4S Standard', full: '4S — Standardize (Seiketsu)' },
-  { key: 'S5', label: '5S Sustain', full: '5S — Sustain (Shitsuke)' },
+const DRAFT_SAVE_DELAY_MS = 800;
+
+const RATINGS = Array.from({ length: MAX_RATING + 1 }, (_, i) => i);
+
+/**
+ * Answer buttons for a question. Yes/no and pass/fail questions get two buttons scored as full marks or zero
+ * (the server reads the answer as score / max score); every other type is rated 0–5.
+ */
+const answerOptions = (questionType: string | null | undefined): Array<{ value: number; label: string; a11y: string }> => {
+  if (questionType === 'YES_NO') return [{ value: MAX_RATING, label: 'Yes', a11y: 'Yes' }, { value: 0, label: 'No', a11y: 'No' }];
+  if (questionType === 'PASS_FAIL') return [{ value: MAX_RATING, label: 'Pass', a11y: 'Pass' }, { value: 0, label: 'Fail', a11y: 'Fail' }];
+  return RATINGS.map((val) => ({ value: val, label: String(val), a11y: `Rating ${val} of ${MAX_RATING}` }));
+};
+
+const SEVERITIES: { key: SeverityLevel; label: string }[] = [
+  { key: 'MINOR', label: 'Minor' },
+  { key: 'MODERATE', label: 'Moderate' },
+  { key: 'MAJOR', label: 'Major' },
+  { key: 'CRITICAL', label: 'Critical' },
 ];
+const SEVERITY_LABEL: Record<SeverityLevel, string> = { MINOR: 'Minor', MODERATE: 'Moderate', MAJOR: 'Major', CRITICAL: 'Critical' };
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 export const AuditExecutionModal: React.FC<AuditExecutionModalProps> = ({
   visible,
   audit,
+  template,
   onClose,
+  onDraftChange,
   onSubmit,
 }) => {
   const { currentUser } = useUser();
   const { isTablet } = useResponsive();
-  const [activeCategory, setActiveCategory] = useState<FiveSCategory>('S1');
+  const { reportBrokenImage } = useWorkspace();
+  const insets = useSafeAreaInsets();
+  const scrollRef = useRef<ScrollView>(null);
+
+  // Only pillars that actually have questions in this template version
+  const categories = useMemo(
+    () => PILLARS.filter((p) => template.sections.some((s) => s.category === p.key && s.questions.length > 0)),
+    [template],
+  );
+  const [activeCategory, setActiveCategory] = useState<FiveSCategory>(categories[0]?.key ?? 'S1_SORT');
   const [answers, setAnswers] = useState<Record<string, QuestionAnswer>>(audit.answers || {});
-  const [observations, setObservations] = useState<Observation[]>(audit.observations || []);
   const [expandedGuidance, setExpandedGuidance] = useState<Record<string, boolean>>({});
   const [showStandardImage, setShowStandardImage] = useState<Record<string, boolean>>({});
+  const [noteOpen, setNoteOpen] = useState<Record<string, boolean>>({});
 
-  // Observation creation modal state
-  const [observationModalQuestion, setObservationModalQuestion] = useState<FiveSQuestion | null>(null);
-  const [obsSeverity, setObsSeverity] = useState<SeverityLevel>('MODERATE');
-  const [obsDesc, setObsDesc] = useState('');
-  const [obsRootCause, setObsRootCause] = useState('Machine / Equipment');
+  // Finding (non-conformance) editor state
+  const [findingQuestion, setFindingQuestion] = useState<TemplateQuestion | null>(null);
+  const [findingSeverity, setFindingSeverity] = useState<SeverityLevel>('MODERATE');
+  const [findingDesc, setFindingDesc] = useState('');
+  const [findingError, setFindingError] = useState<string | undefined>(undefined);
 
   // Photo annotator modal state
   const [annotatorVisible, setAnnotatorVisible] = useState(false);
   const [currentAnnotatingQuestionId, setCurrentAnnotatingQuestionId] = useState<string | null>(null);
-  const [currentPhotoUri, setCurrentPhotoUri] = useState<string | null>(null);
+  const [currentPhoto, setCurrentPhoto] = useState<{ uri: string; width?: number; height?: number } | null>(null);
   const [photoSourceModalVisible, setPhotoSourceModalVisible] = useState(false);
+  const [processingPhoto, setProcessingPhoto] = useState(false);
 
   // Sign-off modal state
   const [showSignOffModal, setShowSignOffModal] = useState(false);
-  const [auditorSigned, setAuditorSigned] = useState(true);
-  const [areaOwnerSigned, setAreaOwnerSigned] = useState(true);
+  const [auditorSigned, setAuditorSigned] = useState(false);
+  const [summaryNotes, setSummaryNotes] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  // Filter questions for the active category
-  const currentQuestions = useMemo(() => {
-    return MOCK_QUESTIONS.filter((q) => q.category === activeCategory);
+  const questionById = useMemo(() => new Map(allQuestions(template).map((q) => [q.id, q])), [template]);
+
+  const currentQuestions = useMemo(
+    () => template.sections.filter((s) => s.category === activeCategory).flatMap((s) => s.questions),
+    [template, activeCategory],
+  );
+
+  const scoreStats = useMemo(() => computeScores(template, answers), [template, answers]);
+  const findingsCount = useMemo(() => Object.values(answers).filter((a) => a.finding).length, [answers]);
+  const scoreLabel = scoreStats.percentage === null ? '—' : `${Math.round(scoreStats.percentage)}%`;
+
+  // Answered / total per pillar for the section tabs
+  const categoryProgress = useMemo(() => {
+    const out: Partial<Record<FiveSCategory, { answered: number; total: number }>> = {};
+    template.sections.forEach((s) => {
+      const entry = out[s.category] ?? { answered: 0, total: 0 };
+      s.questions.forEach((q) => {
+        entry.total += 1;
+        if (answers[q.id]) entry.answered += 1;
+      });
+      out[s.category] = entry;
+    });
+    return out;
+  }, [template, answers]);
+
+  const activeIndex = categories.findIndex((c) => c.key === activeCategory);
+  const nextCategory = activeIndex >= 0 ? categories[activeIndex + 1] : undefined;
+
+  // Each section starts at its first question
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ y: 0, animated: false });
   }, [activeCategory]);
 
-  // Dynamic Live Score Calculation Engine
-  const scoreStats = useMemo(() => {
-    let totalScoreObtained = 0;
-    let totalMaxScore = 0;
-    let hasCriticalZero = false;
+  // Debounced draft persistence
+  const isFirstRender = useRef(true);
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    const timer = setTimeout(() => onDraftChange(answers), DRAFT_SAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [answers, onDraftChange]);
 
-    MOCK_QUESTIONS.forEach((q) => {
-      const ans = answers[q.id];
-      if (ans && !ans.isNa) {
-        totalScoreObtained += ans.score * q.weightage;
-        totalMaxScore += 5 * q.weightage;
-        if (q.isCritical && ans.score <= 1) {
-          hasCriticalZero = true;
-        }
-      }
+  const baseAnswer = (q: TemplateQuestion, prev?: QuestionAnswer): QuestionAnswer => ({
+    questionId: q.id,
+    sectionId: q.sectionId,
+    category: q.category,
+    score: prev?.score ?? 0,
+    isNa: prev?.isNa ?? false,
+    comment: prev?.comment ?? '',
+    evidence: prev?.evidence ?? [],
+    finding: prev?.finding,
+  });
+
+  const handleScoreChange = (q: TemplateQuestion, score: number) => {
+    setAnswers((prev) => ({ ...prev, [q.id]: { ...baseAnswer(q, prev[q.id]), score, isNa: false } }));
+  };
+
+  const handleToggleNa = (q: TemplateQuestion) => {
+    setAnswers((prev) => {
+      const current = baseAnswer(q, prev[q.id]);
+      return { ...prev, [q.id]: { ...current, isNa: !(prev[q.id]?.isNa ?? false), finding: undefined } };
     });
+  };
 
-    const rawScore = totalMaxScore > 0 ? Math.round((totalScoreObtained / totalMaxScore) * 100) : 85;
-    // Cap score at 75% if a critical question failed
-    const finalScore = hasCriticalZero ? Math.min(rawScore, 75) : rawScore;
-
-    return {
-      percentage: finalScore,
-      hasCriticalZero,
-      answeredCount: Object.keys(answers).length,
-      totalCount: MOCK_QUESTIONS.length,
-    };
-  }, [answers]);
-
-  const handleScoreChange = (questionId: string, score: number, category: FiveSCategory) => {
-    setAnswers((prev) => ({
-      ...prev,
-      [questionId]: {
-        questionId,
-        category,
-        score,
-        maxScore: 5,
-        isNa: false,
-        comment: prev[questionId]?.comment || '',
-        evidence: prev[questionId]?.evidence || [],
-      },
-    }));
+  /** Notes only attach to an existing answer, so typing a note never counts as rating the question. */
+  const handleCommentChange = (questionId: string, comment: string) => {
+    setAnswers((prev) => (prev[questionId] ? { ...prev, [questionId]: { ...prev[questionId], comment } } : prev));
   };
 
   const handleAddEvidencePhoto = (questionId: string) => {
@@ -127,57 +192,38 @@ export const AuditExecutionModal: React.FC<AuditExecutionModalProps> = ({
     setPhotoSourceModalVisible(true);
   };
 
-  const handleLaunchCamera = async (questionId?: string) => {
+  const handlePickedAsset = (asset?: ImagePicker.ImagePickerAsset) => {
+    if (!asset?.uri) return;
+    setCurrentPhoto({ uri: asset.uri, width: asset.width, height: asset.height });
+    setPhotoSourceModalVisible(false);
+    setAnnotatorVisible(true);
+  };
+
+  const handleLaunchCamera = async () => {
     try {
       const perm = await ImagePicker.requestCameraPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert(
-          'Camera Permission Needed',
-          'Please allow camera permissions in device settings to take defect photos.'
-        );
+        Alert.alert('Camera access needed', 'Allow camera access in your device settings to take photos.');
         return;
       }
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ['images'],
-        allowsEditing: true,
-        quality: 0.85,
-      });
-      if (!result.canceled && result.assets && result.assets[0]?.uri) {
-        if (questionId) setCurrentAnnotatingQuestionId(questionId);
-        setCurrentPhotoUri(result.assets[0].uri);
-        setPhotoSourceModalVisible(false);
-        setAnnotatorVisible(true);
-      }
-    } catch (err) {
-      console.warn('Camera capture error:', err);
-      Alert.alert('Camera Error', 'Could not open device camera.');
+      const result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], allowsEditing: true, quality: 0.9 });
+      if (!result.canceled) handlePickedAsset(result.assets?.[0]);
+    } catch {
+      Alert.alert('Camera unavailable', 'The camera could not be opened.');
     }
   };
 
-  const handlePickFromGallery = async (questionId?: string) => {
+  const handlePickFromGallery = async () => {
     try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert(
-          'Photo Library Permission Needed',
-          'Please allow photo library access in device settings to pick photos.'
-        );
+        Alert.alert('Photo access needed', 'Allow photo library access in your device settings to choose a photo.');
         return;
       }
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        allowsEditing: true,
-        quality: 0.85,
-      });
-      if (!result.canceled && result.assets && result.assets[0]?.uri) {
-        if (questionId) setCurrentAnnotatingQuestionId(questionId);
-        setCurrentPhotoUri(result.assets[0].uri);
-        setPhotoSourceModalVisible(false);
-        setAnnotatorVisible(true);
-      }
-    } catch (err) {
-      console.warn('Gallery pick error:', err);
-      Alert.alert('Gallery Error', 'Could not open photo library.');
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, quality: 0.9 });
+      if (!result.canceled) handlePickedAsset(result.assets?.[0]);
+    } catch {
+      Alert.alert('Gallery unavailable', 'The photo library could not be opened.');
     }
   };
 
@@ -185,1240 +231,997 @@ export const AuditExecutionModal: React.FC<AuditExecutionModalProps> = ({
     setAnswers((prev) => {
       const existing = prev[questionId];
       if (!existing) return prev;
-      return {
-        ...prev,
-        [questionId]: {
-          ...existing,
-          evidence: existing.evidence.filter((e) => e.id !== photoId),
-        },
-      };
+      return { ...prev, [questionId]: { ...existing, evidence: existing.evidence.filter((e) => e.id !== photoId) } };
     });
   };
 
-  const handleSaveAnnotation = (annotations: PhotoAnnotation[], updatedPhotoUri?: string) => {
-    if (!currentAnnotatingQuestionId) return;
+  const handleSaveAnnotation = async (
+    annotations: PhotoAnnotation[],
+    updatedPhotoUri?: string,
+    updatedPhotoSize?: { width: number; height: number },
+  ) => {
+    const questionId = currentAnnotatingQuestionId;
+    const q = questionId ? questionById.get(questionId) : undefined;
+    const sourceUri = updatedPhotoUri || currentPhoto?.uri;
+    setAnnotatorVisible(false);
+    if (!q || !sourceUri) return;
 
-    setAnswers((prev) => {
-      const existing = prev[currentAnnotatingQuestionId] || {
-        questionId: currentAnnotatingQuestionId,
-        category: activeCategory,
-        score: 3,
-        maxScore: 5,
-        isNa: false,
-        comment: '',
-        evidence: [],
-      };
+    // A photo replaced inside the annotator has its own size; the original size would resize it wrongly
+    const replaced = sourceUri !== currentPhoto?.uri;
+    const size = replaced ? updatedPhotoSize : { width: currentPhoto?.width, height: currentPhoto?.height };
 
-      const newPhoto = {
+    setProcessingPhoto(true);
+    try {
+      // Downscale + compress before storing: the API keeps evidence inline with the audit.
+      // Annotations are percentages of the photo, so they stay valid after resizing; the server burns them in.
+      const prepared = await prepareEvidencePhoto(sourceUri, size);
+      const photo = {
         id: `ev-${Date.now()}`,
-        uri:
-          updatedPhotoUri ||
-          currentPhotoUri ||
-          'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?w=800',
+        uri: prepared.uri,
+        dataUrl: prepared.dataUrl,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         annotations,
       };
-
-      return {
-        ...prev,
-        [currentAnnotatingQuestionId]: {
-          ...existing,
-          evidence: [...existing.evidence, newPhoto],
-        },
-      };
-    });
-    setAnnotatorVisible(false);
+      setAnswers((prev) => {
+        const existing = baseAnswer(q, prev[q.id]);
+        return { ...prev, [q.id]: { ...existing, evidence: [...existing.evidence, photo] } };
+      });
+    } catch {
+      Alert.alert('Photo not added', 'The photo could not be processed. Please try again.');
+    } finally {
+      setProcessingPhoto(false);
+      setCurrentPhoto(null);
+    }
   };
 
-  const handleOpenObservationModal = (q: FiveSQuestion) => {
-    setObservationModalQuestion(q);
-    setObsDesc(`Non-conformance observed in ${q.title}`);
-    setObsSeverity(q.isCritical ? 'MAJOR' : 'MODERATE');
+  const handleOpenFindingModal = (q: TemplateQuestion) => {
+    const existing = answers[q.id]?.finding;
+    setFindingQuestion(q);
+    setFindingError(undefined);
+    setFindingDesc(existing?.description ?? '');
+    setFindingSeverity(existing?.severity ?? (q.isCritical ? 'MAJOR' : 'MODERATE'));
   };
 
-  const handleSaveObservation = () => {
-    if (!observationModalQuestion) return;
-
-    // SLA target calculation based on severity
-    let targetDays = 7;
-    if (obsSeverity === 'CRITICAL') targetDays = 1;
-    if (obsSeverity === 'MAJOR') targetDays = 3;
-    if (obsSeverity === 'MINOR') targetDays = 15;
-
-    const targetDate = new Date();
-    targetDate.setDate(targetDate.getDate() + targetDays);
-
-    const newObs: Observation = {
-      id: `obs-${Date.now()}`,
-      auditId: audit.id,
-      questionId: observationModalQuestion.id,
-      category: observationModalQuestion.category,
-      areaId: audit.locationId,
-      areaName: audit.locationName,
-      description: obsDesc,
-      severity: obsSeverity,
-      risk: obsSeverity === 'CRITICAL' ? 'HIGH' : 'MEDIUM',
-      assignedTo: 'Area Supervisor',
-      targetDate: targetDate.toLocaleDateString('en-GB'),
-      rootCauseCategory: obsRootCause,
-      status: 'OPEN',
-      evidencePhotos: ['mock-photo-uri'],
-    };
-
-    setObservations((prev) => [...prev, newObs]);
-    setObservationModalQuestion(null);
-    Alert.alert('Observation Created', `Observation raised with ${targetDays}-day SLA target closure.`);
+  const handleSaveFinding = () => {
+    if (!findingQuestion) return;
+    if (!findingDesc.trim()) {
+      setFindingError('Describe the problem so the area owner can act on it.');
+      return;
+    }
+    const q = findingQuestion;
+    setAnswers((prev) => ({
+      ...prev,
+      [q.id]: { ...baseAnswer(q, prev[q.id]), isNa: false, finding: { severity: findingSeverity, description: findingDesc.trim() } },
+    }));
+    setFindingQuestion(null);
   };
 
-  const auditorDisplayName = `${currentUser.firstName} ${currentUser.lastName} (${currentUser.jobTitle})`;
-  const areaOwnerDisplayName = `${audit.locationName} Supervisor`;
-
-  const computePillarScore = (cat: FiveSCategory): number => {
-    const catQuestions = MOCK_QUESTIONS.filter((q) => q.category === cat);
-    if (catQuestions.length === 0) return 80;
-    let earned = 0;
-    let max = 0;
-    catQuestions.forEach((q) => {
-      const a = answers[q.id];
-      if (a && !a.isNa) {
-        earned += a.score * q.weightage;
-        max += 5 * q.weightage;
-      } else if (!a) {
-        earned += 4 * q.weightage;
-        max += 5 * q.weightage;
-      }
-    });
-    return max > 0 ? Math.round((earned / max) * 100) : 80;
+  const handleRemoveFinding = () => {
+    if (!findingQuestion) return;
+    const q = findingQuestion;
+    setAnswers((prev) => (prev[q.id] ? { ...prev, [q.id]: { ...prev[q.id], finding: undefined } } : prev));
+    setFindingQuestion(null);
   };
 
-  const handleFinalSubmit = () => {
-    const todayFormatted = new Date().toLocaleDateString('en-GB');
-    const completedAudit: AuditExecution = {
-      ...audit,
-      status: 'COMPLETED',
-      statusBadge: 'Completed',
-      overallScore: scoreStats.percentage,
-      pillarScores: {
-        S1: computePillarScore('S1'),
-        S2: computePillarScore('S2'),
-        S3: computePillarScore('S3'),
-        S4: computePillarScore('S4'),
-        S5: computePillarScore('S5'),
-      },
-      answers,
-      observations,
-      auditorSignature: `Signed by ${auditorDisplayName} on ${todayFormatted}`,
-      areaOwnerSignature: `Signed by ${areaOwnerDisplayName} on ${todayFormatted}`,
-      completedAt: new Date().toISOString(),
-      timeline: [
-        { label: 'Area Verified', timestamp: '09:15 AM', isCompleted: true, isActive: false },
-        { label: 'Inspection', timestamp: 'S1–S5 Completed', isCompleted: true, isActive: false },
-        { label: 'CAPA Review', timestamp: '10:00 AM', isCompleted: true, isActive: false },
-        { label: 'Signed Off', timestamp: '10:30 AM', isCompleted: true, isActive: true },
-      ],
-    };
+  const auditorDisplayName = `${currentUser.firstName} ${currentUser.lastName}`;
+  const unanswered = scoreStats.unansweredIds.length;
+  const missingPhotos = scoreStats.missingEvidenceIds.length;
+  const blockers = [
+    unanswered > 0 ? `${plural(unanswered, 'question', 'questions')} not answered` : null,
+    missingPhotos > 0 ? `${plural(missingPhotos, 'question needs', 'questions need')} a photo` : null,
+  ].filter((b): b is string => !!b);
+  const canSubmit = blockers.length === 0 && auditorSigned && !submitting;
 
+  const jumpToFirstBlocker = () => {
+    const firstId = scoreStats.unansweredIds[0] ?? scoreStats.missingEvidenceIds[0];
+    const q = firstId ? questionById.get(firstId) : undefined;
+    if (q) setActiveCategory(q.category);
     setShowSignOffModal(false);
-    onSubmit(completedAudit);
   };
+
+  const handleFinalSubmit = async () => {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    try {
+      const payload = buildSubmission(template, answers, { name: auditorDisplayName }, summaryNotes);
+      const completed: AuditExecution = {
+        ...audit,
+        answers,
+        overallScore: scoreStats.percentage,
+        pillarScores: scoreStats.pillarScores,
+        findingsCount,
+        auditorSignature: payload.auditorSignature,
+        completedAt: payload.completedAt,
+      };
+      setShowSignOffModal(false);
+      await onSubmit(completed, payload);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const progressPct = scoreStats.totalCount > 0 ? (scoreStats.answeredCount / scoreStats.totalCount) * 100 : 0;
+  const sheetBottom = Math.max(insets.bottom, SPACING.lg);
 
   return (
-    <Modal visible={visible} animationType="slide">
-      <View style={[styles.modalContainer, isTablet && styles.tabletModalContainer]}>
-        {/* Top Header Bar */}
-        <View style={styles.header}>
-          <TouchableOpacity onPress={onClose} style={styles.backButton}>
-            <Ionicons name="arrow-back" size={22} color={COLORS.textDark} />
-          </TouchableOpacity>
-          <View style={styles.headerCenter}>
-            <Text style={styles.headerTracking}>{audit.trackingNumber}</Text>
-            <Text style={styles.headerLocation}>{audit.locationName}</Text>
-          </View>
-          <View style={styles.liveScoreBadge}>
-            <Text style={styles.liveScoreText}>{scoreStats.percentage}%</Text>
-          </View>
-        </View>
-
-        {/* 5S Pillar Tabs (S1 to S5) */}
-        <View style={styles.pillarTabs}>
-          {CATEGORIES.map((cat) => (
-            <TouchableOpacity
-              key={cat.key}
-              style={[
-                styles.pillarTabItem,
-                activeCategory === cat.key && styles.pillarTabItemActive,
-              ]}
-              onPress={() => setActiveCategory(cat.key)}
-            >
-              <Text
-                style={[
-                  styles.pillarTabText,
-                  activeCategory === cat.key && styles.pillarTabTextActive,
-                ]}
+    <Modal visible={visible} animationType="slide" onRequestClose={() => onClose(answers)}>
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom', 'left', 'right']}>
+        <View style={[styles.modalContainer, isTablet && styles.tabletModalContainer]}>
+          {/* Header: area, audit code and progress */}
+          <View style={styles.header}>
+            <View style={styles.headerRow}>
+              <Pressable
+                onPress={() => onClose(answers)}
+                style={styles.backButton}
+                accessibilityRole="button"
+                accessibilityLabel="Save and close audit"
+                hitSlop={4}
               >
-                {cat.label}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Critical score cap warning if triggered */}
-        {scoreStats.hasCriticalZero && (
-          <View style={styles.criticalBanner}>
-            <Ionicons name="warning" size={16} color="#DC2626" />
-            <Text style={styles.criticalBannerText}>
-              Critical question failed: Score capped at 75% max per standard.
-            </Text>
-          </View>
-        )}
-
-        {/* Question Checklist */}
-        <ScrollView contentContainerStyle={styles.checklistContent} showsVerticalScrollIndicator={false}>
-          {currentQuestions.map((q, idx) => {
-            const currentAns = answers[q.id];
-            const currentScore = currentAns ? currentAns.score : 0;
-            const hasGuidance = expandedGuidance[q.id];
-            const hasStdImage = showStandardImage[q.id];
-
-            return (
-              <View key={q.id} style={[styles.questionCard, SHADOWS.card]}>
-                {/* Question Header */}
-                <View style={styles.qHeader}>
-                  <View style={styles.qHeaderLeft}>
-                    <View style={styles.qNumberBadge}>
-                      <Text style={styles.qNumberText}>#{idx + 1}</Text>
-                    </View>
-                    <Text style={styles.qTitle}>{q.title}</Text>
-                  </View>
-                  {q.isCritical && (
-                    <View style={styles.criticalPill}>
-                      <Text style={styles.criticalPillText}>CRITICAL</Text>
-                    </View>
-                  )}
-                </View>
-
-                {/* Question Text */}
-                <Text style={styles.qText}>{q.question}</Text>
-
-                {/* SOP Standard guidance toggle */}
-                <View style={styles.guidanceRow}>
-                  <TouchableOpacity
-                    style={styles.guidanceToggle}
-                    onPress={() =>
-                      setExpandedGuidance((prev) => ({ ...prev, [q.id]: !prev[q.id] }))
-                    }
-                  >
-                    <Ionicons name="information-circle-outline" size={16} color={COLORS.primary} />
-                    <Text style={styles.guidanceToggleText}>
-                      {hasGuidance ? 'Hide SOP Guidance' : 'View SOP Guidance'}
-                    </Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.guidanceToggle}
-                    onPress={() =>
-                      setShowStandardImage((prev) => ({ ...prev, [q.id]: !prev[q.id] }))
-                    }
-                  >
-                    <Ionicons name="image-outline" size={16} color={COLORS.primary} />
-                    <Text style={styles.guidanceToggleText}>
-                      {hasStdImage ? 'Hide Visual Std' : 'Standard vs Current'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
-                {/* Guidance Expanded Content */}
-                {hasGuidance && (
-                  <View style={styles.guidanceBox}>
-                    <Text style={styles.guidanceText}>{q.guidance}</Text>
-                  </View>
-                )}
-
-                {/* Standard vs Current Visual Comparator */}
-                {hasStdImage && (
-                  <View style={styles.comparatorBox}>
-                    <View style={styles.compareCol}>
-                      <View style={styles.compareHeaderGood}>
-                        <Ionicons name="checkmark-circle" size={14} color="#059669" />
-                        <Text style={styles.compareHeaderTextGood}>Approved Standard</Text>
-                      </View>
-                      <View style={styles.comparePlaceholderGood}>
-                        <Ionicons name="sparkles" size={28} color="#059669" />
-                        <Text style={styles.compareSub}>Clean Shadow Board & Yellow Floor Tape</Text>
-                      </View>
-                    </View>
-                    <View style={styles.compareCol}>
-                      <View style={styles.compareHeaderBad}>
-                        <Ionicons name="camera" size={14} color={COLORS.primary} />
-                        <Text style={styles.compareHeaderTextBad}>Shopfloor Current</Text>
-                      </View>
-                      <TouchableOpacity
-                        style={styles.comparePlaceholderBad}
-                        onPress={() => handleAddEvidencePhoto(q.id)}
-                      >
-                        <Ionicons name="add-circle" size={28} color={COLORS.primary} />
-                        <Text style={styles.compareSub}>Tap to capture shopfloor photo</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                )}
-
-                {/* Score Selector (0 to 5 Star Rating) */}
-                <View style={styles.scoreRow}>
-                  <Text style={styles.scoreRowLabel}>Score Rating (0 - 5):</Text>
-                  <View style={styles.starRow}>
-                    {[1, 2, 3, 4, 5].map((val) => (
-                      <TouchableOpacity
-                        key={val}
-                        style={[
-                          styles.starButton,
-                          currentScore >= val && styles.starButtonActive,
-                        ]}
-                        onPress={() => handleScoreChange(q.id, val, q.category)}
-                      >
-                        <Text
-                          style={[
-                            styles.starButtonText,
-                            currentScore >= val && styles.starButtonTextActive,
-                          ]}
-                        >
-                          {val}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                </View>
-
-                {/* Evidence and Observation Action Bar */}
-                <View style={styles.cardActionsRow}>
-                  <TouchableOpacity
-                    style={styles.evidenceBtn}
-                    onPress={() => handleAddEvidencePhoto(q.id)}
-                  >
-                    <Ionicons name="camera" size={16} color={COLORS.primary} />
-                    <Text style={styles.evidenceBtnText}>
-                      Evidence Photo ({currentAns?.evidence?.length || 0})
-                    </Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.observationBtn}
-                    onPress={() => handleOpenObservationModal(q)}
-                  >
-                    <Ionicons name="warning-outline" size={16} color="#DC2626" />
-                    <Text style={styles.observationBtnText}>Raise Observation</Text>
-                  </TouchableOpacity>
-                </View>
-
-                {/* Evidence Photo Thumbnails Strip */}
-                {currentAns?.evidence && currentAns.evidence.length > 0 && (
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    style={styles.evidenceThumbScroll}
-                  >
-                    {currentAns.evidence.map((ev, evIdx) => (
-                      <View key={ev.id || evIdx} style={styles.evidenceThumbCard}>
-                        <Image source={{ uri: ev.uri }} style={styles.evidenceThumbImage} />
-                        <View style={styles.evidenceThumbBadge}>
-                          <Ionicons name="brush" size={10} color="#FFFFFF" />
-                          <Text style={styles.evidenceThumbBadgeText}>
-                            {ev.annotations?.length || 0} marks
-                          </Text>
-                        </View>
-                        <TouchableOpacity
-                          style={styles.evidenceThumbDeleteBtn}
-                          onPress={() => handleDeleteEvidence(q.id, ev.id)}
-                          activeOpacity={0.8}
-                        >
-                          <Ionicons name="close" size={11} color="#FFFFFF" />
-                        </TouchableOpacity>
-                      </View>
-                    ))}
-                  </ScrollView>
-                )}
+                <Ionicons name="arrow-back" size={24} color={COLORS.textDark} />
+              </Pressable>
+              <View style={styles.headerCenter}>
+                <Text style={styles.headerTitle} numberOfLines={2} accessibilityRole="header">
+                  {audit.locationName || 'Audit'}
+                </Text>
+                <Text style={styles.headerSub} numberOfLines={1}>
+                  {[audit.trackingNumber, template.name].filter(Boolean).join(' • ')}
+                </Text>
               </View>
-            );
-          })}
-        </ScrollView>
-
-        {/* Bottom Review & Submit Bar */}
-        <View style={styles.bottomBar}>
-          <View style={styles.bottomBarInfo}>
-            <Text style={styles.bottomBarLabel}>Overall 5S Score</Text>
-            <Text style={styles.bottomBarScore}>{scoreStats.percentage}%</Text>
+            </View>
+            <View style={styles.progressRow}>
+              <Text style={styles.progressText}>
+                {scoreStats.answeredCount} of {scoreStats.totalCount} answered
+              </Text>
+              {findingsCount > 0 && <Text style={styles.progressFindings}>{plural(findingsCount, 'finding', 'findings')}</Text>}
+            </View>
+            <View
+              style={styles.progressTrack}
+              accessibilityRole="progressbar"
+              accessibilityLabel="Questions answered"
+              accessibilityValue={{ min: 0, max: scoreStats.totalCount, now: scoreStats.answeredCount }}
+            >
+              <View style={[styles.progressFill, { width: `${progressPct}%` }]} />
+            </View>
           </View>
-          <TouchableOpacity
-            style={styles.submitAuditBtn}
-            onPress={() => setShowSignOffModal(true)}
-            activeOpacity={0.85}
-          >
-            <Ionicons name="checkmark-done" size={20} color="#FFFFFF" />
-            <Text style={styles.submitAuditBtnText}>Review &amp; Sign Off</Text>
-          </TouchableOpacity>
+
+          {/* Section tabs (only pillars present in this template) */}
+          <View style={styles.tabsBar}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabsContent}>
+              {categories.map((cat) => {
+                const selected = activeCategory === cat.key;
+                const prog = categoryProgress[cat.key] ?? { answered: 0, total: 0 };
+                const done = prog.total > 0 && prog.answered === prog.total;
+                return (
+                  <Pressable
+                    key={cat.key}
+                    style={({ pressed }) => [styles.tab, selected && styles.tabActive, pressed && !selected && styles.pressed]}
+                    onPress={() => setActiveCategory(cat.key)}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected }}
+                    accessibilityLabel={`${cat.label}, ${prog.answered} of ${prog.total} answered`}
+                  >
+                    {done && <Ionicons name="checkmark-circle" size={16} color={selected ? COLORS.textInverse : COLORS.success} />}
+                    <Text style={[styles.tabText, selected && styles.tabTextActive]}>{cat.label}</Text>
+                    <Text style={[styles.tabCount, selected && styles.tabTextActive]}>
+                      {prog.answered}/{prog.total}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </View>
+
+          {/* Critical score cap warning if triggered */}
+          {scoreStats.criticalFailures > 0 && (
+            <View style={[styles.banner, styles.bannerDanger]}>
+              <Ionicons name="warning-outline" size={18} color={COLORS.danger} />
+              <Text style={[styles.bannerText, { color: COLORS.danger }]}>
+                A critical question failed. The overall score is capped at {scoreStats.capApplied}%.
+              </Text>
+            </View>
+          )}
+
+          {processingPhoto && (
+            <View style={[styles.banner, styles.bannerInfo]}>
+              <ActivityIndicator color={COLORS.primary} />
+              <Text style={[styles.bannerText, { color: COLORS.info }]}>Preparing photo…</Text>
+            </View>
+          )}
+
+          {/* Question checklist */}
+          <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'web' ? undefined : 'padding'}>
+            <ScrollView
+              ref={scrollRef}
+              contentContainerStyle={styles.checklistContent}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              {currentQuestions.map((q, idx) => {
+                const currentAns = answers[q.id];
+                const currentScore = currentAns ? currentAns.score : 0;
+                const isAnswered = !!currentAns && !currentAns.isNa;
+                const isNa = !!currentAns?.isNa;
+                const needsPhoto = q.mandatoryEvidence && !isNa && (currentAns?.evidence.length ?? 0) === 0;
+                const hasGuidance = expandedGuidance[q.id];
+                const hasStdImage = showStandardImage[q.id];
+                const evidence = currentAns?.evidence ?? [];
+                const showNote = !!currentAns && (noteOpen[q.id] || !!currentAns.comment);
+
+                return (
+                  <View key={q.id} style={[styles.questionCard, q.isCritical && styles.questionCardCritical]}>
+                    {/* Question header */}
+                    <View style={styles.qHeader}>
+                      <Text style={styles.qNumber} numberOfLines={1}>
+                        Question {idx + 1} of {currentQuestions.length}
+                        {q.code ? ` • ${q.code}` : ''}
+                      </Text>
+                      {q.isCritical && <Badge label="Critical" tone="danger" icon="alert-circle" />}
+                    </View>
+
+                    <Text style={styles.qText}>{q.text}</Text>
+
+                    {q.mandatoryEvidence && !isNa && (
+                      <View style={styles.qTags}>
+                        <Badge
+                          label={needsPhoto ? 'Photo required' : 'Photo added'}
+                          tone={needsPhoto ? 'warning' : 'success'}
+                          icon={needsPhoto ? 'camera-outline' : 'checkmark'}
+                        />
+                      </View>
+                    )}
+
+                    {/* Guidance and reference photo toggles (only when the template provides them) */}
+                    {(!!q.guidance || !!q.referencePhotoUrl) && (
+                      <View style={styles.guidanceRow}>
+                        {!!q.guidance && (
+                          <Pressable
+                            style={styles.linkBtn}
+                            onPress={() => setExpandedGuidance((prev) => ({ ...prev, [q.id]: !prev[q.id] }))}
+                            accessibilityRole="button"
+                            accessibilityState={{ expanded: !!hasGuidance }}
+                          >
+                            <Ionicons name="information-circle-outline" size={18} color={COLORS.primaryLight} />
+                            <Text style={styles.linkText}>{hasGuidance ? 'Hide guidance' : 'Show guidance'}</Text>
+                          </Pressable>
+                        )}
+                        {!!q.referencePhotoUrl && (
+                          <Pressable
+                            style={styles.linkBtn}
+                            onPress={() => setShowStandardImage((prev) => ({ ...prev, [q.id]: !prev[q.id] }))}
+                            accessibilityRole="button"
+                            accessibilityState={{ expanded: !!hasStdImage }}
+                          >
+                            <Ionicons name="image-outline" size={18} color={COLORS.primaryLight} />
+                            <Text style={styles.linkText}>{hasStdImage ? 'Hide reference photo' : 'Reference photo'}</Text>
+                          </Pressable>
+                        )}
+                      </View>
+                    )}
+
+                    {hasGuidance && !!q.guidance && (
+                      <View style={styles.guidanceBox}>
+                        <Text style={styles.guidanceText}>{q.guidance}</Text>
+                      </View>
+                    )}
+
+                    {/* Reference photo: what the area should look like */}
+                    {hasStdImage && !!q.referencePhotoUrl && (
+                      <View style={styles.referenceBox}>
+                        <Text style={styles.referenceLabel}>How it should look</Text>
+                        <RemoteImage uri={q.referencePhotoUrl} style={styles.referenceImage} resizeMode="cover" onLoadError={reportBrokenImage} />
+                      </View>
+                    )}
+
+                    {/* Answer (yes/no, pass/fail or rating 0–5) and not applicable */}
+                    <View style={styles.ratingHeader}>
+                      {answerOptions(q.questionType).length === 2 ? (
+                        <Text style={styles.ratingLabel}>Answer</Text>
+                      ) : (
+                        <Text style={styles.ratingLabel}>
+                          Rating <Text style={styles.ratingHint}>0 = not met, {MAX_RATING} = fully met</Text>
+                        </Text>
+                      )}
+                    </View>
+                    <View style={styles.ratingRow} accessibilityRole="radiogroup">
+                      {answerOptions(q.questionType).map((opt) => {
+                        const active = isAnswered && currentScore === opt.value;
+                        return (
+                          <Pressable
+                            key={opt.label}
+                            style={({ pressed }) => [styles.ratingButton, active && styles.ratingButtonActive, pressed && !active && styles.pressed]}
+                            onPress={() => handleScoreChange(q, opt.value)}
+                            accessibilityRole="radio"
+                            accessibilityLabel={opt.a11y}
+                            accessibilityState={{ selected: active, checked: active }}
+                          >
+                            <Text style={[styles.ratingButtonText, active && styles.ratingButtonTextActive]}>{opt.label}</Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                    <Pressable
+                      style={({ pressed }) => [styles.naButton, isNa && styles.naButtonActive, pressed && styles.pressed]}
+                      onPress={() => handleToggleNa(q)}
+                      accessibilityRole="checkbox"
+                      accessibilityLabel="Not applicable"
+                      accessibilityState={{ checked: isNa }}
+                    >
+                      <Ionicons name={isNa ? 'checkbox' : 'square-outline'} size={20} color={isNa ? COLORS.primary : COLORS.textMedium} />
+                      <Text style={[styles.naText, isNa && { color: COLORS.primary }]}>Not applicable</Text>
+                    </Pressable>
+
+                    {/* Photo and finding actions */}
+                    <View style={styles.cardActionsRow}>
+                      <Button
+                        label={evidence.length > 0 ? `Add photo (${evidence.length})` : 'Add photo'}
+                        icon="camera-outline"
+                        variant="secondary"
+                        onPress={() => handleAddEvidencePhoto(q.id)}
+                        style={styles.flex}
+                      />
+                      <Button
+                        label={currentAns?.finding ? 'Edit finding' : 'Raise finding'}
+                        icon="flag-outline"
+                        variant="secondary"
+                        onPress={() => handleOpenFindingModal(q)}
+                        disabled={isNa}
+                        style={styles.flex}
+                        accessibilityLabel={isNa ? 'Raise finding, not available for not applicable questions' : undefined}
+                      />
+                    </View>
+
+                    {currentAns?.finding && (
+                      <Pressable
+                        style={styles.findingBox}
+                        onPress={() => handleOpenFindingModal(q)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Finding, ${SEVERITY_LABEL[currentAns.finding.severity]}: ${currentAns.finding.description}. Tap to edit.`}
+                      >
+                        <Ionicons name="flag" size={16} color={COLORS.danger} />
+                        <View style={styles.flex}>
+                          <Text style={styles.findingTitle}>Finding • {SEVERITY_LABEL[currentAns.finding.severity]}</Text>
+                          <Text style={styles.findingText}>{currentAns.finding.description}</Text>
+                        </View>
+                      </Pressable>
+                    )}
+
+                    {/* Evidence photo thumbnails */}
+                    {evidence.length > 0 && (
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.evidenceThumbRow}>
+                        {evidence.map((ev, evIdx) => (
+                          <View key={ev.id || evIdx} style={styles.evidenceThumbCard}>
+                            <Image source={{ uri: ev.uri }} style={styles.evidenceThumbImage} accessibilityLabel={`Photo ${evIdx + 1}`} />
+                            {(ev.annotations?.length ?? 0) > 0 && (
+                              <View style={styles.evidenceThumbBadge}>
+                                <Text style={styles.evidenceThumbBadgeText}>{plural(ev.annotations.length, 'mark', 'marks')}</Text>
+                              </View>
+                            )}
+                            <Pressable
+                              style={styles.evidenceThumbDeleteBtn}
+                              onPress={() => handleDeleteEvidence(q.id, ev.id)}
+                              hitSlop={8}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Remove photo ${evIdx + 1}`}
+                            >
+                              <Ionicons name="close" size={14} color={COLORS.textInverse} />
+                            </Pressable>
+                          </View>
+                        ))}
+                      </ScrollView>
+                    )}
+
+                    {/* Optional note, sent with the answer */}
+                    {showNote ? (
+                      <View style={styles.noteBox}>
+                        <TextField
+                          value={currentAns?.comment ?? ''}
+                          onChangeText={(t) => handleCommentChange(q.id, t)}
+                          placeholder="Note for this question (optional)"
+                          accessibilityLabel={`Note for question ${idx + 1}`}
+                          multiline
+                          style={styles.noteInput}
+                        />
+                      </View>
+                    ) : currentAns ? (
+                      <Pressable
+                        style={styles.linkBtn}
+                        onPress={() => setNoteOpen((prev) => ({ ...prev, [q.id]: true }))}
+                        accessibilityRole="button"
+                      >
+                        <Ionicons name="create-outline" size={18} color={COLORS.primaryLight} />
+                        <Text style={styles.linkText}>Add note</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                );
+              })}
+
+              {/* Step to the next section, or to review at the end */}
+              {nextCategory ? (
+                <Button
+                  label={`Next: ${nextCategory.label}`}
+                  icon="arrow-forward"
+                  variant="secondary"
+                  size="lg"
+                  onPress={() => setActiveCategory(nextCategory.key)}
+                />
+              ) : (
+                <Button label="Review and submit" icon="checkmark-done" variant="secondary" size="lg" onPress={() => setShowSignOffModal(true)} />
+              )}
+            </ScrollView>
+          </KeyboardAvoidingView>
+
+          {/* Bottom review and submit bar */}
+          <View style={styles.bottomBar}>
+            <View style={styles.bottomBarInfo}>
+              <Text style={styles.bottomBarLabel}>Score so far</Text>
+              <Text style={styles.bottomBarScore}>{scoreLabel}</Text>
+            </View>
+            <Button label="Review and submit" icon="checkmark-done" size="lg" onPress={() => setShowSignOffModal(true)} style={styles.flex} />
+          </View>
         </View>
 
         {/* Photo Annotation Modal */}
         <PhotoAnnotatorModal
           visible={annotatorVisible}
-          photoUri={currentPhotoUri}
+          photoUri={currentPhoto?.uri ?? null}
+          title="Mark up photo"
           onClose={() => setAnnotatorVisible(false)}
           onSave={handleSaveAnnotation}
         />
 
-        {/* Photo Source Selector Action Sheet */}
-        <Modal visible={photoSourceModalVisible} transparent animationType="fade">
-          <View style={styles.photoSourceBackdrop}>
-            <View style={[styles.photoSourceCard, SHADOWS.card]}>
-              <View style={styles.photoSourceHeader}>
-                <View>
-                  <Text style={styles.photoSourceTitle}>Capture 5S Evidence</Text>
-                  <Text style={styles.photoSourceSubtitle}>Document shopfloor abnormality or standard</Text>
-                </View>
-                <TouchableOpacity
+        {/* Photo source picker */}
+        <Modal visible={photoSourceModalVisible} transparent animationType="fade" onRequestClose={() => setPhotoSourceModalVisible(false)}>
+          <View style={styles.sheetBackdrop}>
+            <Pressable style={StyleSheet.absoluteFill} onPress={() => setPhotoSourceModalVisible(false)} accessibilityLabel="Close" />
+            <View style={[styles.sheet, { paddingBottom: sheetBottom }]}>
+              <View style={styles.sheetHandle} />
+              <View style={styles.sheetHeader}>
+                <Text style={styles.sheetTitle} accessibilityRole="header">
+                  Add a photo
+                </Text>
+                <Pressable
                   onPress={() => setPhotoSourceModalVisible(false)}
-                  style={styles.photoSourceCloseBtn}
-                  activeOpacity={0.7}
+                  style={styles.closeBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close"
                 >
-                  <Ionicons name="close" size={20} color={COLORS.textDark} />
-                </TouchableOpacity>
+                  <Ionicons name="close" size={22} color={COLORS.textDark} />
+                </Pressable>
               </View>
 
-              <View style={styles.photoSourceOptions}>
-                {/* 1. Camera */}
-                <TouchableOpacity
-                  style={styles.photoSourceItem}
-                  onPress={() => handleLaunchCamera()}
-                  activeOpacity={0.8}
-                >
-                  <View style={[styles.photoSourceIconBox, { backgroundColor: '#FFF2EB' }]}>
-                    <Ionicons name="camera" size={22} color={COLORS.primary} />
-                  </View>
-                  <View style={styles.photoSourceTextWrap}>
-                    <Text style={styles.photoSourceItemTitle}>Take Photo with Camera</Text>
-                    <Text style={styles.photoSourceItemDesc}>Snap live photo of workstation with camera</Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color="#94A3B8" />
-                </TouchableOpacity>
-
-                {/* 2. Photo Gallery */}
-                <TouchableOpacity
-                  style={styles.photoSourceItem}
-                  onPress={() => handlePickFromGallery()}
-                  activeOpacity={0.8}
-                >
-                  <View style={[styles.photoSourceIconBox, { backgroundColor: '#EFF6FF' }]}>
-                    <Ionicons name="images" size={22} color="#2563EB" />
-                  </View>
-                  <View style={styles.photoSourceTextWrap}>
-                    <Text style={styles.photoSourceItemTitle}>Choose from Photo Gallery</Text>
-                    <Text style={styles.photoSourceItemDesc}>Pick existing shopfloor photo from library</Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color="#94A3B8" />
-                </TouchableOpacity>
-              </View>
-
-              <TouchableOpacity
-                style={styles.photoSourceCancelBtn}
-                onPress={() => setPhotoSourceModalVisible(false)}
-                activeOpacity={0.8}
+              <Pressable
+                style={({ pressed }) => [styles.sourceItem, pressed && styles.sourceItemPressed]}
+                onPress={handleLaunchCamera}
+                accessibilityRole="button"
+                accessibilityLabel="Take photo"
               >
-                <Text style={styles.photoSourceCancelText}>Cancel</Text>
-              </TouchableOpacity>
+                <View style={styles.sourceIcon}>
+                  <Ionicons name="camera-outline" size={22} color={COLORS.primary} />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={styles.sourceTitle}>Take photo</Text>
+                  <Text style={styles.sourceDesc}>Use the camera</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+              </Pressable>
+
+              <Pressable
+                style={({ pressed }) => [styles.sourceItem, pressed && styles.sourceItemPressed]}
+                onPress={handlePickFromGallery}
+                accessibilityRole="button"
+                accessibilityLabel="Choose from gallery"
+              >
+                <View style={styles.sourceIcon}>
+                  <Ionicons name="images-outline" size={22} color={COLORS.primary} />
+                </View>
+                <View style={styles.flex}>
+                  <Text style={styles.sourceTitle}>Choose from gallery</Text>
+                  <Text style={styles.sourceDesc}>Use a photo already on this device</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+              </Pressable>
+
+              <Button label="Cancel" variant="secondary" onPress={() => setPhotoSourceModalVisible(false)} style={styles.sheetCancel} />
             </View>
           </View>
         </Modal>
 
-        {/* Observation Creation Modal */}
-        {observationModalQuestion && (
-          <Modal visible={true} transparent animationType="fade">
-            <View style={styles.innerModalBackdrop}>
-              <View style={styles.obsModalBox}>
-                <View style={styles.obsModalHeader}>
-                  <Text style={styles.obsModalTitle}>Raise Observation / CAPA</Text>
-                  <TouchableOpacity onPress={() => setObservationModalQuestion(null)}>
-                    <Ionicons name="close" size={22} color={COLORS.textDark} />
-                  </TouchableOpacity>
-                </View>
-
-                <Text style={styles.obsFieldLabel}>Severity Level</Text>
-                <View style={styles.severityRow}>
-                  {(['MINOR', 'MODERATE', 'MAJOR', 'CRITICAL'] as SeverityLevel[]).map((lvl) => (
-                    <TouchableOpacity
-                      key={lvl}
-                      style={[
-                        styles.severityPill,
-                        obsSeverity === lvl && styles.severityPillActive,
-                      ]}
-                      onPress={() => setObsSeverity(lvl)}
-                    >
-                      <Text
-                        style={[
-                          styles.severityText,
-                          obsSeverity === lvl && styles.severityTextActive,
-                        ]}
-                      >
-                        {lvl}
+        {/* Finding editor: the server creates the observation and corrective action on submit */}
+        {findingQuestion && (
+          <Modal visible={true} transparent animationType="fade" onRequestClose={() => setFindingQuestion(null)}>
+            <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'web' ? undefined : 'padding'}>
+              <View style={styles.sheetBackdrop}>
+                <Pressable style={StyleSheet.absoluteFill} onPress={() => setFindingQuestion(null)} accessibilityLabel="Close" />
+                <View style={[styles.sheet, { paddingBottom: sheetBottom }]}>
+                  <View style={styles.sheetHandle} />
+                  <View style={styles.sheetHeader}>
+                    <View style={styles.flex}>
+                      <Text style={styles.sheetTitle} accessibilityRole="header">
+                        {answers[findingQuestion.id]?.finding ? 'Edit finding' : 'Raise finding'}
                       </Text>
-                    </TouchableOpacity>
-                  ))}
+                      <Text style={styles.sheetSubtitle} numberOfLines={2}>
+                        {findingQuestion.text}
+                      </Text>
+                    </View>
+                    <Pressable onPress={() => setFindingQuestion(null)} style={styles.closeBtn} accessibilityRole="button" accessibilityLabel="Close">
+                      <Ionicons name="close" size={22} color={COLORS.textDark} />
+                    </Pressable>
+                  </View>
+
+                  <ScrollView keyboardShouldPersistTaps="handled">
+                    <FormField label="Severity">
+                      <View style={styles.severityRow}>
+                        {SEVERITIES.map((s) => (
+                          <Chip key={s.key} label={s.label} selected={findingSeverity === s.key} onPress={() => setFindingSeverity(s.key)} />
+                        ))}
+                      </View>
+                    </FormField>
+
+                    <FormField label="What is wrong?" required error={findingError}>
+                      <TextField
+                        value={findingDesc}
+                        onChangeText={(t) => {
+                          setFindingDesc(t);
+                          if (findingError && t.trim()) setFindingError(undefined);
+                        }}
+                        placeholder="Describe the problem and where it is"
+                        multiline
+                        invalid={!!findingError}
+                        accessibilityLabel="What is wrong?"
+                      />
+                    </FormField>
+
+                    <Button label="Save finding" onPress={handleSaveFinding} size="lg" />
+                    {answers[findingQuestion.id]?.finding && (
+                      <Button label="Remove finding" variant="ghost" onPress={handleRemoveFinding} style={styles.removeFindingBtn} />
+                    )}
+                  </ScrollView>
                 </View>
-
-                <Text style={styles.obsFieldLabel}>Description</Text>
-                <TextInput
-                  style={styles.obsInput}
-                  value={obsDesc}
-                  onChangeText={setObsDesc}
-                  multiline
-                />
-
-                <Text style={styles.obsFieldLabel}>Root Cause Analysis Category</Text>
-                <TextInput
-                  style={styles.obsInputSingle}
-                  value={obsRootCause}
-                  onChangeText={setObsRootCause}
-                />
-
-                <TouchableOpacity style={styles.obsSubmitBtn} onPress={handleSaveObservation}>
-                  <Text style={styles.obsSubmitBtnText}>Create Action &amp; Set SLA</Text>
-                </TouchableOpacity>
               </View>
-            </View>
+            </KeyboardAvoidingView>
           </Modal>
         )}
 
-        {/* Dual Sign-off & Submission Modal */}
-        <Modal visible={showSignOffModal} transparent animationType="slide">
-          <View style={styles.innerModalBackdrop}>
-            <View style={styles.signOffBox}>
-              <Text style={styles.signOffTitle}>Audit Completion &amp; Dual Sign-Off</Text>
-              <Text style={styles.signOffSubtitle}>
-                Formal dual verification sign-off between Senior Auditor and Area Champion
-              </Text>
-
-              <View style={styles.scoreSummaryCard}>
-                <Text style={styles.scoreSummaryNumber}>{scoreStats.percentage}%</Text>
-                <Text style={styles.scoreSummaryLabel}>
-                  {scoreStats.percentage >= 80 ? 'CONFORMANT (PASS)' : 'NEEDS ACTION (FAIL)'}
-                </Text>
-                <Text style={styles.scoreSummaryObservations}>
-                  {observations.length} Observations • {Object.keys(answers).length} Questions Checked
-                </Text>
-              </View>
-
-              {/* Auditor Sign-off */}
-              <TouchableOpacity
-                style={styles.signatureRow}
-                onPress={() => setAuditorSigned(!auditorSigned)}
-              >
-                <Ionicons
-                  name={auditorSigned ? 'checkbox' : 'square-outline'}
-                  size={24}
-                  color={COLORS.primary}
-                />
-                <View style={styles.signInfo}>
-                  <Text style={styles.signName}>{auditorDisplayName}</Text>
-                  <Text style={styles.signRole}>Digital Sign-off Verified</Text>
+        {/* Review and sign-off */}
+        <Modal visible={showSignOffModal} transparent animationType="slide" onRequestClose={() => setShowSignOffModal(false)}>
+          <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'web' ? undefined : 'padding'}>
+            <View style={styles.sheetBackdrop}>
+              <Pressable style={StyleSheet.absoluteFill} onPress={() => setShowSignOffModal(false)} accessibilityLabel="Close" />
+              <View style={[styles.sheet, styles.sheetTall, { paddingBottom: sheetBottom }]}>
+                <View style={styles.sheetHandle} />
+                <View style={styles.sheetHeader}>
+                  <View style={styles.flex}>
+                    <Text style={styles.sheetTitle} accessibilityRole="header">
+                      Review and submit
+                    </Text>
+                    <Text style={styles.sheetSubtitle}>The area owner reviews and signs off the findings after you submit.</Text>
+                  </View>
+                  <Pressable onPress={() => setShowSignOffModal(false)} style={styles.closeBtn} accessibilityRole="button" accessibilityLabel="Close">
+                    <Ionicons name="close" size={22} color={COLORS.textDark} />
+                  </Pressable>
                 </View>
-              </TouchableOpacity>
 
-              {/* Area Owner Sign-off */}
-              <TouchableOpacity
-                style={styles.signatureRow}
-                onPress={() => setAreaOwnerSigned(!areaOwnerSigned)}
-              >
-                <Ionicons
-                  name={areaOwnerSigned ? 'checkbox' : 'square-outline'}
-                  size={24}
-                  color={COLORS.primary}
-                />
-                <View style={styles.signInfo}>
-                  <Text style={styles.signName}>{areaOwnerDisplayName}</Text>
-                  <Text style={styles.signRole}>Acknowledged Findings &amp; SLA</Text>
+                <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+                  <View style={styles.scoreSummaryCard}>
+                    <Text style={styles.scoreSummaryLabel}>Overall score</Text>
+                    <Text style={styles.scoreSummaryNumber}>{scoreStats.percentage === null ? 'Not scored' : scoreLabel}</Text>
+                    <Text style={styles.scoreSummaryMeta}>
+                      {scoreStats.answeredCount} of {scoreStats.totalCount} answered • {plural(findingsCount, 'finding', 'findings')}
+                    </Text>
+                    {scoreStats.capApplied !== null && (
+                      <Text style={styles.scoreSummaryCap}>Capped at {scoreStats.capApplied}% because a critical question failed.</Text>
+                    )}
+                  </View>
+
+                  {blockers.length > 0 && (
+                    <Pressable
+                      style={styles.blockerBox}
+                      onPress={jumpToFirstBlocker}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${blockers.join(', ')}. Go to the first one.`}
+                    >
+                      <Ionicons name="alert-circle-outline" size={20} color={COLORS.warning} />
+                      <View style={styles.flex}>
+                        <Text style={styles.blockerTitle}>Before you can submit</Text>
+                        {blockers.map((b) => (
+                          <Text key={b} style={styles.blockerText}>
+                            • {b}
+                          </Text>
+                        ))}
+                      </View>
+                      <Text style={styles.blockerAction}>Go to it</Text>
+                    </Pressable>
+                  )}
+
+                  {/* Auditor sign-off */}
+                  <Pressable
+                    style={styles.signatureRow}
+                    onPress={() => setAuditorSigned(!auditorSigned)}
+                    accessibilityRole="checkbox"
+                    accessibilityState={{ checked: auditorSigned }}
+                    accessibilityLabel={`I, ${auditorDisplayName}, confirm these results are accurate`}
+                  >
+                    <Ionicons name={auditorSigned ? 'checkbox' : 'square-outline'} size={24} color={COLORS.primary} />
+                    <View style={styles.flex}>
+                      <Text style={styles.signName}>I confirm these results are accurate</Text>
+                      <Text style={styles.signRole}>Signed as {auditorDisplayName}</Text>
+                    </View>
+                  </Pressable>
+
+                  <FormField label="Summary notes (optional)">
+                    <TextField
+                      value={summaryNotes}
+                      onChangeText={setSummaryNotes}
+                      placeholder="Overall notes for the area owner"
+                      multiline
+                      accessibilityLabel="Summary notes"
+                    />
+                  </FormField>
+                </ScrollView>
+
+                <View style={styles.signOffActions}>
+                  <Button label="Back" variant="secondary" size="lg" onPress={() => setShowSignOffModal(false)} />
+                  <Button
+                    label="Submit audit"
+                    size="lg"
+                    onPress={handleFinalSubmit}
+                    disabled={!canSubmit}
+                    loading={submitting}
+                    style={styles.flex}
+                  />
                 </View>
-              </TouchableOpacity>
-
-              <View style={styles.signOffActions}>
-                <TouchableOpacity
-                  style={styles.cancelSignBtn}
-                  onPress={() => setShowSignOffModal(false)}
-                >
-                  <Text style={styles.cancelSignBtnText}>Back</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.confirmSignBtn}
-                  onPress={handleFinalSubmit}
-                >
-                  <Text style={styles.confirmSignBtnText}>Submit &amp; Sync Audit</Text>
-                </TouchableOpacity>
+                {!canSubmit && !submitting && blockers.length === 0 && !auditorSigned && (
+                  <Text style={styles.submitHint}>Tick the confirmation to submit.</Text>
+                )}
               </View>
             </View>
-          </View>
+          </KeyboardAvoidingView>
         </Modal>
-      </View>
+      </SafeAreaView>
     </Modal>
   );
 };
 
 const styles = StyleSheet.create({
+  flex: { flex: 1 },
+  pressed: { opacity: 0.85 },
+  safe: { flex: 1, backgroundColor: COLORS.card },
   modalContainer: {
     flex: 1,
-    backgroundColor: '#F8F9FB',
+    backgroundColor: COLORS.background,
   },
   tabletModalContainer: {
     maxWidth: 960,
     width: '100%',
     alignSelf: 'center',
-    borderRadius: 24,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    marginVertical: 12,
   },
+
+  // Header
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 18,
-    paddingTop: 48,
-    paddingBottom: 14,
-    backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0F2F5',
+    backgroundColor: COLORS.card,
+    paddingHorizontal: SPACING.sm,
+    paddingTop: SPACING.xs,
+    paddingBottom: SPACING.md,
   },
+  headerRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.xs },
   backButton: {
-    padding: 6,
-    borderRadius: 20,
-    backgroundColor: '#F3F4F6',
-  },
-  headerCenter: {
+    width: TOUCH_TARGET,
+    height: TOUCH_TARGET,
+    borderRadius: TOUCH_TARGET / 2,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  headerTracking: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  headerLocation: {
-    fontSize: 12,
-    color: COLORS.textMedium,
-  },
-  liveScoreBadge: {
-    backgroundColor: COLORS.primarySoft,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#FED7AA',
-  },
-  liveScoreText: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: COLORS.primary,
-  },
-  pillarTabs: {
+  headerCenter: { flex: 1, minWidth: 0, paddingRight: SPACING.sm },
+  headerTitle: { ...TYPE.heading, color: COLORS.textDark },
+  headerSub: { ...TYPE.caption, color: COLORS.textMedium, marginTop: 2 },
+  progressRow: {
     flexDirection: 'row',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 12,
-    paddingBottom: 10,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+  },
+  progressText: { ...TYPE.label, color: COLORS.textDark },
+  progressFindings: { ...TYPE.captionStrong, color: COLORS.danger },
+  progressTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.cardSecondary,
+    overflow: 'hidden',
+    marginTop: 6,
+    marginHorizontal: SPACING.sm,
+  },
+  progressFill: { height: '100%', borderRadius: 3, backgroundColor: COLORS.primary },
+
+  // Section tabs
+  tabsBar: {
+    backgroundColor: COLORS.card,
     borderBottomWidth: 1,
-    borderBottomColor: '#F0F2F5',
+    borderBottomColor: COLORS.border,
   },
-  pillarTabItem: {
-    flex: 1,
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderRadius: 10,
-  },
-  pillarTabItemActive: {
-    backgroundColor: COLORS.primary,
-  },
-  pillarTabText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.textMedium,
-  },
-  pillarTabTextActive: {
-    color: '#FFFFFF',
-  },
-  criticalBanner: {
+  tabsContent: { paddingHorizontal: SPACING.screen, paddingBottom: SPACING.md, gap: SPACING.sm },
+  tab: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FEF2F2',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    gap: 8,
+    gap: 6,
+    minHeight: TOUCH_TARGET,
+    paddingHorizontal: 14,
+    borderRadius: RADIUS.pill,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.card,
   },
-  criticalBannerText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#DC2626',
-    flex: 1,
+  tabActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  tabText: { ...TYPE.label, color: COLORS.textDark },
+  tabCount: { ...TYPE.caption, color: COLORS.textMedium },
+  tabTextActive: { color: COLORS.textInverse },
+
+  // Banners
+  banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.screen,
+    paddingVertical: SPACING.sm,
+    gap: SPACING.sm,
+    borderBottomWidth: 1,
   },
+  bannerDanger: { backgroundColor: COLORS.dangerSoft, borderBottomColor: COLORS.dangerBorder },
+  bannerInfo: { backgroundColor: COLORS.infoSoft, borderBottomColor: COLORS.infoBorder },
+  bannerText: { ...TYPE.label, flex: 1 },
+
+  // Question cards
   checklistContent: {
-    padding: 16,
-    paddingBottom: 90,
+    padding: SPACING.screen,
+    paddingBottom: SPACING.xxl,
   },
   questionCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 16,
+    backgroundColor: COLORS.card,
+    borderRadius: RADIUS.lg,
+    padding: SPACING.lg,
+    marginBottom: SPACING.md,
     borderWidth: 1,
-    borderColor: '#F2F4F7',
+    borderColor: COLORS.border,
+    ...SHADOWS.soft,
   },
+  questionCardCritical: { borderLeftWidth: 4, borderLeftColor: COLORS.danger },
   qHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
   },
-  qHeaderLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flex: 1,
-  },
-  qNumberBadge: {
-    backgroundColor: '#F3F4F6',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 8,
-  },
-  qNumberText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  qTitle: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: COLORS.textDark,
-    flex: 1,
-  },
-  criticalPill: {
-    backgroundColor: '#FEE2E2',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  criticalPillText: {
-    fontSize: 9,
-    fontWeight: '800',
-    color: '#DC2626',
-  },
-  qText: {
-    fontSize: 13,
-    color: COLORS.textMedium,
-    lineHeight: 18,
-    marginBottom: 12,
-  },
-  guidanceRow: {
-    flexDirection: 'row',
-    gap: 12,
-    marginBottom: 10,
-  },
-  guidanceToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  guidanceToggleText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
+  qNumber: { ...TYPE.captionStrong, color: COLORS.textMedium, flexShrink: 1 },
+  qText: { ...TYPE.bodyStrong, color: COLORS.textDark },
+  qTags: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.sm, marginTop: SPACING.sm },
+  guidanceRow: { flexDirection: 'row', flexWrap: 'wrap', columnGap: SPACING.lg, marginTop: SPACING.xs },
+  linkBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: TOUCH_TARGET, alignSelf: 'flex-start' },
+  linkText: { ...TYPE.label, color: COLORS.primaryLight },
   guidanceBox: {
-    backgroundColor: '#FFF7ED',
-    borderRadius: 10,
-    padding: 10,
+    backgroundColor: COLORS.infoSoft,
+    borderRadius: RADIUS.md,
+    padding: SPACING.md,
     borderWidth: 1,
-    borderColor: '#FFEDD5',
-    marginBottom: 12,
+    borderColor: COLORS.infoBorder,
+    marginBottom: SPACING.sm,
   },
-  guidanceText: {
-    fontSize: 11,
-    color: '#9A3412',
-    lineHeight: 15,
-  },
-  comparatorBox: {
-    flexDirection: 'row',
-    gap: 10,
-    marginBottom: 12,
-  },
-  compareCol: {
+  guidanceText: { ...TYPE.body, color: COLORS.textDark },
+  referenceBox: { marginBottom: SPACING.sm },
+  referenceLabel: { ...TYPE.captionStrong, color: COLORS.textMedium, marginBottom: SPACING.xs },
+  referenceImage: { width: '100%', height: 180, borderRadius: RADIUS.md, backgroundColor: COLORS.cardSecondary },
+  ratingHeader: { marginTop: SPACING.md, marginBottom: SPACING.sm },
+  ratingLabel: { ...TYPE.label, color: COLORS.textDark },
+  ratingHint: { ...TYPE.caption, color: COLORS.textMedium },
+  ratingRow: { flexDirection: 'row', gap: 6 },
+  ratingButton: {
     flex: 1,
-  },
-  compareHeaderGood: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginBottom: 4,
-  },
-  compareHeaderTextGood: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#059669',
-  },
-  comparePlaceholderGood: {
-    height: 80,
-    backgroundColor: '#ECFDF5',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#A7F3D0',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 6,
-  },
-  compareHeaderBad: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginBottom: 4,
-  },
-  compareHeaderTextBad: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
-  comparePlaceholderBad: {
-    height: 80,
-    backgroundColor: '#FFF7ED',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#FED7AA',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 6,
-  },
-  compareSub: {
-    fontSize: 9,
-    color: COLORS.textMedium,
-    textAlign: 'center',
-    marginTop: 4,
-  },
-  scoreRow: {
-    marginBottom: 14,
-  },
-  scoreRowLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.textDark,
-    marginBottom: 6,
-  },
-  starRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  starButton: {
-    flex: 1,
-    height: 38,
-    borderRadius: 10,
-    backgroundColor: '#F3F4F6',
+    height: TOUCH_TARGET,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.card,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: '#E5E7EB',
+    borderColor: COLORS.borderDark,
   },
-  starButtonActive: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
+  ratingButtonActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  ratingButtonText: { ...TYPE.subheading, color: COLORS.textDark },
+  ratingButtonTextActive: { color: COLORS.textInverse },
+  naButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    minHeight: TOUCH_TARGET,
+    alignSelf: 'flex-start',
+    paddingRight: SPACING.md,
+    marginTop: SPACING.xs,
   },
-  starButtonText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  starButtonTextActive: {
-    color: '#FFFFFF',
-  },
+  naButtonActive: {},
+  naText: { ...TYPE.label, color: COLORS.textMedium },
   cardActionsRow: {
     flexDirection: 'row',
-    gap: 10,
+    gap: SPACING.sm,
     borderTopWidth: 1,
-    borderTopColor: '#F3F4F6',
-    paddingTop: 12,
+    borderTopColor: COLORS.border,
+    paddingTop: SPACING.md,
+    marginTop: SPACING.sm,
   },
-  evidenceBtn: {
-    flex: 1,
+  findingBox: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.primarySoft,
-    paddingVertical: 8,
-    borderRadius: 10,
-    gap: 6,
-  },
-  evidenceBtnText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
-  observationBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FEF2F2',
-    paddingVertical: 8,
-    borderRadius: 10,
-    gap: 6,
-  },
-  observationBtnText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#DC2626',
-  },
-  bottomBar: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-    borderTopWidth: 1,
-    borderTopColor: '#F0F2F5',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    elevation: 8,
-  },
-  bottomBarInfo: {
-    justifyContent: 'center',
-  },
-  bottomBarLabel: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-    fontWeight: '600',
-  },
-  bottomBarScore: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: COLORS.primary,
-  },
-  submitAuditBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.primary,
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 16,
-    gap: 8,
-  },
-  submitAuditBtnText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  innerModalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(17, 24, 39, 0.7)',
-    justifyContent: 'center',
-    padding: 20,
-  },
-  obsModalBox: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 22,
-    padding: 20,
-  },
-  obsModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  obsModalTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  obsFieldLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.textDark,
-    marginTop: 10,
-    marginBottom: 6,
-  },
-  severityRow: {
-    flexDirection: 'row',
-    gap: 6,
-    marginBottom: 8,
-  },
-  severityPill: {
-    flex: 1,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: '#F3F4F6',
-    alignItems: 'center',
-  },
-  severityPillActive: {
-    backgroundColor: '#DC2626',
-  },
-  severityText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  severityTextActive: {
-    color: '#FFFFFF',
-  },
-  obsInput: {
-    backgroundColor: '#F9FAFB',
+    gap: SPACING.sm,
+    marginTop: SPACING.md,
+    padding: SPACING.md,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.dangerSoft,
     borderWidth: 1,
-    borderColor: '#E5E7EB',
-    borderRadius: 10,
-    padding: 10,
-    fontSize: 12,
-    height: 60,
-    textAlignVertical: 'top',
+    borderColor: COLORS.dangerBorder,
   },
-  obsInputSingle: {
-    backgroundColor: '#F9FAFB',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    borderRadius: 10,
-    padding: 10,
-    fontSize: 12,
-  },
-  obsSubmitBtn: {
-    backgroundColor: '#DC2626',
-    borderRadius: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginTop: 14,
-  },
-  obsSubmitBtnText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  signOffBox: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 24,
-    padding: 22,
-  },
-  signOffTitle: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  signOffSubtitle: {
-    fontSize: 11,
-    color: COLORS.textMedium,
-    marginTop: 4,
-    marginBottom: 14,
-  },
-  scoreSummaryCard: {
-    backgroundColor: '#FFF7ED',
-    borderRadius: 16,
-    padding: 16,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#FED7AA',
-    marginBottom: 16,
-  },
-  scoreSummaryNumber: {
-    fontSize: 32,
-    fontWeight: '900',
-    color: COLORS.primary,
-  },
-  scoreSummaryLabel: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#9A3412',
-    marginTop: 2,
-  },
-  scoreSummaryObservations: {
-    fontSize: 11,
-    color: COLORS.textMedium,
-    marginTop: 4,
-  },
-  signatureRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F3F4F6',
-  },
-  signInfo: {
-    flex: 1,
-  },
-  signName: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  signRole: {
-    fontSize: 11,
-    color: '#059669',
-  },
-  signOffActions: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 18,
-  },
-  cancelSignBtn: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 14,
-    backgroundColor: '#F3F4F6',
-  },
-  cancelSignBtnText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.textMedium,
-  },
-  confirmSignBtn: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 14,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-  },
-  confirmSignBtnText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '800',
-  },
+  findingTitle: { ...TYPE.captionStrong, color: COLORS.danger },
+  findingText: { ...TYPE.body, color: COLORS.textDark, marginTop: 2 },
+  noteBox: { marginTop: SPACING.md },
+  noteInput: { minHeight: 72 },
 
-  // Evidence thumbnail strip styles
-  evidenceThumbScroll: {
-    marginTop: 10,
-    flexDirection: 'row',
-  },
+  // Evidence thumbnails
+  evidenceThumbRow: { gap: SPACING.sm, paddingTop: SPACING.md },
   evidenceThumbCard: {
     width: 80,
     height: 80,
-    borderRadius: 12,
-    marginRight: 10,
+    borderRadius: RADIUS.md,
     overflow: 'hidden',
-    position: 'relative',
-    borderWidth: 1.5,
-    borderColor: '#E5E7EB',
-    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.cardSecondary,
   },
-  evidenceThumbImage: {
-    width: '100%',
-    height: '100%',
-    resizeMode: 'cover',
-  },
+  evidenceThumbImage: { width: '100%', height: '100%', resizeMode: 'cover' },
   evidenceThumbBadge: {
     position: 'absolute',
     bottom: 4,
     left: 4,
-    backgroundColor: 'rgba(0,0,0,0.65)',
-    borderRadius: 6,
+    backgroundColor: 'rgba(29,39,51,0.75)',
+    borderRadius: RADIUS.xs,
     paddingHorizontal: 4,
-    paddingVertical: 2,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
+    paddingVertical: 1,
   },
-  evidenceThumbBadgeText: {
-    color: '#FFFFFF',
-    fontSize: 9,
-    fontWeight: '700',
-  },
+  evidenceThumbBadgeText: { ...TYPE.caption, color: COLORS.textInverse },
   evidenceThumbDeleteBtn: {
     position: 'absolute',
     top: 4,
     right: 4,
-    backgroundColor: '#EF4444',
-    width: 20,
-    height: 20,
-    borderRadius: 10,
+    backgroundColor: 'rgba(29,39,51,0.75)',
+    width: 26,
+    height: 26,
+    borderRadius: 13,
     alignItems: 'center',
     justifyContent: 'center',
   },
 
-  // Photo Source Picker Action Sheet styles
-  photoSourceBackdrop: {
+  // Bottom bar
+  bottomBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.lg,
+    backgroundColor: COLORS.card,
+    paddingHorizontal: SPACING.screen,
+    paddingVertical: SPACING.md,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    ...SHADOWS.nav,
+  },
+  bottomBarInfo: { justifyContent: 'center' },
+  bottomBarLabel: { ...TYPE.caption, color: COLORS.textMedium },
+  bottomBarScore: { ...TYPE.title, color: COLORS.textDark },
+
+  // Bottom sheets
+  sheetBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: 'rgba(29,39,51,0.5)',
     justifyContent: 'flex-end',
   },
-  photoSourceCard: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 20,
-    paddingBottom: 32,
+  sheet: {
+    backgroundColor: COLORS.card,
+    borderTopLeftRadius: RADIUS.xl,
+    borderTopRightRadius: RADIUS.xl,
+    paddingHorizontal: SPACING.screen,
+    paddingTop: SPACING.sm,
+    maxHeight: '90%',
+    width: '100%',
+    maxWidth: 640,
+    alignSelf: 'center',
   },
-  photoSourceHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
+  sheetTall: { maxHeight: '94%' },
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: COLORS.borderDark,
+    marginBottom: SPACING.md,
   },
-  photoSourceTitle: {
-    fontSize: 17,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  photoSourceSubtitle: {
-    fontSize: 12,
-    color: COLORS.textMedium,
-    marginTop: 2,
-  },
-  photoSourceCloseBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#F1F5F9',
+  sheetHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: SPACING.md, marginBottom: SPACING.lg },
+  sheetTitle: { ...TYPE.heading, color: COLORS.textDark, flex: 1 },
+  sheetSubtitle: { ...TYPE.caption, color: COLORS.textMedium, marginTop: 2 },
+  closeBtn: {
+    width: TOUCH_TARGET,
+    height: TOUCH_TARGET,
     alignItems: 'center',
     justifyContent: 'center',
+    marginTop: -10,
+    marginRight: -10,
   },
-  photoSourceOptions: {
-    gap: 10,
-    marginBottom: 16,
-  },
-  photoSourceItem: {
+  sheetCancel: { marginTop: SPACING.md },
+
+  // Photo source items
+  sourceItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderRadius: 14,
-    backgroundColor: '#F8FAFC',
+    gap: SPACING.md,
+    minHeight: 64,
+    paddingHorizontal: SPACING.md,
+    borderRadius: RADIUS.lg,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    borderColor: COLORS.border,
+    marginBottom: SPACING.sm,
   },
-  photoSourceIconBox: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 12,
-  },
-  photoSourceTextWrap: {
-    flex: 1,
-  },
-  photoSourceItemTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  photoSourceItemDesc: {
-    fontSize: 11,
-    color: COLORS.textMedium,
-    marginTop: 2,
-  },
-  photoSourceCancelBtn: {
-    paddingVertical: 12,
-    borderRadius: 12,
-    backgroundColor: '#F1F5F9',
+  sourceItemPressed: { backgroundColor: COLORS.primarySoft },
+  sourceIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  photoSourceCancelText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: COLORS.textMedium,
+  sourceTitle: { ...TYPE.bodyStrong, color: COLORS.textDark },
+  sourceDesc: { ...TYPE.caption, color: COLORS.textMedium, marginTop: 2 },
+
+  // Finding editor
+  severityRow: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.sm },
+  removeFindingBtn: { marginTop: SPACING.sm },
+
+  // Review and sign-off
+  scoreSummaryCard: {
+    backgroundColor: COLORS.primarySoft,
+    borderRadius: RADIUS.lg,
+    padding: SPACING.lg,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.primaryBorder,
+    marginBottom: SPACING.lg,
   },
+  scoreSummaryLabel: { ...TYPE.label, color: COLORS.textMedium },
+  scoreSummaryNumber: { fontSize: 32, lineHeight: 40, fontWeight: '700', color: COLORS.primary, marginTop: 2 },
+  scoreSummaryMeta: { ...TYPE.caption, color: COLORS.textMedium, marginTop: 2, textAlign: 'center' },
+  scoreSummaryCap: { ...TYPE.captionStrong, color: COLORS.danger, marginTop: SPACING.sm, textAlign: 'center' },
+  blockerBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: SPACING.sm,
+    padding: SPACING.md,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.warningSoft,
+    borderWidth: 1,
+    borderColor: COLORS.warningBorder,
+    marginBottom: SPACING.lg,
+  },
+  blockerTitle: { ...TYPE.label, color: COLORS.warning },
+  blockerText: { ...TYPE.caption, color: COLORS.textDark, marginTop: 2 },
+  blockerAction: { ...TYPE.label, color: COLORS.primaryLight, alignSelf: 'center' },
+  signatureRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.md,
+    minHeight: 56,
+    paddingVertical: SPACING.sm,
+    marginBottom: SPACING.md,
+  },
+  signName: { ...TYPE.bodyStrong, color: COLORS.textDark },
+  signRole: { ...TYPE.caption, color: COLORS.textMedium, marginTop: 2 },
+  signOffActions: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    paddingTop: SPACING.md,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+  },
+  submitHint: { ...TYPE.caption, color: COLORS.textMedium, textAlign: 'center', marginTop: SPACING.sm },
 });

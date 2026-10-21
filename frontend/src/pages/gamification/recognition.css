@@ -1,0 +1,249 @@
+/*
+ * Recognition page: its own warm palette on top of the app tokens, so achievements read as celebrations.
+ * Gold = trophies, violet = badges, rose = kudos, teal = points; podium colours for ranks 1-3.
+ */
+.rc-page {
+  --rc-gold: #B7791F;
+  --rc-gold-bg: #FEF5E1;
+  --rc-gold-border: #F3D58A;
+  --rc-violet: #6D3FD1;
+  --rc-violet-bg: #F2ECFF;
+  --rc-violet-border: #D8C8FB;
+  --rc-rose: #C2185B;
+  --rc-rose-bg: #FDECF3;
+  --rc-rose-border: #F7C2D8;
+  --rc-teal: #0F7B70;
+  --rc-teal-bg: #E3F5F2;
+  --rc-teal-border: #A9DDD5;
+  --rc-sky: #1F6FB2;
+  --rc-sky-bg: #E6F1FB;
+  --rc-sky-border: #B5D4F0;
+  --rc-green: #2E7D32;
+  --rc-green-bg: #E8F5E9;
+  --rc-green-border: #B7DDB9;
+  --rc-orange: #C2410C;
+  --rc-orange-bg: #FFF0E6;
+  --rc-orange-border: #F9C9A7;
+
+  --rc-medal-1: linear-gradient(135deg, #F9D976 0%, #E2A72E 100%);
+  --rc-medal-2: linear-gradient(135deg, #E3E8EE 0%, #A9B4C0 100%);
+  --rc-medal-3: linear-gradient(135deg, #F1C29A 0%, #C27C48 100%);
+  --rc-medal-1-text: #5C3B00;
+  --rc-medal-2-text: #2F3B47;
+  --rc-medal-3-text: #4A2408;
+
+  --rc-tier-platinum: linear-gradient(135deg, #3B4A6B 0%, #6E7FA8 55%, #A8B6D6 100%);
+  --rc-tier-gold: linear-gradient(135deg, #8A5A00 0%, #D49A1F 55%, #F7D774 100%);
+  --rc-tier-silver: linear-gradient(135deg, #4F5B67 0%, #8E9AA6 55%, #D3DAE1 100%);
+  --rc-tier-bronze: linear-gradient(135deg, #6B3410 0%, #B0642D 55%, #E2A16F 100%);
+
+  --rc-hero: linear-gradient(120deg, #0B2D5B 0%, #1E3F8A 45%, #5B3CC4 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+[data-theme='dark'] .rc-page {
+  --rc-gold: #F2C25C;
+  --rc-gold-bg: rgba(242, 194, 92, 0.12);
+  --rc-gold-border: rgba(242, 194, 92, 0.35);
+  --rc-violet: #B9A0FF;
+  --rc-violet-bg: rgba(185, 160, 255, 0.12);
+  --rc-violet-border: rgba(185, 160, 255, 0.35);
+  --rc-rose: #F48FB8;
+  --rc-rose-bg: rgba(244, 143, 184, 0.12);
+  --rc-rose-border: rgba(244, 143, 184, 0.35);
+  --rc-teal: #5FD3C4;
+  --rc-teal-bg: rgba(95, 211, 196, 0.12);
+  --rc-teal-border: rgba(95, 211, 196, 0.35);
+  --rc-sky: #7FB8EA;
+  --rc-sky-bg: rgba(127, 184, 234, 0.12);
+  --rc-sky-border: rgba(127, 184, 234, 0.35);
+  --rc-green: #7ED08A;
+  --rc-green-bg: rgba(126, 208, 138, 0.12);
+  --rc-green-border: rgba(126, 208, 138, 0.35);
+  --rc-orange: #F7A26B;
+  --rc-orange-bg: rgba(247, 162, 107, 0.12);
+  --rc-orange-border: rgba(247, 162, 107, 0.35);
+  --rc-hero: linear-gradient(120deg, #0A1F3F 0%, #1A2F66 45%, #3F2A8C 100%);
+}
+
+/* Tone helpers: tinted icon tile, chip and accent text */
+.rc-tone-gold { --tone: var(--rc-gold); --tone-bg: var(--rc-gold-bg); --tone-border: var(--rc-gold-border); }
+.rc-tone-violet { --tone: var(--rc-violet); --tone-bg: var(--rc-violet-bg); --tone-border: var(--rc-violet-border); }
+.rc-tone-rose { --tone: var(--rc-rose); --tone-bg: var(--rc-rose-bg); --tone-border: var(--rc-rose-border); }
+.rc-tone-teal { --tone: var(--rc-teal); --tone-bg: var(--rc-teal-bg); --tone-border: var(--rc-teal-border); }
+.rc-tone-sky { --tone: var(--rc-sky); --tone-bg: var(--rc-sky-bg); --tone-border: var(--rc-sky-border); }
+.rc-tone-green { --tone: var(--rc-green); --tone-bg: var(--rc-green-bg); --tone-border: var(--rc-green-border); }
+.rc-tone-orange { --tone: var(--rc-orange); --tone-bg: var(--rc-orange-bg); --tone-border: var(--rc-orange-border); }
+
+.rc-icon {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 40px; height: 40px; border-radius: 12px;
+  background: var(--tone-bg); color: var(--tone); border: 1px solid var(--tone-border);
+}
+.rc-icon.sm { width: 32px; height: 32px; border-radius: 10px; }
+.rc-icon.lg { width: 52px; height: 52px; border-radius: 16px; }
+.rc-chip {
+  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+  padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: var(--tone-bg); color: var(--tone); border: 1px solid var(--tone-border);
+}
+.rc-accent { color: var(--tone); }
+.rc-muted { font-size: 12.5px; color: var(--text-secondary); }
+.rc-intro { font-size: 13.5px; color: var(--text-secondary); margin: 0; line-height: 1.55; }
+
+/* ---------------------------------------------------------------- Hero: level, XP and rank */
+.rc-hero {
+  position: relative; overflow: hidden; border-radius: var(--radius-lg);
+  background: var(--rc-hero); color: #FFFFFF; padding: 24px;
+  display: grid; grid-template-columns: auto 1fr auto; gap: 24px; align-items: center;
+  box-shadow: 0 10px 30px rgba(15, 30, 80, 0.18);
+}
+.rc-hero::after {
+  content: ''; position: absolute; right: -80px; top: -120px; width: 320px; height: 320px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(247, 215, 116, 0.2) 0%, rgba(247, 215, 116, 0) 70%); pointer-events: none;
+}
+.rc-level-ring { position: relative; width: 104px; height: 104px; flex-shrink: 0; }
+.rc-level-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.rc-level-ring-label { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1.1; }
+.rc-level-ring-label span:first-child { font-size: 11.5px; opacity: 0.8; }
+.rc-level-ring-label span:last-child { font-size: 30px; font-weight: 700; }
+/* Explicit colours: the app's global heading and text colours would otherwise turn these dark in the light theme */
+.rc-hero, .rc-hero h2, .rc-hero p, .rc-hero strong, .rc-hero span { color: #FFFFFF; }
+.rc-hero-title { font-size: 13px; color: rgba(255, 255, 255, 0.85) !important; margin: 0 0 4px; }
+.rc-hero-level { font-size: 24px; font-weight: 700; margin: 0; color: #FFFFFF; letter-spacing: -0.01em; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
+.rc-hero-progress { margin-top: 14px; max-width: 520px; }
+.rc-hero-progress-row { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 13px; margin-bottom: 8px; }
+.rc-hero-bar { height: 10px; border-radius: 999px; background: rgba(255, 255, 255, 0.22); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12); overflow: hidden; }
+.rc-hero-bar > span { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, #F9D976, #F39C12); }
+.rc-hero-xp { text-align: right; position: relative; z-index: 1; }
+.rc-hero-xp strong { display: block; font-size: 38px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.rc-hero-xp strong small { font-size: 15px; font-weight: 600; opacity: 0.85; margin-left: 4px; }
+.rc-hero-rank {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 10px; padding: 4px 12px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14); border: 1px solid rgba(255, 255, 255, 0.25); font-size: 12.5px; white-space: nowrap;
+}
+@media (max-width: 760px) {
+  .rc-hero { grid-template-columns: auto 1fr; }
+  .rc-hero-xp { grid-column: 1 / -1; text-align: left; }
+}
+
+/* KPI tiles under the hero */
+.rc-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(124px, 1fr)); gap: 12px; margin: 0; }
+.rc-kpi {
+  display: flex; align-items: center; gap: 10px; padding: 12px; border-radius: var(--radius-lg);
+  background: var(--bg-surface); border: 1px solid var(--border-subtle);
+}
+.rc-kpi dd { margin: 0; font-size: 20px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.rc-kpi dt { font-size: 12.5px; color: var(--text-secondary); line-height: 1.3; }
+
+/* XP breakdown rows with a proportional bar */
+.rc-earned { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.rc-earned li { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; }
+.rc-earned-bar { height: 6px; border-radius: 999px; background: var(--bg-surface-subtle); overflow: hidden; margin-top: 6px; }
+.rc-earned-bar > span { display: block; height: 100%; border-radius: 999px; background: var(--tone); }
+
+/* ---------------------------------------------------------------- Trophies */
+.rc-trophy { display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-lg); background: var(--bg-surface); border: 1px solid var(--border-subtle); box-shadow: var(--shadow-sm); }
+.rc-trophy-band { position: relative; padding: 18px 20px; color: #FFFFFF; display: flex; align-items: center; gap: 14px; }
+.rc-trophy-band.tier-platinum { background: var(--rc-tier-platinum); }
+.rc-trophy-band.tier-gold { background: var(--rc-tier-gold); }
+.rc-trophy-band.tier-silver { background: var(--rc-tier-silver); }
+.rc-trophy-band.tier-bronze { background: var(--rc-tier-bronze); }
+.rc-trophy-medal {
+  width: 56px; height: 56px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.2); border: 2px solid rgba(255, 255, 255, 0.55); box-shadow: inset 0 0 0 4px rgba(255, 255, 255, 0.08);
+}
+.rc-trophy-band h3 { margin: 0; font-size: 16px; font-weight: 700; color: #FFFFFF; }
+.rc-trophy-band p { margin: 2px 0 0; font-size: 12.5px; opacity: 0.9; }
+.rc-trophy-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.rc-trophy-tags span { font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: rgba(0, 0, 0, 0.18); border: 1px solid rgba(255, 255, 255, 0.3); }
+.rc-trophy-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; flex: 1; }
+.rc-holder { border-radius: var(--radius-md); padding: 12px 14px; background: var(--rc-gold-bg); border: 1px solid var(--rc-gold-border); }
+.rc-holder.empty { background: var(--bg-surface-subtle); border-style: dashed; border-color: var(--border-subtle); }
+.rc-holder-name { font-size: 15px; font-weight: 700; color: var(--text-primary); }
+.rc-contender { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; color: var(--text-secondary); }
+.rc-criteria { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rc-criteria li { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; color: var(--text-secondary); }
+.rc-trophy-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--border-subtle); padding: 12px 20px; }
+
+/* ---------------------------------------------------------------- Podium */
+.rc-podium { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: end; }
+.rc-podium-step {
+  position: relative; text-align: center; border-radius: var(--radius-lg); padding: 18px 14px 16px;
+  background: var(--bg-surface); border: 1px solid var(--border-subtle); box-shadow: var(--shadow-sm);
+}
+.rc-podium-step.rank-1 { padding-top: 30px; border-color: var(--rc-gold-border); background: linear-gradient(180deg, var(--rc-gold-bg) 0%, var(--bg-surface) 70%); }
+.rc-podium-step.rank-1 { order: 2; }
+.rc-podium-step.rank-2 { order: 1; }
+.rc-podium-step.rank-3 { order: 3; }
+.rc-podium-name { font-weight: 700; font-size: 15px; color: var(--text-primary); margin-top: 10px; overflow-wrap: anywhere; }
+.rc-podium-xp { font-size: 22px; font-weight: 700; color: var(--text-primary); font-variant-numeric: tabular-nums; margin-top: 8px; }
+@media (max-width: 640px) {
+  .rc-podium { grid-template-columns: 1fr; }
+  .rc-podium-step.rank-1, .rc-podium-step.rank-2, .rc-podium-step.rank-3 { order: 0; }
+}
+
+/* Rank medal */
+.rc-rank {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; border-radius: 50%;
+  font-weight: 700; font-variant-numeric: tabular-nums;
+  background: var(--bg-surface-subtle); border: 1px solid var(--border-subtle); color: var(--text-secondary);
+}
+.rc-rank.r1 { background: var(--rc-medal-1); color: var(--rc-medal-1-text); border: none; box-shadow: 0 2px 6px rgba(226, 167, 46, 0.45); }
+.rc-rank.r2 { background: var(--rc-medal-2); color: var(--rc-medal-2-text); border: none; box-shadow: 0 2px 6px rgba(120, 135, 150, 0.4); }
+.rc-rank.r3 { background: var(--rc-medal-3); color: var(--rc-medal-3-text); border: none; box-shadow: 0 2px 6px rgba(194, 124, 72, 0.4); }
+
+/* Most improved banner */
+.rc-improved {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  padding: 18px 20px; border-radius: var(--radius-lg);
+  background: linear-gradient(110deg, var(--rc-green-bg) 0%, var(--bg-surface) 80%); border: 1px solid var(--rc-green-border);
+}
+
+/* Ranked list rows (departments, individuals) */
+.rc-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.rc-list li { padding: 12px 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.rc-list li + li { border-top: 1px solid var(--border-subtle); }
+.rc-avatar {
+  width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; background: var(--tone-bg); color: var(--tone); border: 1px solid var(--tone-border);
+}
+
+/* ---------------------------------------------------------------- Badges */
+.rc-badge-card {
+  position: relative; display: flex; flex-direction: column; gap: 14px; padding: 20px; border-radius: var(--radius-lg);
+  background: var(--bg-surface); border: 1px solid var(--border-subtle); box-shadow: var(--shadow-sm); overflow: hidden;
+}
+.rc-badge-card.unlocked { border-color: var(--tone-border); background: linear-gradient(160deg, var(--tone-bg) 0%, var(--bg-surface) 55%); }
+.rc-badge-medal {
+  width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  background: var(--tone); color: #FFFFFF; box-shadow: 0 0 0 4px var(--tone-bg), 0 0 0 5px var(--tone-border);
+}
+.rc-badge-card.locked .rc-badge-medal { background: var(--bg-surface-subtle); color: var(--text-tertiary); box-shadow: 0 0 0 4px var(--bg-surface), 0 0 0 5px var(--border-subtle); }
+.rc-badge-lock { position: absolute; right: -2px; bottom: -2px; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--bg-surface); color: var(--text-secondary); border: 1px solid var(--border-subtle); }
+.rc-progress { height: 8px; border-radius: 999px; background: var(--bg-surface-subtle); overflow: hidden; }
+.rc-progress > span { display: block; height: 100%; border-radius: 999px; background: var(--tone); }
+
+/* ---------------------------------------------------------------- Points rules */
+.rc-rule-card { border-radius: var(--radius-lg); background: var(--bg-surface); border: 1px solid var(--border-subtle); border-top: 4px solid var(--tone); padding: 18px 20px; box-shadow: var(--shadow-sm); }
+.rc-rule-list { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.rc-rule-list li { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--text-secondary); line-height: 1.45; }
+.rc-xp-pill { flex-shrink: 0; font-weight: 700; font-size: 12.5px; padding: 2px 10px; border-radius: 999px; background: var(--rc-teal-bg); color: var(--rc-teal); border: 1px solid var(--rc-teal-border); white-space: nowrap; }
+.rc-xp-pill.negative { background: var(--color-danger-bg); color: var(--color-danger); border-color: var(--color-danger-border); }
+
+/* ---------------------------------------------------------------- Kudos */
+.rc-kudos { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; list-style: none; margin: 0; padding: 0; }
+.rc-kudos-card {
+  display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; border-radius: var(--radius-lg);
+  background: var(--bg-surface); border: 1px solid var(--border-subtle); border-left: 4px solid var(--tone); box-shadow: var(--shadow-sm);
+}
+.rc-kudos-people { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--text-secondary); }
+.rc-kudos-people strong { color: var(--text-primary); font-size: 14px; }
+.rc-kudos-quote { margin: 0; padding: 10px 14px; border-radius: var(--radius-md); background: var(--tone-bg); color: var(--text-primary); font-size: 13.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.rc-kudos-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.rc-kudos-cta {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 16px 20px; border-radius: var(--radius-lg);
+  background: linear-gradient(110deg, var(--rc-rose-bg) 0%, var(--bg-surface) 85%); border: 1px solid var(--rc-rose-border);
+}

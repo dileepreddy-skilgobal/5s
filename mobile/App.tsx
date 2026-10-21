@@ -1,11 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import {
-  StyleSheet,
-  View,
-  Platform,
-  Alert,
-} from 'react-native';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import React, { useState, useEffect } from 'react';
+import { StyleSheet, View, Platform, Alert, ActivityIndicator } from 'react-native';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { BottomNavBar, TabType } from './src/components/BottomNavBar';
 import { HomeScreen } from './src/screens/HomeScreen';
@@ -17,80 +12,71 @@ import { AuditExecutionModal } from './src/components/AuditExecutionModal';
 import { RedTagModal } from './src/components/RedTagModal';
 import { BootstrapScreen } from './src/components/BootstrapScreen';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
-import { OfflineStorage } from './src/services/offlineStorage';
-import { ApiService } from './src/services/api';
-import { BootstrapService } from './src/services/bootstrapService';
-import { AuditExecution, LocationMaster, RedTagRecord, BootstrapState } from './src/types';
-import { MOCK_ACTIVE_AUDITS, MOCK_LOCATIONS } from './src/constants/mockData';
-import { UserProvider, useUser } from './src/context/UserContext';
+import { TemplatePickerModal } from './src/components/TemplatePickerModal';
+import { ReportObservationModal } from './src/components/ReportObservationModal';
+import { NotificationsInboxModal } from './src/components/NotificationsInboxModal';
+import { AccessNoticeBanner } from './src/components/AccessNoticeBanner';
+import {
+  AuditExecution,
+  AuditSubmissionPayload,
+  AuditTemplateSnapshot,
+  LocationMaster,
+  ObservationDraft,
+  QuestionAnswer,
+  RedTagRecord,
+} from './src/types';
+import { AuthProvider, UserProvider, useAuth, useUser } from './src/context/UserContext';
+import { WorkspaceProvider, useWorkspace } from './src/context/WorkspaceContext';
+import { NotificationsProvider, useNotifications } from './src/context/NotificationsContext';
+import { notificationTarget, NotificationTarget, PushService } from './src/services/pushService';
+import { LoginScreen } from './src/screens/LoginScreen';
 import { useResponsive } from './src/hooks/useResponsive';
+import { getErrorMessage } from './src/services/http';
+import { COLORS } from './src/constants/theme';
+import { SyncResult } from './src/services/syncService';
+
+/** User-facing summary of a sync attempt after a submission. */
+function describeSubmission(what: string, result: SyncResult | null): { title: string; message: string } {
+  if (!result || result.interrupted) {
+    return { title: 'Saved on this device', message: `${what} is saved on this device and will sync automatically when the connection returns.` };
+  }
+  if (result.errors.length > 0) {
+    return { title: 'Not accepted by the server', message: `${result.errors.join('\n')}\n\nReview it under Profile → Sync.` };
+  }
+  return { title: 'Submitted', message: `${what} was sent to the 5S server.` };
+}
 
 function MainApp() {
-  const { isTablet, isLandscape, contentMaxWidth } = useResponsive();
-  const { currentUser, refreshStats } = useUser();
+  const { contentMaxWidth } = useResponsive();
+  const insets = useSafeAreaInsets();
+  const { currentUser, can } = useUser();
+  const workspace = useWorkspace();
+  const { audits, locations, templates, isOnline, isLoading, syncItems } = workspace;
+  const notifications = useNotifications();
+
   const [activeTab, setActiveTab] = useState<TabType>('home');
   const [searchQuery, setSearchQuery] = useState('');
-  const [audits, setAudits] = useState<AuditExecution[]>(MOCK_ACTIVE_AUDITS);
-  const [locations, setLocations] = useState<LocationMaster[]>(MOCK_LOCATIONS);
-  const [isOffline, setIsOffline] = useState(false);
-  const [pendingQueue, setPendingQueue] = useState<AuditExecution[]>([]);
-
-  // Systematic bootstrap state
-  const [isBootstrapped, setIsBootstrapped] = useState(false);
-  const [bootstrapState, setBootstrapState] = useState<BootstrapState>({
-    step: 'STORAGE_INIT',
-    progress: 10,
-    title: 'Initializing Storage & Schemas',
-    description: 'Starting local database and storage subsystems...',
-    isReady: false,
-    isOfflineMode: false,
-    deviceType: isTablet ? 'tablet' : 'phone',
-    orientation: isLandscape ? 'landscape' : 'portrait',
-  });
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   // Modals
   const [qrScannerVisible, setQrScannerVisible] = useState(false);
-  const [selectedAuditForExecution, setSelectedAuditForExecution] = useState<AuditExecution | null>(null);
+  const [activeExecution, setActiveExecution] = useState<{ audit: AuditExecution; template: AuditTemplateSnapshot } | null>(null);
+  const [templatePickerLocation, setTemplatePickerLocation] = useState<LocationMaster | null>(null);
   const [redTagModalVisible, setRedTagModalVisible] = useState(false);
   const [redTagLocation, setRedTagLocation] = useState<LocationMaster | null>(null);
+  const [isOpeningAudit, setIsOpeningAudit] = useState(false);
+  const [reportVisible, setReportVisible] = useState(false);
+  const [reportLocation, setReportLocation] = useState<LocationMaster | null>(null);
+  const canReport = can('SHOPFLOOR_REPORTERS');
 
-  // Initialize storage & offline state
-  const loadData = useCallback(async () => {
-    const loadedAudits = await ApiService.getAuditExecutions();
-    const loadedLocs = await ApiService.getLocations();
-    const offlineFlag = await OfflineStorage.isOfflineMode();
-    const queue = await OfflineStorage.getOfflineQueue();
+  const pendingSyncCount = syncItems.filter((i) => i.state === 'PENDING').length;
 
-    setAudits(loadedAudits);
-    setLocations(loadedLocs);
-    setIsOffline(offlineFlag);
-    setPendingQueue(queue);
-    refreshStats(loadedAudits);
-  }, [refreshStats]);
-
-  // Run systematic bootstrap on startup
   useEffect(() => {
-    let isMounted = true;
+    if (!isLoading) setHasLoadedOnce(true);
+  }, [isLoading]);
 
-    BootstrapService.runBootstrap(
-      (state) => {
-        if (isMounted) setBootstrapState(state);
-      },
-      { isTablet, orientation: isLandscape ? 'landscape' : 'portrait' }
-    ).then((result) => {
-      if (isMounted) {
-        setAudits(result.audits);
-        setLocations(result.locations);
-        setIsOffline(result.isOffline);
-        setPendingQueue(result.pendingQueue);
-        refreshStats(result.audits);
-        setTimeout(() => {
-          if (isMounted) setIsBootstrapped(true);
-        }, 350);
-      }
-    });
-
-    // Prevent scrollbar clipping on web browsers (especially Windows Chrome/Edge)
+  // Prevent scrollbar clipping on web browsers (especially Windows Chrome/Edge)
+  useEffect(() => {
     if (Platform.OS === 'web' && typeof document !== 'undefined') {
       const styleId = '5s-app-scrollbar-style';
       if (!document.getElementById(styleId)) {
@@ -103,188 +89,236 @@ function MainApp() {
         document.head.appendChild(style);
       }
     }
+  }, []);
 
-    return () => {
-      isMounted = false;
+  // Notification taps (push) open the matching screen; arriving notifications refresh the bell badge
+  const { openInbox, refreshUnread } = notifications;
+  useEffect(() => {
+    const openTarget = (target: NotificationTarget) => {
+      if (target === 'audits') setActiveTab('audits');
+      else if (target === 'locations') setActiveTab('locations');
+      else openInbox();
+      refreshUnread();
     };
-  }, [isTablet, isLandscape, refreshStats]);
+    const unsubscribeTaps = PushService.subscribeToTaps((data) => openTarget(notificationTarget(data)));
+    const unsubscribeReceived = PushService.subscribeToReceived(refreshUnread);
+    return () => {
+      unsubscribeTaps();
+      unsubscribeReceived();
+    };
+  }, [openInbox, refreshUnread]);
 
-  // Toggle simulated offline mode
-  const handleToggleOffline = async () => {
-    const nextState = !isOffline;
-    setIsOffline(nextState);
-    await OfflineStorage.setOfflineMode(nextState);
-    Alert.alert(
-      nextState ? 'Offline Mode Active' : 'Online Mode Active',
-      nextState
-        ? 'Network requests will be queued locally in device AsyncStorage.'
-        : 'Reconnected to 5S Cloud. Ready to sync.'
-    );
+  const openReport = (loc: LocationMaster | null) => {
+    setQrScannerVisible(false);
+    setReportLocation(loc);
+    setReportVisible(true);
   };
 
-  // Launch audit dynamically from QR scan or card tap
-  const handleLocationScanned = (loc: LocationMaster) => {
-    const existing = audits.find((a) => a.locationId === loc.id && a.status === 'IN_PROGRESS');
-    if (existing) {
-      setSelectedAuditForExecution(existing);
-    } else {
-      const currentYear = new Date().getFullYear();
-      const newAudit: AuditExecution = {
-        id: `aud-${Date.now()}`,
-        trackingNumber: `#AUD-${currentYear}-${Math.floor(1000 + Math.random() * 9000)}`,
-        templateId: 'tmpl-auto-std',
-        templateTitle: 'Automotive Precision 5S Shopfloor Standard',
-        locationId: loc.id,
-        locationName: loc.name,
-        plantName: loc.plant,
-        auditorId: currentUser.id,
-        auditorName: `${currentUser.firstName} ${currentUser.lastName} (${currentUser.jobTitle})`,
-        category: `${loc.department} • 5S Audit`,
-        status: 'IN_PROGRESS',
-        statusBadge: 'In Progress',
-        overallScore: loc.current5SScore,
-        pillarScores: { S1: 85, S2: 80, S3: 85, S4: 80, S5: 80 },
-        timeline: [
-          { label: 'Area Verified', timestamp: 'Today, 09:00 AM', isCompleted: true, isActive: false },
-          { label: 'Inspection', timestamp: 'S1–S5 Active', isCompleted: true, isActive: true },
-          { label: 'CAPA Review', timestamp: 'Pending', isCompleted: false, isActive: false },
-          { label: 'Signed Off', timestamp: 'Target Today', isCompleted: false, isActive: false },
-        ],
-        answers: {},
-        observations: [],
-        scheduledDate: new Date().toLocaleDateString('en-GB'),
-        startedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  /** Runs an async "open audit" step with a busy guard and a clear error message. */
+  const runOpen = async (task: () => Promise<{ audit: AuditExecution; template: AuditTemplateSnapshot }>) => {
+    if (isOpeningAudit) return;
+    setIsOpeningAudit(true);
+    try {
+      setActiveExecution(await task());
+    } catch (err) {
+      Alert.alert('Cannot open audit', getErrorMessage(err, 'The audit could not be opened. Please try again.'));
+    } finally {
+      setIsOpeningAudit(false);
+    }
+  };
+
+  const startAdHocAudit = (location: LocationMaster, template: AuditTemplateSnapshot) => {
+    setTemplatePickerLocation(null);
+    runOpen(() => workspace.startAudit({ location, template }));
+  };
+
+  // Area chosen from the scanner or the locations list
+  const handleLocationSelected = (loc: LocationMaster) => {
+    setQrScannerVisible(false);
+    if (!can('AUDIT_CONDUCTORS')) {
+      // Roles that do not conduct audits can still report abnormalities or red-tag items at the area
+      const openRedTag = () => {
+        setRedTagLocation(loc);
+        setRedTagModalVisible(true);
       };
-      setAudits((prev) => [newAudit, ...prev]);
-      setSelectedAuditForExecution(newAudit);
+      if (!canReport) {
+        openRedTag();
+      } else if (Platform.OS === 'web') {
+        // Choice dialogs are not available in the web preview
+        openReport(loc);
+      } else {
+        Alert.alert(loc.name, 'What would you like to do at this area?', [
+          { text: 'Report an abnormality', onPress: () => openReport(loc) },
+          { text: 'Red tag an item', onPress: openRedTag },
+          { text: 'Cancel', style: 'cancel' },
+        ]);
+      }
+      return;
     }
-  };
-
-  // Audit submission
-  const handleAuditSubmitted = async (completedAudit: AuditExecution) => {
-    const res = await ApiService.submitAuditExecution(completedAudit, currentUser);
-    await loadData();
-    setSelectedAuditForExecution(null);
-
-    if (res.synced) {
-      Alert.alert('Audit Submitted & Verified', 'Audit results and CAPA actions synchronized with 5S Cloud.');
+    const inProgress = audits.find((a) => a.locationId === loc.id && a.status === 'IN_PROGRESS' && a.auditorId === currentUser.id);
+    if (inProgress) {
+      runOpen(() => workspace.openAudit(inProgress));
+      return;
+    }
+    if (templates.length === 0) {
+      Alert.alert('No audit templates', isOnline ? 'No active audit templates are published.' : 'Templates are not available offline yet. Connect once to download them.');
+      return;
+    }
+    if (templates.length === 1) {
+      startAdHocAudit(loc, templates[0]);
     } else {
-      Alert.alert('Saved to Offline Queue', 'No network connection. Audit is saved locally and will auto-sync when online.');
+      setTemplatePickerLocation(loc);
     }
   };
 
-  // Red tag submission
-  const handleSaveRedTag = async (tag: RedTagRecord) => {
-    await ApiService.createRedTag(tag);
-    await loadData();
-    Alert.alert('Red Tag Issued', `Tag ${tag.tagNumber} successfully registered for ${tag.areaName}.`);
-  };
-
-  // Sync queue
-  const handleSyncPendingQueue = async () => {
-    const result = await ApiService.syncPendingQueue();
-    await loadData();
+  const handleSelectAudit = (audit: AuditExecution) => {
+    if (audit.status === 'SCHEDULED') {
+      if (!can('AUDIT_CONDUCTORS')) return;
+      runOpen(() => workspace.startAudit({ scheduled: audit }));
+      return;
+    }
+    if (audit.status === 'IN_PROGRESS' && audit.auditorId === currentUser.id && !audit.isOfflineSyncPending) {
+      runOpen(() => workspace.openAudit(audit));
+      return;
+    }
+    const score = audit.overallScore === null ? 'not scored yet' : `${Math.round(audit.overallScore)}%`;
     Alert.alert(
-      'Sync Completed',
-      `Synchronized ${result.syncedCount} audits with 5S Enterprise backend.`
+      audit.trackingNumber,
+      `${audit.locationName}\nStatus: ${audit.statusBadge}\nScore: ${score}\nFindings: ${audit.findingsCount}` +
+        (audit.status === 'PENDING_REVIEW' ? '\n\nAwaiting the area owner’s sign-off.' : ''),
     );
   };
 
-  // Render Bootstrap Screen if app is initializing
-  if (!isBootstrapped) {
+  const handleStartAudit = () => {
+    const mine = audits.find((a) => a.status === 'IN_PROGRESS' && a.auditorId === currentUser.id && !a.isOfflineSyncPending);
+    if (mine) return handleSelectAudit(mine);
+    const scheduled = audits.find((a) => a.status === 'SCHEDULED');
+    if (scheduled) return handleSelectAudit(scheduled);
+    setQrScannerVisible(true);
+  };
+
+  const handleCloseAudit = async (answers: Record<string, QuestionAnswer>) => {
+    if (activeExecution) {
+      await workspace.saveDraft(activeExecution.audit, answers);
+    }
+    setActiveExecution(null);
+  };
+
+  const handleAuditSubmitted = async (audit: AuditExecution, payload: AuditSubmissionPayload) => {
+    const result = await workspace.submitAudit(audit, payload);
+    setActiveExecution(null);
+    const { title, message } = describeSubmission(`Audit ${audit.trackingNumber}`, result);
+    Alert.alert(title, message);
+  };
+
+  const handleSaveRedTag = async (tag: RedTagRecord) => {
+    const result = await workspace.registerRedTag(tag);
+    const { title, message } = describeSubmission(`Red tag for "${tag.itemName}"`, result);
+    Alert.alert(title, message);
+  };
+
+  const handleSubmitObservation = async (draft: ObservationDraft, clientRequestId: string) => {
+    const result = await workspace.reportObservation(draft, clientRequestId);
+    const { title, message } = describeSubmission(`Report "${draft.title}"`, result);
+    Alert.alert(title, message);
+  };
+
+  const handleSyncPendingQueue = async () => {
+    const result = await workspace.syncNow();
+    if (!result) {
+      Alert.alert('Offline', 'No network connection. Items will sync automatically when the device is back online.');
+    } else if (result.errors.length > 0) {
+      Alert.alert('Some items were rejected', result.errors.join('\n'));
+    } else {
+      Alert.alert('Sync complete', result.synced > 0 ? `${result.synced} item(s) synced.` : 'Nothing to sync.');
+    }
+  };
+
+  // First load: branded start-up screen until data (server or device cache) is available
+  if (!hasLoadedOnce) {
     return (
-      <SafeAreaView style={styles.safeAreaDark} edges={['top', 'bottom', 'left', 'right']}>
-        <StatusBar style="light" />
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom', 'left', 'right']}>
+        <StatusBar style="dark" />
         <BootstrapScreen
-          state={bootstrapState}
-          onBypass={() => setIsBootstrapped(true)}
+          message={isOnline ? 'Loading your workspace…' : 'Loading data saved on this device…'}
+          isOffline={!isOnline}
         />
       </SafeAreaView>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom', 'left', 'right']}>
+    // The bottom safe area is drawn below the shell (white, matching the tab bar) so the bar never sits under
+    // the home indicator and BOTTOM_NAV_CLEARANCE only has to cover the bar itself
+    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
       <StatusBar style="dark" />
       <View style={[styles.appContainer, { maxWidth: contentMaxWidth }]}>
+        {/* Read-only organization / 2FA enrolment notices from the server */}
+        <AccessNoticeBanner />
+
         {/* Screen Routing */}
         {activeTab === 'home' && (
           <HomeScreen
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
             onOpenScanner={() => setQrScannerVisible(true)}
-            onStartAudit={() => {
-              if (audits.length > 0) {
-                setSelectedAuditForExecution(audits[0]);
-              } else {
-                setQrScannerVisible(true);
-              }
+            onStartAudit={handleStartAudit}
+            onRedTag={() => {
+              setRedTagLocation(null);
+              setRedTagModalVisible(true);
             }}
-            onTrackOrder={() => setActiveTab('audits')}
-            onSchedule={() => {
-              const scheduled = audits.find((a) => a.status === 'SCHEDULED');
-              if (scheduled) setSelectedAuditForExecution(scheduled);
-              else setActiveTab('audits');
-            }}
-            onMore={() => setRedTagModalVisible(true)}
+            onReport={canReport ? () => openReport(null) : undefined}
+            onOpenAreas={() => setActiveTab('locations')}
             activeAudits={audits}
-            onSelectAudit={(audit) => setSelectedAuditForExecution(audit)}
+            onSelectAudit={handleSelectAudit}
             onSeeAllAudits={() => setActiveTab('audits')}
-            isOffline={isOffline}
-            onToggleOffline={handleToggleOffline}
-            pendingSyncCount={pendingQueue.length}
+            isOffline={!isOnline}
+            onStatusPress={workspace.refresh}
+            pendingSyncCount={pendingSyncCount}
             onSyncPress={handleSyncPendingQueue}
             onOpenProfile={() => setActiveTab('profile')}
-            onRefresh={loadData}
+            onRefresh={workspace.refresh}
           />
         )}
 
         {activeTab === 'audits' && (
           <AuditsListScreen
             audits={audits}
-            onSelectAudit={(audit) => setSelectedAuditForExecution(audit)}
+            onSelectAudit={handleSelectAudit}
             onNewAudit={() => setQrScannerVisible(true)}
-            onRefresh={loadData}
+            onRefresh={workspace.refresh}
           />
         )}
 
         {activeTab === 'locations' && (
           <LocationsScreen
             locations={locations}
-            onSelectLocation={(loc) => {
-              handleLocationScanned(loc);
-            }}
+            onSelectLocation={handleLocationSelected}
             onOpenQRScanner={() => setQrScannerVisible(true)}
-            onRefresh={loadData}
+            onReportAbnormality={canReport ? openReport : undefined}
+            onRefresh={workspace.refresh}
           />
         )}
 
-        {activeTab === 'profile' && (
-          <ProfileScreen
-            isOffline={isOffline}
-            onToggleOffline={handleToggleOffline}
-            pendingSyncCount={pendingQueue.length}
-            onSyncNow={handleSyncPendingQueue}
-            onRefresh={loadData}
-          />
-        )}
+        {activeTab === 'profile' && <ProfileScreen onRefresh={workspace.refresh} />}
 
         {/* Floating Bottom Navigation Bar */}
-        <BottomNavBar
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
-          onCenterActionPress={() => setQrScannerVisible(true)}
-        />
+        <BottomNavBar activeTab={activeTab} onTabChange={setActiveTab} onCenterActionPress={() => setQrScannerVisible(true)} />
 
-        {/* QR Scanner Modal */}
         <QRScannerModal
           visible={qrScannerVisible}
           onClose={() => setQrScannerVisible(false)}
-          onSelectLocation={handleLocationScanned}
+          onSelectLocation={handleLocationSelected}
           locations={locations}
         />
 
-        {/* Red Tag & Abnormality Modal */}
+        <TemplatePickerModal
+          location={templatePickerLocation}
+          templates={templates}
+          onSelect={(t) => templatePickerLocation && startAdHocAudit(templatePickerLocation, t)}
+          onClose={() => setTemplatePickerLocation(null)}
+        />
+
         <RedTagModal
           visible={redTagModalVisible}
           onClose={() => setRedTagModalVisible(false)}
@@ -293,27 +327,82 @@ function MainApp() {
           locations={locations}
         />
 
-        {/* Full 5S Audit Execution Modal */}
-        {selectedAuditForExecution && (
+        <ReportObservationModal
+          visible={reportVisible}
+          onClose={() => setReportVisible(false)}
+          onSubmit={handleSubmitObservation}
+          initialLocation={reportLocation}
+          locations={locations}
+        />
+
+        <NotificationsInboxModal onOpenTarget={(target) => setActiveTab(target)} />
+
+        {activeExecution && (
           <AuditExecutionModal
             visible={true}
-            audit={selectedAuditForExecution}
-            onClose={() => setSelectedAuditForExecution(null)}
+            audit={activeExecution.audit}
+            template={activeExecution.template}
+            onClose={handleCloseAudit}
+            onDraftChange={(answers) => workspace.saveDraft(activeExecution.audit, answers)}
             onSubmit={handleAuditSubmitted}
           />
         )}
+
+        {isOpeningAudit && (
+          <View style={styles.busyOverlay} pointerEvents="auto">
+            <ActivityIndicator size="large" color={COLORS.primary} accessibilityLabel="Opening audit" />
+          </View>
+        )}
       </View>
+      <View style={[styles.bottomInset, { height: insets.bottom }]} />
     </SafeAreaView>
   );
 }
+
+/** Shows the sign-in screen until a server-verified session exists. */
+function AuthGate() {
+  const { status, session } = useAuth();
+
+  if (status === 'checking') {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom', 'left', 'right']}>
+        <StatusBar style="dark" />
+        <BootstrapScreen message="Checking your sign-in…" />
+      </SafeAreaView>
+    );
+  }
+
+  if (status === 'signedOut' || !session) {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom', 'left', 'right']}>
+        <StatusBar style="dark" />
+        <LoginScreen />
+      </SafeAreaView>
+    );
+  }
+
+  // Remount the signed-in app per user so no state leaks between sessions on shared devices
+  return (
+    <UserProvider session={session} key={session.user.id}>
+      <WorkspaceProvider>
+        <NotificationsProvider>
+          <MainApp />
+        </NotificationsProvider>
+      </WorkspaceProvider>
+    </UserProvider>
+  );
+}
+
+// Foreground notification banners and the Android channel (no-op on web)
+PushService.configure();
 
 export default function App() {
   return (
     <ErrorBoundary>
       <SafeAreaProvider>
-        <UserProvider>
-          <MainApp />
-        </UserProvider>
+        <AuthProvider>
+          <AuthGate />
+        </AuthProvider>
       </SafeAreaProvider>
     </ErrorBoundary>
   );
@@ -322,19 +411,27 @@ export default function App() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#F8F9FB',
-  },
-  safeAreaDark: {
-    flex: 1,
-    backgroundColor: '#0F172A',
+    backgroundColor: COLORS.background,
   },
   appContainer: {
     flex: 1,
     position: 'relative',
     width: '100%',
     alignSelf: 'center',
-    backgroundColor: '#F8F9FB',
+    backgroundColor: COLORS.background,
     overflow: 'hidden',
-    minHeight: '100%',
+  },
+  bottomInset: {
+    backgroundColor: COLORS.card,
+  },
+  busyOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(245,247,250,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });

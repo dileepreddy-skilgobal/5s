@@ -1,30 +1,33 @@
 import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '../constants/theme';
+import { COLORS, RADIUS, SPACING, TOUCH_TARGET, TYPE } from '../constants/theme';
 import { useUser } from '../context/UserContext';
+import { useNotifications } from '../context/NotificationsContext';
 import { ENV } from '../config/env';
 
 interface HeaderProps {
   userName?: string;
   isOffline?: boolean;
-  onToggleOffline?: () => void;
+  onStatusPress?: () => void;
   pendingSyncCount?: number;
   onSyncPress?: () => void;
   onProfilePress?: () => void;
 }
 
+/** Home header: organization, connection state, notifications, profile and a greeting. */
 export const Header: React.FC<HeaderProps> = ({
   userName,
   isOffline = false,
-  onToggleOffline,
+  onStatusPress,
   pendingSyncCount = 0,
   onSyncPress,
   onProfilePress,
 }) => {
   const { currentUser, tenant } = useUser();
+  const { unreadCount, openInbox } = useNotifications();
 
-  // Dynamic time-of-day greeting
+  // Time-of-day greeting
   const greetingText = useMemo(() => {
     const hour = new Date().getHours();
     if (hour < 12) return 'Good morning';
@@ -32,179 +35,146 @@ export const Header: React.FC<HeaderProps> = ({
     return 'Good evening';
   }, []);
 
-  const activeName = userName || currentUser?.firstName || 'Auditor';
-  const initials = `${activeName[0]}${currentUser?.lastName?.[0] || ''}`;
+  const firstName = userName || currentUser?.firstName || '';
+  const fullName = [currentUser?.firstName, currentUser?.lastName].filter(Boolean).join(' ') || firstName;
+  const initials = `${firstName[0] ?? ''}${currentUser?.lastName?.[0] ?? ''}`.toUpperCase() || '?';
+  const organization = tenant?.name || ENV.APP_NAME;
+  const unreadLabel = unreadCount > 99 ? '99+' : String(unreadCount);
 
   return (
     <View style={styles.container}>
-      {/* 1. Top Bar: Plant Identifier & Online Status on Left, Profile Avatar on Right */}
       <View style={styles.topBar}>
         <View style={styles.topBarLeft}>
-          <Text style={styles.eyebrow} numberOfLines={1}>
-            {tenant?.plantName || tenant?.name || ENV.APP_NAME}
+          <Text style={styles.organization} numberOfLines={2} accessibilityLabel={`Organization: ${organization}`}>
+            {organization}
           </Text>
 
-          {/* Online / Offline status badge */}
-          <TouchableOpacity
-            style={[styles.statusBadge, isOffline ? styles.statusOffline : styles.statusOnline]}
-            onPress={onToggleOffline}
-            activeOpacity={0.7}
-          >
-            <View style={[styles.statusDot, { backgroundColor: isOffline ? '#EF4444' : '#10B981' }]} />
-            <Text style={[styles.statusText, { color: isOffline ? '#DC2626' : '#059669' }]}>
-              {isOffline ? 'Offline' : 'Online'}
-            </Text>
-          </TouchableOpacity>
+          <View style={styles.pillRow}>
+            {/* Online / offline: tapping refreshes data */}
+            <Pressable
+              style={({ pressed }) => [styles.pill, isOffline ? styles.pillOffline : styles.pillOnline, pressed && styles.pressed]}
+              onPress={onStatusPress}
+              hitSlop={{ top: 10, bottom: 10, left: 4, right: 4 }}
+              accessibilityRole="button"
+              accessibilityLabel={isOffline ? 'Offline. Tap to check the connection again' : 'Online. Tap to refresh'}
+            >
+              <View style={[styles.dot, { backgroundColor: isOffline ? COLORS.warning : COLORS.success }]} />
+              <Text style={[styles.pillText, { color: isOffline ? COLORS.warning : COLORS.success }]}>
+                {isOffline ? 'Offline' : 'Online'}
+              </Text>
+            </Pressable>
 
-          {/* Sync indicator if pending queue */}
-          {pendingSyncCount > 0 && (
-            <TouchableOpacity style={styles.syncBtn} onPress={onSyncPress} activeOpacity={0.8}>
-              <Ionicons name="cloud-upload" size={13} color="#FF6433" />
-              <Text style={styles.syncCount}>{pendingSyncCount}</Text>
-            </TouchableOpacity>
-          )}
+            {/* Items saved on the device that still have to be sent */}
+            {pendingSyncCount > 0 && (
+              <Pressable
+                style={({ pressed }) => [styles.pill, styles.pillSync, pressed && styles.pressed]}
+                onPress={onSyncPress}
+                hitSlop={{ top: 10, bottom: 10, left: 4, right: 4 }}
+                accessibilityRole="button"
+                accessibilityLabel={`${pendingSyncCount} ${pendingSyncCount === 1 ? 'item' : 'items'} waiting to sync. Tap to sync now`}
+              >
+                <Ionicons name="cloud-upload-outline" size={14} color={COLORS.primary} />
+                <Text style={[styles.pillText, { color: COLORS.primary }]}>{pendingSyncCount} to sync</Text>
+              </Pressable>
+            )}
+          </View>
         </View>
 
-        {/* Auditor Profile Avatar - Tappable to open Profile */}
-        <TouchableOpacity
-          style={styles.avatarWrapper}
-          onPress={onProfilePress}
-          activeOpacity={0.75}
-          accessibilityLabel={`Auditor profile for ${activeName}`}
+        {/* Notifications bell with unread badge */}
+        <Pressable
+          style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}
+          onPress={openInbox}
           accessibilityRole="button"
+          accessibilityLabel={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : 'Notifications'}
         >
-          <View style={styles.avatar}>
-            <Text style={styles.avatarInitials}>{initials.toUpperCase()}</Text>
-          </View>
-          {/* Notification / Status indicator badge */}
-          <View
-            style={[
-              styles.avatarNotificationDot,
-              { backgroundColor: isOffline ? '#EF4444' : COLORS.primary },
-            ]}
-          />
-        </TouchableOpacity>
+          <Ionicons name={unreadCount > 0 ? 'notifications' : 'notifications-outline'} size={22} color={COLORS.textDark} />
+          {unreadCount > 0 && (
+            <View style={styles.bellBadge}>
+              <Text style={styles.bellBadgeText}>{unreadLabel}</Text>
+            </View>
+          )}
+        </Pressable>
+
+        {/* Avatar opens the profile */}
+        <Pressable
+          style={({ pressed }) => [styles.avatar, pressed && styles.pressed]}
+          onPress={onProfilePress}
+          accessibilityRole="button"
+          accessibilityLabel={fullName ? `Profile of ${fullName}` : 'Profile'}
+        >
+          <Text style={styles.avatarInitials}>{initials}</Text>
+        </Pressable>
       </View>
 
-      {/* 2. Main Greeting Section - Full Width for Clean Single-Line Rendering */}
-      <View style={styles.greetingSection}>
-        <Text style={styles.greeting} numberOfLines={1} adjustsFontSizeToFit>
-          {greetingText}, {activeName}!
-        </Text>
-      </View>
+      <Text style={styles.greeting} numberOfLines={2} accessibilityRole="header">
+        {firstName ? `${greetingText}, ${firstName}` : greetingText}
+      </Text>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 12,
+    paddingHorizontal: SPACING.screen,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.lg,
   },
   topBar: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 8,
+    alignItems: 'flex-start',
+    gap: SPACING.sm,
   },
-  topBarLeft: {
+  topBarLeft: { flex: 1, minWidth: 0, gap: 6 },
+  organization: { ...TYPE.label, color: COLORS.textMedium },
+  pillRow: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.sm },
+  pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    flex: 1,
-    paddingRight: 10,
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  eyebrow: {
-    fontSize: 10.5,
-    fontWeight: '800',
-    color: COLORS.primary,
-    letterSpacing: 0.8,
-    textTransform: 'uppercase',
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 12,
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: RADIUS.pill,
     borderWidth: 1,
   },
-  statusOnline: {
-    backgroundColor: '#ECFDF5',
-    borderColor: '#A7F3D0',
-  },
-  statusOffline: {
-    backgroundColor: '#FEF2F2',
-    borderColor: '#FECACA',
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    marginRight: 4,
-  },
-  statusText: {
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  syncBtn: {
-    flexDirection: 'row',
+  pillOnline: { backgroundColor: COLORS.successSoft, borderColor: COLORS.successBorder },
+  pillOffline: { backgroundColor: COLORS.warningSoft, borderColor: COLORS.warningBorder },
+  pillSync: { backgroundColor: COLORS.primarySoft, borderColor: COLORS.primaryBorder },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+  pillText: { ...TYPE.captionStrong },
+  pressed: { opacity: 0.75 },
+  iconButton: {
+    width: TOUCH_TARGET,
+    height: TOUCH_TARGET,
+    borderRadius: TOUCH_TARGET / 2,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
     alignItems: 'center',
-    backgroundColor: COLORS.primarySoft,
-    paddingHorizontal: 6,
-    paddingVertical: 3,
+    justifyContent: 'center',
+  },
+  bellBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    minWidth: 20,
+    height: 20,
     borderRadius: 10,
-    gap: 3,
-  },
-  syncCount: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: COLORS.primary,
-  },
-  avatarWrapper: {
-    position: 'relative',
-  },
-  avatar: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#1E293B',
+    paddingHorizontal: 4,
+    backgroundColor: COLORS.danger,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 2,
-    borderColor: '#FFFFFF',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.12,
-    shadowRadius: 5,
-    elevation: 3,
+    borderColor: COLORS.background,
   },
-  avatarInitials: {
-    color: '#FFFFFF',
-    fontWeight: '800',
-    fontSize: 14,
-    letterSpacing: 0.5,
+  bellBadgeText: { color: COLORS.textInverse, fontSize: 12, lineHeight: 14, fontWeight: '700' },
+  avatar: {
+    width: TOUCH_TARGET,
+    height: TOUCH_TARGET,
+    borderRadius: TOUCH_TARGET / 2,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  avatarNotificationDot: {
-    position: 'absolute',
-    top: 0,
-    right: 0,
-    width: 11,
-    height: 11,
-    borderRadius: 6,
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
-  },
-  greetingSection: {
-    marginTop: 2,
-  },
-  greeting: {
-    fontSize: 23,
-    fontWeight: '800',
-    color: COLORS.textDark,
-    letterSpacing: -0.4,
-    lineHeight: 28,
-  },
+  avatarInitials: { ...TYPE.subheading, color: COLORS.textInverse },
+  greeting: { ...TYPE.title, color: COLORS.textDark, marginTop: SPACING.lg },
 });

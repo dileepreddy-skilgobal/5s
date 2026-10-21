@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  backend:
+    name: Backend — build, unit & end-to-end tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: five_s_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/five_s_ci?schema=public
+      JWT_SECRET: ci-only-jwt-secret-with-at-least-32-characters!!
+      ACTIVITY_LOG_KEY: ci-only-activity-log-key-at-least-32-characters
+      NODE_ENV: test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            mobile/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci
+
+      - name: Install mobile dependencies (mobile scoring is verified against the API)
+        working-directory: mobile
+        run: npm ci
+
+      - name: Create schema and seed demo data
+        run: |
+          npx prisma db push --skip-generate
+          npx prisma generate
+          npm run prisma:seed
+
+      - name: Type-check and build
+        run: |
+          npx tsc --noEmit -p tsconfig.json
+          npm run build
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Start API for end-to-end tests
+        run: |
+          PORT=3901 PUBLIC_API_URL=http://localhost:3901 NOTIFICATION_SCAN_MINUTES=0 PUSH_NOTIFICATIONS=off \
+          AUTH_RATE_LIMIT_PER_MINUTE=1000 TRUST_PROXY=loopback WEBHOOK_ALLOW_PRIVATE=true WEBHOOK_DISPATCH_SECONDS=1 \
+          nohup node dist/main.js > api.log 2>&1 &
+          for i in $(seq 1 60); do
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3901/api/v1/auth/me)" = "401" ]; then exit 0; fi
+            sleep 1
+          done
+          cat api.log; exit 1
+
+      - name: End-to-end tests
+        run: npm run test:e2e
+
+      - name: API log
+        if: failure()
+        run: tail -n 300 api.log
+
+  frontend:
+    name: Web app — type-check & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit -p tsconfig.json
+      - run: npm run build
+
+  mobile:
+    name: Mobile app — type-check & web export
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx expo export --platform web --output-dir dist-web

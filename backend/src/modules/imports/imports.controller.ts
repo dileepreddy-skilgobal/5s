@@ -6,87 +6,70 @@ import {
   Res,
   UseInterceptors,
   UploadedFile,
-  Headers,
   BadRequestException,
+  Param,
 } from '@nestjs/common';
+import { RoleGroups } from '../../core/guards/role-groups';
+import { TenantId, CurrentUserId } from '../../core/auth/current-user.decorator';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ApiTags, ApiOperation, ApiConsumes } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiTags, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { Response } from 'express';
-import { ImportsService, LocationImportRow } from './imports.service';
-import * as XLSX from 'xlsx';
+import { BulkImportService } from './bulk-import.service';
 
 import { Roles } from '../../core/guards/roles.decorator';
 
+/** Maximum spreadsheet upload size (5 MB). */
+const MAX_IMPORT_FILE_BYTES = 5 * 1024 * 1024;
+
 @ApiTags('Bulk Excel & CSV Ingestion')
-@Roles('SUPER_ADMIN', 'ORG_ADMIN')
+@ApiBearerAuth()
+@Roles(...RoleGroups.ORG_ADMINS)
 @Controller('api/v1/imports')
 export class ImportsController {
-  constructor(private readonly importsService: ImportsService) {}
+  constructor(private readonly bulk: BulkImportService) {}
 
-  private extractTenantId(tenantHeader?: string): string {
-    return tenantHeader || 'default-tenant-skilglobal';
+  @Get('catalogue')
+  @ApiOperation({ summary: 'Available imports with their columns' })
+  catalogue() {
+    return this.bulk.catalogue();
   }
 
-  @Get('template/locations')
-  @ApiOperation({ summary: 'Download pre-formatted Excel template for Location Bulk Ingestion' })
-  downloadLocationTemplate(@Res() res: Response) {
-    const buffer = this.importsService.generateLocationTemplate();
+  @Get('template/:kind')
+  @ApiOperation({ summary: 'Download the Excel template (with an instructions sheet) for org-nodes | locations | users | questions | standards | actions' })
+  downloadTemplate(@Param('kind') kind: string, @Res() res: Response) {
+    const buffer = this.bulk.template(kind);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename=Locations_Master_Template.xlsx');
+    res.setHeader('Content-Disposition', `attachment; filename=${kind}-import-template.xlsx`);
     res.send(buffer);
   }
 
-  @Post('locations/dry-run')
-  @ApiOperation({ summary: 'Upload spreadsheet and perform non-destructive dry-run validation with line-by-line error checks' })
+  @Post(':kind/dry-run')
+  @ApiOperation({ summary: 'Validate a spreadsheet (or JSON rows) without writing anything' })
   @ApiConsumes('multipart/form-data')
-  @UseInterceptors(FileInterceptor('file'))
-  async validateDryRun(
-    @Headers('x-tenant-id') tenantId: string,
-    @UploadedFile() file: Express.Multer.File,
-    @Body('jsonData') jsonDataString?: string,
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: MAX_IMPORT_FILE_BYTES, files: 1 },
+      fileFilter: (_req, file, callback) => {
+        const allowed = /\.(xlsx|xls|csv)$/i.test(file.originalname);
+        callback(allowed ? null : new BadRequestException('Only .xlsx, .xls or .csv spreadsheets can be imported'), allowed);
+      },
+    }),
+  )
+  async dryRun(
+    @TenantId() tenantId: string,
+    @CurrentUserId() userId: string,
+    @Param('kind') kind: string,
+    @UploadedFile() file?: Express.Multer.File,
+    @Body('rows') rows?: unknown,
   ) {
-    let rows: LocationImportRow[] = [];
-
-    if (file) {
-      const workbook = XLSX.read(file.buffer, { type: 'buffer' });
-      const firstSheet = workbook.SheetNames[0];
-      const rawRows: any[] = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet]);
-
-      rows = rawRows.map((r) => ({
-        areaCode: r.AreaCode || r.areacode || r.area_code || '',
-        name: r.Name || r.name || r.AreaName || '',
-        locationType: r.LocationType || r.locationtype || r.type || 'PRODUCTION_LINE',
-        orgNodeCode: r.OrgNodeCode || r.orgnodecode || r.department_code || '',
-        riskLevel: r.RiskLevel || r.risklevel || 'LOW',
-        auditFrequency: r.AuditFrequency || r.auditfrequency || 'WEEKLY',
-        building: r.Building || r.building || '',
-        floor: r.Floor || r.floor || '',
-        description: r.Description || r.description || '',
-        ownerEmail: r.OwnerEmail || r.owneremail || '',
-      }));
-    } else if (jsonDataString) {
-      try {
-        rows = JSON.parse(jsonDataString);
-      } catch (e) {
-        throw new BadRequestException('Invalid JSON payload');
-      }
-    } else {
-      throw new BadRequestException('Please provide an Excel file or JSON payload');
-    }
-
-    return this.importsService.validateLocationsDryRun(this.extractTenantId(tenantId), rows);
+    const parsed = file ? this.bulk.parse(kind, file.buffer) : rows;
+    if (!parsed) throw new BadRequestException('Upload a spreadsheet or send rows');
+    return this.bulk.dryRun(kind, tenantId, userId, parsed);
   }
 
-  @Post('locations/commit')
-  @ApiOperation({ summary: 'Atomically commit validated batch of locations' })
-  async commitBatch(
-    @Headers('x-tenant-id') tenantId: string,
-    @Headers('x-user-id') userId: string,
-    @Body() payload: { rows: LocationImportRow[] },
-  ) {
-    if (!payload.rows || !Array.isArray(payload.rows) || payload.rows.length === 0) {
-      throw new BadRequestException('Rows array cannot be empty');
-    }
-    return this.importsService.commitLocationsBatch(this.extractTenantId(tenantId), payload.rows, userId);
+  @Post(':kind/commit')
+  @ApiOperation({ summary: 'Import validated rows atomically (all or nothing)' })
+  commit(@TenantId() tenantId: string, @CurrentUserId() userId: string, @Param('kind') kind: string, @Body('rows') rows: unknown) {
+    return this.bulk.commit(kind, tenantId, userId, rows);
   }
 }

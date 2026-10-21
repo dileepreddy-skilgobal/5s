@@ -1,13 +1,13 @@
-import React, { useMemo, useState, useCallback } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, RefreshControl } from 'react-native';
+import React, { useCallback, useMemo, useState } from 'react';
+import { RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Header } from '../components/Header';
 import { SearchBar } from '../components/SearchBar';
-import { QuickActions } from '../components/QuickActions';
-import { HeroCard } from '../components/HeroCard';
+import { QuickAction, QuickActions } from '../components/QuickActions';
 import { ActiveAuditCard } from '../components/ActiveAuditCard';
+import { Button, EmptyState, SectionHeader, StatTile } from '../components/ui';
 import { AuditExecution } from '../types';
-import { COLORS, SHADOWS } from '../constants/theme';
+import { BOTTOM_NAV_CLEARANCE, COLORS, RADIUS, SPACING, TYPE } from '../constants/theme';
 import { useUser } from '../context/UserContext';
 import { useResponsive } from '../hooks/useResponsive';
 
@@ -15,15 +15,19 @@ interface HomeScreenProps {
   searchQuery: string;
   onSearchChange: (q: string) => void;
   onOpenScanner: () => void;
+  /** Continues the user's audit in progress, opens the next scheduled one, or opens the scanner. */
   onStartAudit: () => void;
-  onTrackOrder: () => void;
-  onSchedule: () => void;
-  onMore: () => void;
+  /** Opens the red tag form. */
+  onRedTag: () => void;
+  /** Opens the abnormality report (only for roles that may report). */
+  onReport?: () => void;
+  /** Switches to the Areas tab. */
+  onOpenAreas: () => void;
   activeAudits: AuditExecution[];
   onSelectAudit: (audit: AuditExecution) => void;
   onSeeAllAudits: () => void;
   isOffline: boolean;
-  onToggleOffline: () => void;
+  onStatusPress: () => void;
   pendingSyncCount: number;
   onSyncPress: () => void;
   onOpenProfile?: () => void;
@@ -36,57 +40,83 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onSearchChange,
   onOpenScanner,
   onStartAudit,
-  onTrackOrder,
-  onSchedule,
-  onMore,
+  onRedTag,
+  onReport,
+  onOpenAreas,
   activeAudits,
   onSelectAudit,
   onSeeAllAudits,
   isOffline,
-  onToggleOffline,
+  onStatusPress,
   pendingSyncCount,
   onSyncPress,
   onOpenProfile,
   onRefresh,
   isRefreshing,
 }) => {
-  const { currentUser, userStats } = useUser();
+  const { can } = useUser();
   const { isTablet } = useResponsive();
+  const canConduct = can('AUDIT_CONDUCTORS');
 
-  // Dynamic calculations for 5S Operations Cockpit
-  const inProgressAudits = useMemo(
-    () => activeAudits.filter((a) => a.status === 'IN_PROGRESS'),
-    [activeAudits]
+  // Summary figures, all derived from the audits loaded for this user (own audits for auditors,
+  // audits of owned areas for area owners)
+  const inProgressCount = useMemo(() => activeAudits.filter((a) => a.status === 'IN_PROGRESS').length, [activeAudits]);
+  const scheduledCount = useMemo(() => activeAudits.filter((a) => a.status === 'SCHEDULED').length, [activeAudits]);
+  const awaitingSignOffCount = useMemo(
+    () => activeAudits.filter((a) => a.status === 'PENDING_REVIEW' && !a.isOfflineSyncPending).length,
+    [activeAudits],
   );
+  const findingsCount = useMemo(() => activeAudits.reduce((acc, a) => acc + (a.findingsCount || 0), 0), [activeAudits]);
 
-  const scheduledAudits = useMemo(
-    () => activeAudits.filter((a) => a.status === 'SCHEDULED'),
-    [activeAudits]
-  );
+  // Average final score of signed-off audits (in-progress audits have no final score)
+  const scoreSummary = useMemo(() => {
+    const scored = activeAudits.filter((a) => a.status === 'COMPLETED' && a.overallScore !== null);
+    if (scored.length === 0) return null;
+    const total = scored.reduce((acc, a) => acc + (a.overallScore ?? 0), 0);
+    return { average: Math.round(total / scored.length), count: scored.length };
+  }, [activeAudits]);
 
-  const avgComplianceScore = useMemo(() => {
-    if (userStats?.avgScore && userStats.avgScore > 0) {
-      return Math.round(userStats.avgScore);
-    }
-    if (activeAudits.length > 0) {
-      const total = activeAudits.reduce((acc, item) => acc + (item.overallScore || 0), 0);
-      return Math.round(total / activeAudits.length);
-    }
-    return 88;
-  }, [userStats, activeAudits]);
+  // Audits that still need work: in progress first, then scheduled
+  const openAudits = useMemo(() => {
+    const rank = (a: AuditExecution) => (a.status === 'IN_PROGRESS' ? 0 : 1);
+    return activeAudits.filter((a) => a.status === 'IN_PROGRESS' || a.status === 'SCHEDULED').sort((a, b) => rank(a) - rank(b));
+  }, [activeAudits]);
 
-  // Filter active audits by search query
-  const filteredAudits = useMemo(() => {
-    if (!searchQuery.trim()) return activeAudits;
+  const isSearching = searchQuery.trim().length > 0;
+
+  // Search covers all loaded audits, not only open ones
+  const searchResults = useMemo(() => {
+    if (!isSearching) return [];
     const q = searchQuery.toLowerCase().trim();
     return activeAudits.filter(
       (a) =>
         a.trackingNumber.toLowerCase().includes(q) ||
         a.locationName.toLowerCase().includes(q) ||
         (a.category && a.category.toLowerCase().includes(q)) ||
-        (a.plantName && a.plantName.toLowerCase().includes(q))
+        (a.templateTitle && a.templateTitle.toLowerCase().includes(q)) ||
+        (a.plantName && a.plantName.toLowerCase().includes(q)),
     );
-  }, [activeAudits, searchQuery]);
+  }, [activeAudits, searchQuery, isSearching]);
+
+  const listed = isSearching ? searchResults : openAudits;
+  const visible = listed.slice(0, isTablet ? 4 : 3);
+
+  // Shortcuts depend on what the role may do
+  const quickActions = useMemo<QuickAction[]>(() => {
+    const actions: QuickAction[] = [];
+    if (canConduct) {
+      actions.push({ key: 'start', label: 'Start audit', icon: 'clipboard-outline', onPress: onStartAudit, primary: true });
+    }
+    actions.push({ key: 'scan', label: 'Scan', icon: 'scan-outline', onPress: onOpenScanner, accessibilityLabel: 'Scan an area QR code' });
+    if (onReport) {
+      actions.push({ key: 'report', label: 'Report', icon: 'alert-circle-outline', onPress: onReport, accessibilityLabel: 'Report an abnormality' });
+    }
+    actions.push({ key: 'redtag', label: 'Red tag', icon: 'pricetag-outline', onPress: onRedTag, accessibilityLabel: 'Red tag an item' });
+    if (!canConduct) {
+      actions.push({ key: 'areas', label: 'My areas', icon: 'location-outline', onPress: onOpenAreas });
+    }
+    return actions;
+  }, [canConduct, onStartAudit, onOpenScanner, onReport, onRedTag, onOpenAreas]);
 
   const [localRefreshing, setLocalRefreshing] = useState(false);
 
@@ -106,188 +136,111 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
         refreshControl={
           <RefreshControl
-            refreshing={isRefreshing || localRefreshing}
+            refreshing={!!isRefreshing || localRefreshing}
             onRefresh={handleRefresh}
             colors={[COLORS.primary]}
             tintColor={COLORS.primary}
           />
         }
       >
-        {/* 1. Header with dynamic personalized auditor greeting */}
         <Header
           isOffline={isOffline}
-          onToggleOffline={onToggleOffline}
+          onStatusPress={onStatusPress}
           pendingSyncCount={pendingSyncCount}
           onSyncPress={onSyncPress}
           onProfilePress={onOpenProfile}
         />
 
-        {/* 2. Offline Mode Advisory Banner */}
         {isOffline && (
-          <View style={styles.offlineBanner}>
-            <View style={styles.offlineBannerLeft}>
-              <Ionicons name="cloud-offline" size={18} color="#D97706" />
-              <View style={styles.offlineTextWrap}>
-                <Text style={styles.offlineBannerTitle}>Offline Mode Active</Text>
-                <Text style={styles.offlineBannerSubtitle}>
-                  Audits & photos stored on device. Auto-syncs when online.
-                </Text>
-              </View>
+          <View style={styles.offlineBanner} accessibilityLiveRegion="polite">
+            <Ionicons name="cloud-offline-outline" size={20} color={COLORS.warning} />
+            <View style={styles.offlineTextWrap}>
+              <Text style={styles.offlineTitle}>You are offline</Text>
+              <Text style={styles.offlineText}>Audits, reports and photos are saved on this device and sent when you are back online.</Text>
             </View>
             {pendingSyncCount > 0 && (
-              <TouchableOpacity
-                style={styles.offlineSyncBtn}
+              <Button
+                label={`Sync (${pendingSyncCount})`}
                 onPress={onSyncPress}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.offlineSyncBtnText}>Sync ({pendingSyncCount})</Text>
-              </TouchableOpacity>
+                variant="secondary"
+                size="sm"
+                accessibilityLabel={`Sync ${pendingSyncCount} waiting ${pendingSyncCount === 1 ? 'item' : 'items'}`}
+              />
             )}
           </View>
         )}
 
-        {/* 3. 5S Search Bar with Area Scanner Trigger */}
-        <SearchBar
-          value={searchQuery}
-          onChangeText={onSearchChange}
-          onScanPress={onOpenScanner}
-        />
+        <SearchBar value={searchQuery} onChangeText={onSearchChange} />
 
-        {/* 4. Live 5S Operations Cockpit KPI Strip */}
         <View style={styles.kpiRow}>
-          {/* Card 1: 5S Health Score */}
-          <View style={[styles.kpiCard, styles.kpiCardGreen]}>
-            <View style={styles.kpiTop}>
-              <Text style={styles.kpiValue}>{avgComplianceScore}%</Text>
-              <View style={styles.kpiIconGreen}>
-                <Ionicons name="shield-checkmark" size={15} color="#059669" />
-              </View>
-            </View>
-            <Text style={styles.kpiLabel}>Plant 5S Index</Text>
-            <Text style={styles.kpiSub}>Target &ge; 85%</Text>
-          </View>
-
-          {/* Card 2: Active Audits */}
-          <TouchableOpacity
-            style={[styles.kpiCard, styles.kpiCardBlue]}
+          <StatTile
+            value={scoreSummary ? `${scoreSummary.average}%` : '–'}
+            label="Average score"
+            hint={scoreSummary ? `${scoreSummary.count} signed off` : 'None signed off'}
+            icon="ribbon-outline"
+            tone="success"
             onPress={onSeeAllAudits}
-            activeOpacity={0.8}
-          >
-            <View style={styles.kpiTop}>
-              <Text style={styles.kpiValue}>{inProgressAudits.length}</Text>
-              <View style={styles.kpiIconBlue}>
-                <Ionicons name="time" size={15} color="#2563EB" />
-              </View>
-            </View>
-            <Text style={styles.kpiLabel}>Active Audits</Text>
-            <Text style={styles.kpiSub}>{scheduledAudits.length} Scheduled</Text>
-          </TouchableOpacity>
-
-          {/* Card 3: Resolved CAPA / Actions */}
-          <TouchableOpacity
-            style={[styles.kpiCard, styles.kpiCardOrange]}
-            onPress={onMore}
-            activeOpacity={0.8}
-          >
-            <View style={styles.kpiTop}>
-              <Text style={styles.kpiValue}>{userStats?.capasClosed || 32}</Text>
-              <View style={styles.kpiIconOrange}>
-                <Ionicons name="checkmark-done" size={15} color="#EA580C" />
-              </View>
-            </View>
-            <Text style={styles.kpiLabel}>Closed CAPAs</Text>
-            <Text style={styles.kpiSub}>Continuous Imp.</Text>
-          </TouchableOpacity>
+          />
+          <StatTile
+            value={String(inProgressCount)}
+            label="In progress"
+            hint={canConduct ? `${scheduledCount} scheduled` : `${awaitingSignOffCount} to sign off`}
+            icon="time-outline"
+            tone="info"
+            onPress={onSeeAllAudits}
+          />
+          <StatTile
+            value={String(findingsCount)}
+            label="Findings"
+            hint="From audits"
+            icon="alert-circle-outline"
+            tone="warning"
+            onPress={onSeeAllAudits}
+          />
         </View>
 
-        {/* 5. 4-Grid Quick Actions */}
-        <QuickActions
-          onStartAudit={onStartAudit}
-          onTrackOrder={onTrackOrder}
-          onSchedule={onSchedule}
-          onMore={onMore}
-        />
+        <QuickActions actions={quickActions} />
 
-        {/* 6. Peach Hero Card with 5S Workplace Excellence Banner */}
-        <HeroCard
-          onPressAction={onStartAudit}
-          title={'Sustaining\nWorkplace\nExcellence.'}
-          subtitle="1S SORT • 2S ORDER • 3S SHINE • 4S STD • 5S SUSTAIN"
-          description={'Audit shopfloors. Verify visual standards.\nEliminate waste across all plant lines.'}
-          buttonText="Start Inspection"
-        />
-
-        {/* 7. Active 5S Audit Execution Section Header */}
-        <View style={styles.sectionHeader}>
-          <View style={styles.sectionHeaderLeft}>
-            <Text style={styles.sectionTitle}>Active 5S Audits</Text>
-            <View style={styles.badgePill}>
-              <Text style={styles.badgePillText}>{filteredAudits.length}</Text>
-            </View>
-          </View>
-          <TouchableOpacity
-            onPress={onSeeAllAudits}
-            activeOpacity={0.7}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Text style={styles.seeAllText}>
-              View All ({activeAudits.length}) &gt;
-            </Text>
-          </TouchableOpacity>
+        <View style={styles.section}>
+          <SectionHeader
+            title={isSearching ? 'Search results' : 'In progress & upcoming'}
+            count={listed.length}
+            actionLabel={listed.length > visible.length || !isSearching ? 'See all' : undefined}
+            onAction={onSeeAllAudits}
+          />
         </View>
 
-        {/* 8. Active 5S Audit Cards List or Empty States */}
-        {filteredAudits.length > 0 ? (
-          <View style={isTablet ? styles.tabletAuditGrid : undefined}>
-            {filteredAudits.slice(0, isTablet ? 4 : 3).map((item) => (
-              <View key={item.id} style={isTablet ? styles.tabletAuditCardWrap : undefined}>
-                <ActiveAuditCard
-                  audit={item}
-                  onPress={onSelectAudit}
-                  showHeader={false}
-                />
+        {visible.length > 0 ? (
+          <View style={isTablet ? styles.tabletGrid : undefined}>
+            {visible.map((item) => (
+              <View key={item.id} style={isTablet ? styles.tabletCell : undefined}>
+                <ActiveAuditCard audit={item} onPress={onSelectAudit} />
               </View>
             ))}
           </View>
-        ) : searchQuery.trim().length > 0 ? (
-          /* Empty Search State */
-          <View style={[styles.emptyContainer, SHADOWS.soft]}>
-            <View style={styles.emptyIconCircle}>
-              <Ionicons name="search" size={26} color={COLORS.primary} />
-            </View>
-            <Text style={styles.emptyTitle}>No matching audits found</Text>
-            <Text style={styles.emptySubtitle}>
-              No active inspection matches "{searchQuery}". Try searching by workstation, plant zone, or audit ID.
-            </Text>
-            <TouchableOpacity
-              style={styles.clearSearchBtn}
-              onPress={() => onSearchChange('')}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.clearSearchText}>Clear Search Filter</Text>
-            </TouchableOpacity>
-          </View>
+        ) : isSearching ? (
+          <EmptyState
+            icon="search"
+            title="No matching audits"
+            message={`Nothing matches "${searchQuery.trim()}". Search by audit code, area name or area code.`}
+            actionLabel="Clear search"
+            onAction={() => onSearchChange('')}
+          />
         ) : (
-          /* Empty Audits State */
-          <View style={[styles.emptyContainer, SHADOWS.soft]}>
-            <View style={styles.emptyIconCircle}>
-              <Ionicons name="clipboard-outline" size={26} color={COLORS.primary} />
-            </View>
-            <Text style={styles.emptyTitle}>No Active Audits</Text>
-            <Text style={styles.emptySubtitle}>
-              All scheduled 5S audits are complete. Scan a workstation QR code to initiate a new inspection.
-            </Text>
-            <TouchableOpacity
-              style={styles.clearSearchBtn}
-              onPress={onOpenScanner}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="scan-outline" size={16} color="#FFFFFF" style={{ marginRight: 6 }} />
-              <Text style={styles.clearSearchTextWhite}>Scan Area QR Code</Text>
-            </TouchableOpacity>
-          </View>
+          <EmptyState
+            icon="clipboard-outline"
+            title="Nothing in progress or scheduled"
+            message={
+              canConduct
+                ? 'Scan an area QR code to start a new audit.'
+                : 'Audits of your areas will appear here when an auditor starts them.'
+            }
+            actionLabel={canConduct ? 'Scan an area' : undefined}
+            onAction={canConduct ? onOpenScanner : undefined}
+          />
         )}
       </ScrollView>
     </View>
@@ -295,224 +248,30 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F8F9FB',
-  },
-  scrollContent: {
-    paddingTop: 8,
-    paddingBottom: 95, // Refined bottom padding to align with lowered bottom bar
-  },
+  container: { flex: 1, backgroundColor: COLORS.background },
+  scrollContent: { paddingBottom: BOTTOM_NAV_CLEARANCE },
   offlineBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#FFFBEB',
+    gap: SPACING.md,
+    backgroundColor: COLORS.warningSoft,
     borderWidth: 1,
-    borderColor: '#FDE68A',
-    borderRadius: 16,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    marginHorizontal: 20,
-    marginBottom: 16,
+    borderColor: COLORS.warningBorder,
+    borderRadius: RADIUS.lg,
+    padding: SPACING.md,
+    marginHorizontal: SPACING.screen,
+    marginBottom: SPACING.lg,
   },
-  offlineBannerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    marginRight: 10,
-  },
-  offlineTextWrap: {
-    marginLeft: 10,
-    flex: 1,
-  },
-  offlineBannerTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#92400E',
-  },
-  offlineBannerSubtitle: {
-    fontSize: 10.5,
-    color: '#B45309',
-    marginTop: 1,
-  },
-  offlineSyncBtn: {
-    backgroundColor: '#D97706',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 10,
-  },
-  offlineSyncBtnText: {
-    color: '#FFFFFF',
-    fontSize: 11,
-    fontWeight: '700',
-  },
+  offlineTextWrap: { flex: 1, minWidth: 0 },
+  offlineTitle: { ...TYPE.label, color: COLORS.warning },
+  offlineText: { ...TYPE.caption, color: COLORS.textDark, marginTop: 2 },
   kpiRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    marginBottom: 20,
-    gap: 10,
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.screen,
+    marginBottom: SPACING.xl,
   },
-  kpiCard: {
-    flex: 1,
-    borderRadius: 16,
-    padding: 12,
-    borderWidth: 1,
-  },
-  kpiCardGreen: {
-    backgroundColor: '#F0FDF4',
-    borderColor: '#DCFCE7',
-  },
-  kpiCardBlue: {
-    backgroundColor: '#EFF6FF',
-    borderColor: '#DBEAFE',
-  },
-  kpiCardOrange: {
-    backgroundColor: '#FFF7ED',
-    borderColor: '#FFEDD5',
-  },
-  kpiTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  kpiValue: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  kpiIconGreen: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#DCFCE7',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  kpiIconBlue: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#DBEAFE',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  kpiIconOrange: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#FFEDD5',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  kpiLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  kpiSub: {
-    fontSize: 9.5,
-    color: COLORS.textMuted,
-    marginTop: 2,
-    fontWeight: '500',
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    marginBottom: 12,
-  },
-  sectionHeaderLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '800',
-    color: COLORS.textDark,
-    letterSpacing: -0.3,
-  },
-  badgePill: {
-    backgroundColor: '#FFF0EA',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#FFD7C7',
-  },
-  badgePillText: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: COLORS.primary,
-  },
-  seeAllText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
-  emptyContainer: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 24,
-    marginHorizontal: 20,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#F0F2F5',
-    marginBottom: 20,
-  },
-  emptyIconCircle: {
-    width: 54,
-    height: 54,
-    borderRadius: 27,
-    backgroundColor: '#FFF4EE',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 12,
-  },
-  emptyTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: COLORS.textDark,
-    marginBottom: 6,
-    textAlign: 'center',
-  },
-  emptySubtitle: {
-    fontSize: 12,
-    color: COLORS.textMedium,
-    textAlign: 'center',
-    lineHeight: 18,
-    marginBottom: 16,
-    paddingHorizontal: 12,
-  },
-  clearSearchBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.primary,
-    paddingVertical: 9,
-    paddingHorizontal: 18,
-    borderRadius: 16,
-  },
-  clearSearchText: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  clearSearchTextWhite: {
-    color: '#FFFFFF',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  tabletAuditGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 14,
-    justifyContent: 'space-between',
-  },
-  tabletAuditCardWrap: {
-    width: '48.8%',
-  },
+  section: { paddingHorizontal: SPACING.screen },
+  tabletGrid: { flexDirection: 'row', flexWrap: 'wrap' },
+  tabletCell: { width: '50%' },
 });

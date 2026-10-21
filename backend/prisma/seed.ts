@@ -1,41 +1,188 @@
-import { PrismaClient } from '@prisma/client';
+/**
+ * Demo data: one company, one plant, four areas.
+ *
+ * SkilGlobal Precision Manufacturing Ltd runs the Bengaluru Plant with two departments:
+ *   - Machining: CNC Machining Cell and Tool Crib (area owner Arun Patel, department head Suresh Menon)
+ *   - Assembly:  Assembly Line 1 and Packing & Dispatch (area owner Deepa Krishnan; Packing also holds red-tagged items)
+ *
+ * Who is who (password for everyone: Admin@123456):
+ *   Vikram Malhotra  superadmin@skilglobal.com         platform super admin
+ *   Pooja Sharma     admin@skilglobal.com              organization admin
+ *   Rajesh Kumar     planthead.blr@skilglobal.com      plant head (Bengaluru Plant)
+ *   Sneha Reddy      coordinator.5s@skilglobal.com     5S coordinator: owns standards, raises and verifies actions
+ *   Suresh Menon     depthead.machining@skilglobal.com head of Machining
+ *   Arun Patel       owner.cnc01@skilglobal.com        area owner, Machining (badge BADGE-OP-049, PIN 5544)
+ *   Deepa Krishnan   owner.asm01@skilglobal.com        area owner, Assembly (badge BADGE-OP-050, PIN 6655)
+ *   Amit Joshi       auditor.lead@skilglobal.com       auditor: does the monthly audits (badge BADGE-AUD-001, PIN 7766)
+ *   Kavita Iyer      executive@skilglobal.com          executive (read-only dashboards)
+ *   Ravi Singh       operator.ravi@skilglobal.com      assembly operator: reports problems he sees
+ *
+ * Story: Amit audits all four areas once a month with the '5S Area Audit'. Scores improved over the last three
+ * months and this month's audits are planned. Open work: a few observations, four corrective actions (one of
+ * them overdue) and four red tags at different stages. Recognition: three floating trophies are held (with past
+ * holders in the hall of fame) and colleagues have sent each other a dozen kudos over the last two months.
+ *
+ * Photos: every area, finding, fix, standard and red tag has an illustrated sample photo (see seed-images.ts), stored
+ * like an upload (file storage + StoredFile row with a thumbnail), and the organization has a logo.
+ *
+ * Re-runnable: everything except the subscription plan catalogue is wiped first.
+ */
+import { Prisma, PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
+import { createHash, randomUUID } from 'crypto';
+import sharp = require('../src/core/storage/sharp');
+import { createStorageDriver } from '../src/core/storage/storage.driver';
+import { FILE_PATH } from '../src/core/storage/files.service';
+import { MAX_RATING, ScoringQuestion, scoreAudit } from '../src/modules/audit-executions/scoring';
+import { renderLogo, renderScene, SceneName } from './seed-images';
 
 const prisma = new PrismaClient();
 
-async function main() {
-  console.log('🌱 Seeding Phase 1 & Phase 2 Masters & Template Engine...');
+const DAY_MS = 86400000;
+const now = new Date();
 
-  // 1. Tenants
-  const tenant1 = await prisma.tenant.upsert({
-    where: { slug: 'skilglobal-mfg' },
-    update: {},
-    create: {
+/** `days` from now (negative = in the past), optionally at a fixed local hour. */
+function daysFromNow(days: number, hour?: number): Date {
+  const d = new Date(now.getTime() + days * DAY_MS);
+  if (hour !== undefined) d.setHours(hour, 0, 0, 0);
+  return d;
+}
+
+/** A day in the month `monthsAgo` calendar months before this one. */
+function dayInPastMonth(monthsAgo: number, day: number, hour: number, minute = 0): Date {
+  return new Date(now.getFullYear(), now.getMonth() - monthsAgo, day, hour, minute, 0, 0);
+}
+
+const isoDay = (d: Date) => d.toISOString().slice(0, 10);
+
+const storage = createStorageDriver();
+
+/**
+ * Stores an image the way an upload is stored (same key layout, thumbnail and StoredFile row as FilesService.store)
+ * and returns the canonical reference that records hold.
+ */
+async function storeImage(tenantId: string, uploadedById: string | null, buffer: Buffer, contentType: 'image/jpeg' | 'image/png', originalName: string, source: string, createdAt = now): Promise<string> {
+  const id = randomUUID();
+  const extension = contentType === 'image/png' ? 'png' : 'jpg';
+  const key = `${tenantId}/${createdAt.getUTCFullYear()}/${String(createdAt.getUTCMonth() + 1).padStart(2, '0')}/${id}.${extension}`;
+  const meta = await sharp(buffer).metadata();
+  const thumb = await sharp(buffer).resize({ width: 320, withoutEnlargement: true }).webp({ quality: 70 }).toBuffer();
+  await storage.put(`${key}.thumb.webp`, thumb, 'image/webp');
+  await storage.put(key, buffer, contentType);
+  await prisma.storedFile.create({
+    data: {
+      id,
+      tenantId,
+      storageKey: key,
+      thumbnailKey: `${key}.thumb.webp`,
+      originalName,
+      contentType,
+      sizeBytes: buffer.length,
+      sha256: createHash('sha256').update(buffer).digest('hex'),
+      width: meta.width ?? null,
+      height: meta.height ?? null,
+      uploadedById,
+      source,
+      createdAt,
+    },
+  });
+  return `${FILE_PATH}${id}`;
+}
+
+/**
+ * Next code for a numbering prefix, in the same format the app generates
+ * (`<KIND>-<first 4 letters/digits of the area code>-<year>-<0001>`), so new records continue the sequence.
+ */
+const sequences = new Map<string, number>();
+function nextCode(kind: string, areaCode: string, at: Date): string {
+  const fragment = areaCode.replace(/[^A-Z0-9]/gi, '').slice(0, 4).toUpperCase() || 'LOC';
+  const prefix = `${kind}-${fragment}-${at.getFullYear()}-`;
+  const n = (sequences.get(prefix) ?? 0) + 1;
+  sequences.set(prefix, n);
+  return `${prefix}${String(n).padStart(4, '0')}`;
+}
+
+/** Every table except "Plan" (the subscription plan catalogue) and "ActivityLog" (append-only: a trigger rejects TRUNCATE). */
+const TABLES_TO_WIPE = [
+  'Tenant', 'User', 'Role', 'Permission', 'UserRoleAssignment', 'OrgNode', 'Location', 'LocationTimeline',
+  'LocationDocument', 'LocationEvidence', 'LocationAuditLog', 'Standard', 'StandardRevision', 'AuditTemplate',
+  'AuditTemplateVersion', 'AuditTemplateSection', 'AuditTemplateQuestion', 'AuditSchedule', 'ScheduledAuditInstance',
+  'AuditExecution', 'AuditAnswer', 'Observation', 'CorrectiveAction', 'ActionHistoryLog', 'RedTag', 'TrophyAward',
+  'Kudos', 'TrainingCertificate', 'TrainingProgress', 'Notification', 'PushDevice', 'StoredFile', 'AuthSession',
+  'PasswordResetToken', 'ApiKey', 'WebhookEndpoint', 'WebhookDelivery', 'JobLease', 'RoutineItem', 'RoutineCheck',
+];
+
+interface UserSeed {
+  key: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  jobTitle: string;
+  department: string;
+  roleCode: string;
+  isSuperAdmin?: boolean;
+  badgeId?: string;
+  pin?: string;
+  /** Org node the role applies to (line managers see only their part of the organization). */
+  scopeNode?: 'plant' | 'machining';
+}
+
+interface QuestionSeed {
+  code: string;
+  text: string;
+  guidance: string;
+  type: 'YES_NO' | 'NUMERIC_0_5';
+  severity: 'MINOR' | 'MODERATE' | 'MAJOR' | 'CRITICAL';
+  isCritical?: boolean;
+  scoreCapOnFail?: number;
+  standardKey?: string;
+}
+
+interface SectionSeed {
+  category: string;
+  title: string;
+  description: string;
+  questions: QuestionSeed[];
+}
+
+interface SeededQuestion {
+  id: string;
+  code: string;
+  sectionId: string;
+  category: string;
+  type: QuestionSeed['type'];
+  severity: QuestionSeed['severity'];
+  isCritical: boolean;
+}
+
+async function main() {
+  console.log('Seeding demo data for SkilGlobal Precision Manufacturing Ltd...');
+
+  // ---------------------------------------------------------------- 1. Wipe
+  await prisma.$executeRawUnsafe(`TRUNCATE TABLE ${TABLES_TO_WIPE.map((t) => `"${t}"`).join(', ')} RESTART IDENTITY CASCADE`);
+
+  // ---------------------------------------------------------------- 2. Tenant
+  // Plans are created by the API on first start; link the Enterprise plan when it already exists
+  const plan = await prisma.plan.findUnique({ where: { code: 'ENTERPRISE' } });
+  const tenant = await prisma.tenant.create({
+    data: {
       name: 'SkilGlobal Precision Manufacturing Ltd',
       slug: 'skilglobal-mfg',
-      industry: 'Automotive & Heavy Engineering',
-      logoUrl: 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?w=150',
-      storageQuotaMb: 10240,
-      storageUsedMb: 420,
       status: 'ACTIVE',
+      industry: 'Manufacturing',
+      planId: plan?.id ?? null,
+      ...(plan ? { storageQuotaMb: plan.storageQuotaMb } : {}),
+      billingEmail: 'admin@skilglobal.com',
       hierarchyConfig: JSON.stringify(['Org', 'Plant', 'Department', 'Area', 'Zone', 'Workstation']),
-      settings: JSON.stringify({ brandColor: '#1E3A8A', defaultAuditFrequency: 'WEEKLY' }),
+      settings: JSON.stringify({
+        brandColor: '#1E3A8A',
+        defaultAuditFrequency: 'MONTHLY',
+      }),
     },
   });
+  const tenantId = tenant.id;
 
-  const tenant2 = await prisma.tenant.upsert({
-    where: { slug: 'apex-aero' },
-    update: {},
-    create: {
-      name: 'Apex Aerospace Components Inc',
-      slug: 'apex-aero',
-      industry: 'Aerospace & Defence',
-      storageQuotaMb: 5120,
-      status: 'ACTIVE',
-    },
-  });
-
-  // 2. Roles
+  // ---------------------------------------------------------------- 3. Roles
   const rolesData = [
     { code: 'SUPER_ADMIN', name: 'SaaS Super Administrator', desc: 'Full multi-tenant governance.' },
     { code: 'ORG_ADMIN', name: 'Organisation Administrator', desc: 'Full administrative control.' },
@@ -46,1117 +193,932 @@ async function main() {
     { code: 'AUDITOR', name: 'Certified 5S Auditor', desc: 'Conducts mobile audits and logs findings.' },
     { code: 'EMPLOYEE', name: 'Shop-Floor Employee', desc: 'Report abnormalities.' },
     { code: 'EXTERNAL_AUDITOR', name: 'External Consultant', desc: 'Read-only assessment.' },
+    { code: 'EXECUTIVE', name: 'Executive Management', desc: 'Read-only dashboards, summaries and comparisons.' },
   ];
-
-  const roleMap = new Map<string, string>();
+  const roleIds = new Map<string, string>();
   for (const r of rolesData) {
-    const role = await prisma.role.upsert({
-      where: { tenantId_code: { tenantId: tenant1.id, code: r.code } },
-      update: {},
-      create: { tenantId: tenant1.id, code: r.code, name: r.name, description: r.desc, isSystemDefault: true },
+    const role = await prisma.role.create({
+      data: { tenantId, code: r.code, name: r.name, description: r.desc, isSystemDefault: true },
     });
-    roleMap.set(r.code, role.id);
+    roleIds.set(r.code, role.id);
   }
 
-  // 3. Users
-  const passwordHash = await bcrypt.hash('Admin@123456', 10);
-  const usersData = [
-    { email: 'superadmin@skilglobal.com', firstName: 'Vikram', lastName: 'Malhotra', jobTitle: 'Principal SaaS Admin', dept: 'Executive', roleCode: 'SUPER_ADMIN', isSuperAdmin: true },
-    { email: 'admin@skilglobal.com', firstName: 'Pooja', lastName: 'Sharma', jobTitle: 'Head of Operational Excellence', dept: 'Operations', roleCode: 'ORG_ADMIN', isSuperAdmin: false },
-    { email: 'planthead.blr@skilglobal.com', firstName: 'Rajesh', lastName: 'Kumar', jobTitle: 'Plant General Manager', dept: 'Plant 1 Operations', roleCode: 'PLANT_HEAD', isSuperAdmin: false },
-    { email: 'coordinator.5s@skilglobal.com', firstName: 'Sneha', lastName: 'Reddy', jobTitle: 'Lead 5S Champion', dept: 'Continuous Improvement', roleCode: 'COORDINATOR_5S', isSuperAdmin: false },
-    { email: 'depthead.machining@skilglobal.com', firstName: 'Suresh', lastName: 'Menon', jobTitle: 'Machining Operations Manager', dept: 'Machining & Fabrication', roleCode: 'DEPT_HEAD', isSuperAdmin: false },
-    { email: 'owner.cnc01@skilglobal.com', firstName: 'Arun', lastName: 'Patel', jobTitle: 'CNC Line Team Leader', dept: 'Machining', roleCode: 'AREA_OWNER', isSuperAdmin: false },
-    { email: 'owner.asm01@skilglobal.com', firstName: 'Deepa', lastName: 'Krishnan', jobTitle: 'Assembly Lead', dept: 'Assembly', roleCode: 'AREA_OWNER', isSuperAdmin: false },
-    { email: 'auditor.lead@skilglobal.com', firstName: 'Amit', lastName: 'Joshi', jobTitle: 'Senior Quality Auditor', dept: 'Quality Assurance', roleCode: 'AUDITOR', isSuperAdmin: false },
-  ];
+  // ---------------------------------------------------------------- 4. Organization
+  const company = await prisma.orgNode.create({
+    data: { tenantId, name: 'SkilGlobal Precision Manufacturing Ltd', code: 'SKILGLOBAL', nodeType: 'ENTERPRISE', path: `/${tenantId}/SKILGLOBAL/`, depth: 0 },
+  });
+  const plant = await prisma.orgNode.create({
+    data: { tenantId, parentId: company.id, name: 'Bengaluru Plant', code: 'BLR', nodeType: 'PLANT', path: `${company.path}BLR/`, depth: 1, sortOrder: 1 },
+  });
+  const machining = await prisma.orgNode.create({
+    data: { tenantId, parentId: plant.id, name: 'Machining', code: 'BLR-MACH', nodeType: 'DEPARTMENT', path: `${plant.path}BLR-MACH/`, depth: 2, sortOrder: 1 },
+  });
+  const assembly = await prisma.orgNode.create({
+    data: { tenantId, parentId: plant.id, name: 'Assembly', code: 'BLR-ASM', nodeType: 'DEPARTMENT', path: `${plant.path}BLR-ASM/`, depth: 2, sortOrder: 2 },
+  });
+  const scopeNodes = { plant: plant.id, machining: machining.id };
 
-  const userMap = new Map<string, string>();
+  // ---------------------------------------------------------------- 5. Users
+  const passwordHash = await bcrypt.hash('Admin@123456', 10);
+  const usersData: UserSeed[] = [
+    { key: 'vikram', email: 'superadmin@skilglobal.com', firstName: 'Vikram', lastName: 'Malhotra', jobTitle: 'Platform Administrator', department: 'IT', roleCode: 'SUPER_ADMIN', isSuperAdmin: true },
+    { key: 'pooja', email: 'admin@skilglobal.com', firstName: 'Pooja', lastName: 'Sharma', jobTitle: 'Operations Excellence Manager', department: 'Operations', roleCode: 'ORG_ADMIN' },
+    { key: 'rajesh', email: 'planthead.blr@skilglobal.com', firstName: 'Rajesh', lastName: 'Kumar', jobTitle: 'Plant Head', department: 'Bengaluru Plant', roleCode: 'PLANT_HEAD', scopeNode: 'plant' },
+    { key: 'sneha', email: 'coordinator.5s@skilglobal.com', firstName: 'Sneha', lastName: 'Reddy', jobTitle: '5S Coordinator', department: 'Continuous Improvement', roleCode: 'COORDINATOR_5S' },
+    { key: 'suresh', email: 'depthead.machining@skilglobal.com', firstName: 'Suresh', lastName: 'Menon', jobTitle: 'Machining Manager', department: 'Machining', roleCode: 'DEPT_HEAD', scopeNode: 'machining' },
+    { key: 'arun', email: 'owner.cnc01@skilglobal.com', firstName: 'Arun', lastName: 'Patel', jobTitle: 'CNC Team Leader', department: 'Machining', roleCode: 'AREA_OWNER', badgeId: 'BADGE-OP-049', pin: '5544' },
+    { key: 'deepa', email: 'owner.asm01@skilglobal.com', firstName: 'Deepa', lastName: 'Krishnan', jobTitle: 'Assembly Team Leader', department: 'Assembly', roleCode: 'AREA_OWNER', badgeId: 'BADGE-OP-050', pin: '6655' },
+    { key: 'amit', email: 'auditor.lead@skilglobal.com', firstName: 'Amit', lastName: 'Joshi', jobTitle: '5S Auditor', department: 'Quality', roleCode: 'AUDITOR', badgeId: 'BADGE-AUD-001', pin: '7766' },
+    { key: 'kavita', email: 'executive@skilglobal.com', firstName: 'Kavita', lastName: 'Iyer', jobTitle: 'Chief Operating Officer', department: 'Management', roleCode: 'EXECUTIVE' },
+    { key: 'ravi', email: 'operator.ravi@skilglobal.com', firstName: 'Ravi', lastName: 'Singh', jobTitle: 'Assembly Operator', department: 'Assembly', roleCode: 'EMPLOYEE' },
+  ];
+  const userIds = new Map<string, string>();
+  const userNames = new Map<string, string>();
   for (const u of usersData) {
-    const user = await prisma.user.upsert({
-      where: { tenantId_email: { tenantId: tenant1.id, email: u.email } },
-      update: {
-        firstName: u.firstName,
-        lastName: u.lastName,
-        jobTitle: u.jobTitle,
-        department: u.dept,
-      },
-      create: {
-        tenantId: tenant1.id,
+    const user = await prisma.user.create({
+      data: {
+        tenantId,
         email: u.email,
         passwordHash,
         firstName: u.firstName,
         lastName: u.lastName,
         jobTitle: u.jobTitle,
-        department: u.dept,
-        isSuperAdmin: u.isSuperAdmin,
+        department: u.department,
         status: 'ACTIVE',
+        isSuperAdmin: u.isSuperAdmin ?? false,
+        ...(u.badgeId && u.pin ? { badgeId: u.badgeId, pinHash: await bcrypt.hash(u.pin, 10) } : {}),
       },
     });
-    userMap.set(u.email, user.id);
-
-    const roleId = roleMap.get(u.roleCode);
-    if (roleId) {
-      await prisma.userRoleAssignment.create({
-        data: { tenantId: tenant1.id, userId: user.id, roleId },
-      });
-    }
+    await prisma.userRoleAssignment.create({
+      data: { tenantId, userId: user.id, roleId: roleIds.get(u.roleCode), orgNodeId: u.scopeNode ? scopeNodes[u.scopeNode] : null },
+    });
+    userIds.set(u.key, user.id);
+    userNames.set(u.key, `${u.firstName} ${u.lastName}`);
   }
+  const uid = (key: string) => userIds.get(key);
+  const uname = (key: string) => userNames.get(key);
 
-  // 4. Org Hierarchy
-  const rootNode = await prisma.orgNode.upsert({
-    where: { tenantId_code: { tenantId: tenant1.id, code: 'SKIL-GLOBAL-CORP' } },
-    update: {},
-    create: { tenantId: tenant1.id, name: 'SkilGlobal Global Corp', code: 'SKIL-GLOBAL-CORP', nodeType: 'ENTERPRISE', path: `/${tenant1.id}/`, depth: 0 },
-  });
+  // ---------------------------------------------------------------- Photos and logo
+  /** One stored file per sample photo; records showing the same scene share it. */
+  const photoRefs = new Map<SceneName, string>();
+  const photo = async (scene: SceneName, uploadedBy: string, source: string, at: Date): Promise<string> => {
+    if (!photoRefs.has(scene)) {
+      photoRefs.set(scene, await storeImage(tenantId, uid(uploadedBy), await renderScene(scene), 'image/jpeg', `${scene}.jpg`, source, at));
+    }
+    return photoRefs.get(scene);
+  };
+  const logoUrl = await storeImage(tenantId, uid('pooja'), await renderLogo(), 'image/png', 'skilglobal-logo.png', 'tenants.logoUrl');
+  await prisma.tenant.update({ where: { id: tenantId }, data: { logoUrl } });
 
-  const plant1 = await prisma.orgNode.upsert({
-    where: { tenantId_code: { tenantId: tenant1.id, code: 'BLR-PLANT-01' } },
-    update: {},
-    create: { tenantId: tenant1.id, parentId: rootNode.id, name: 'Bangalore Automotive Plant Alpha', code: 'BLR-PLANT-01', nodeType: 'PLANT', path: `${rootNode.path}BLR-PLANT-01/`, depth: 1, sortOrder: 1 },
-  });
-
-  const deptMachining = await prisma.orgNode.upsert({
-    where: { tenantId_code: { tenantId: tenant1.id, code: 'BLR-DEPT-MACH' } },
-    update: {},
-    create: { tenantId: tenant1.id, parentId: plant1.id, name: 'CNC Machining & Precision Fabrication', code: 'BLR-DEPT-MACH', nodeType: 'DEPARTMENT', path: `${plant1.path}BLR-DEPT-MACH/`, depth: 2, sortOrder: 1 },
-  });
-
-  const deptAssembly = await prisma.orgNode.upsert({
-    where: { tenantId_code: { tenantId: tenant1.id, code: 'BLR-DEPT-ASM' } },
-    update: {},
-    create: { tenantId: tenant1.id, parentId: plant1.id, name: 'Main Final Assembly Lines', code: 'BLR-DEPT-ASM', nodeType: 'DEPARTMENT', path: `${plant1.path}BLR-DEPT-ASM/`, depth: 2, sortOrder: 2 },
-  });
-
-  const deptWarehouse = await prisma.orgNode.upsert({
-    where: { tenantId_code: { tenantId: tenant1.id, code: 'BLR-DEPT-WH' } },
-    update: {},
-    create: { tenantId: tenant1.id, parentId: plant1.id, name: 'Raw Materials & FG Logistics Center', code: 'BLR-DEPT-WH', nodeType: 'DEPARTMENT', path: `${plant1.path}BLR-DEPT-WH/`, depth: 2, sortOrder: 3 },
-  });
-
-  // 5. Locations
-  const loc1 = await prisma.location.upsert({
-    where: { tenantId_areaCode: { tenantId: tenant1.id, areaCode: 'LOC-BLR-MACH-CNC01' } },
-    update: {
-      name: 'Heavy CNC Milling Cell 01',
-      description: 'High-precision 5-axis DMG MORI CNC milling center with dedicated blue-foam shadow board, automated swarf chip conveyor, coolant filtration unit, and 1-meter yellow/black safety perimeter.',
-      heroPhotoUrl: '/assets/5s/cnc_workstation_clean.jpg',
-      building: 'Building A (Machining Bay)',
-      floor: 'Ground Floor - Bay 04',
-      riskLevel: 'HIGH',
-      auditFrequency: 'DAILY',
-      ownerId: userMap.get('owner.cnc01@skilglobal.com'),
-      backupOwnerId: userMap.get('depthead.machining@skilglobal.com'),
-    },
-    create: {
-      tenantId: tenant1.id,
-      orgNodeId: deptMachining.id,
-      areaCode: 'LOC-BLR-MACH-CNC01',
-      name: 'Heavy CNC Milling Cell 01',
-      locationType: 'PRODUCTION_LINE',
-      riskLevel: 'HIGH',
-      auditFrequency: 'DAILY',
-      building: 'Building A (Machining Bay)',
-      floor: 'Ground Floor - Bay 04',
-      description: 'High-precision 5-axis DMG MORI CNC milling center with dedicated blue-foam shadow board, automated swarf chip conveyor, coolant filtration unit, and 1-meter yellow/black safety perimeter.',
-      heroPhotoUrl: '/assets/5s/cnc_workstation_clean.jpg',
-      qrCodeData: `5s://${tenant1.slug}/locations/LOC-BLR-MACH-CNC01`,
-      status: 'ACTIVE',
-      ownerId: userMap.get('owner.cnc01@skilglobal.com'),
-      backupOwnerId: userMap.get('depthead.machining@skilglobal.com'),
-    },
-  });
-
-  // Location Timelines for LOC-BLR-MACH-CNC01 (5S Implementation Roadmap)
-  const timelineData = [
+  // ---------------------------------------------------------------- 6. Locations
+  const setupDate = dayInPastMonth(4, 1, 9);
+  const locationSeeds = [
     {
-      milestoneName: '1S - Workstation Sort & Red Tag Cleanout',
-      plannedStartDate: new Date(Date.now() - 14 * 86400000),
-      plannedEndDate: new Date(Date.now() - 10 * 86400000),
-      actualStartDate: new Date(Date.now() - 14 * 86400000),
-      actualEndDate: new Date(Date.now() - 10 * 86400000),
-      progressPercent: 100,
-      status: 'COMPLETED',
-      notes: 'Cleared all 18 unneeded rusted clamps, obsolete tool bits, and scrap buckets into Red Tag Holding Area.',
+      key: 'cnc', areaCode: 'LOC-BLR-MACH-CNC01', name: 'CNC Machining Cell', orgNodeId: machining.id, locationType: 'PRODUCTION_LINE',
+      riskLevel: 'HIGH', owner: 'arun', backup: 'suresh', building: 'Building A', floor: 'Ground floor',
+      description: 'Three CNC machines with a shared tool shadow board.', photo: 'cncCell' as SceneName,
     },
     {
-      milestoneName: '2S - 5-Axis Milling Shadow Board & Tool Tagging',
-      plannedStartDate: new Date(Date.now() - 10 * 86400000),
-      plannedEndDate: new Date(Date.now() - 6 * 86400000),
-      actualStartDate: new Date(Date.now() - 10 * 86400000),
-      actualEndDate: new Date(Date.now() - 6 * 86400000),
-      progressPercent: 100,
-      status: 'COMPLETED',
-      notes: 'Installed high-density two-tone blue shadow foam board with etched torque wrenches and metric collet cutouts.',
+      key: 'crib', areaCode: 'LOC-BLR-MACH-TOOL01', name: 'Tool Crib', orgNodeId: machining.id, locationType: 'WAREHOUSE_BAY',
+      riskLevel: 'LOW', owner: 'arun', backup: 'suresh', building: 'Building A', floor: 'Ground floor',
+      description: 'Storage for cutting tools, gauges and spare parts used by Machining.', photo: 'toolCrib' as SceneName,
     },
     {
-      milestoneName: '3S - Autonomous Daily Spindle & Coolant Tank Cleaning',
-      plannedStartDate: new Date(Date.now() - 6 * 86400000),
-      plannedEndDate: new Date(Date.now() - 2 * 86400000),
-      actualStartDate: new Date(Date.now() - 6 * 86400000),
-      actualEndDate: new Date(Date.now() - 2 * 86400000),
-      progressPercent: 100,
-      status: 'COMPLETED',
-      notes: 'Autonomous maintenance cleaning checklist posted with daily swarf chip tray emptying and optical lens wipe.',
+      key: 'line1', areaCode: 'LOC-BLR-ASM-LINE01', name: 'Assembly Line 1', orgNodeId: assembly.id, locationType: 'PRODUCTION_LINE',
+      riskLevel: 'MEDIUM', owner: 'deepa', backup: null, building: 'Building B', floor: 'Ground floor',
+      description: 'Six-station assembly line for gearbox housings.', photo: 'assemblyLine' as SceneName,
     },
     {
-      milestoneName: '4S - Floor Demarcation & Digital SOP QR Integration',
-      plannedStartDate: new Date(Date.now() - 2 * 86400000),
-      plannedEndDate: new Date(Date.now() + 3 * 86400000),
-      actualStartDate: new Date(Date.now() - 2 * 86400000),
-      progressPercent: 80,
-      status: 'IN_PROGRESS',
-      notes: 'High-visibility 3M floor hazard striping and 1-meter safety boundary completed; tablet digital SOP dock being installed.',
-    },
-    {
-      milestoneName: '5S - Tier-1 Kamishibai Daily Shift Handover Audit Routine',
-      plannedStartDate: new Date(Date.now() + 2 * 86400000),
-      plannedEndDate: new Date(Date.now() + 7 * 86400000),
-      progressPercent: 50,
-      status: 'IN_PROGRESS',
-      notes: 'Training shift 1 and shift 2 machine operators on 5-minute end-of-shift visual handover sign-off board.',
+      key: 'pack', areaCode: 'LOC-BLR-ASM-PACK01', name: 'Packing & Dispatch', orgNodeId: assembly.id, locationType: 'WAREHOUSE_BAY',
+      riskLevel: 'MEDIUM', owner: 'deepa', backup: null, building: 'Building B', floor: 'Ground floor',
+      description: 'Packing tables, dispatch bay and the plant red-tag holding corner.', photo: 'packing' as SceneName,
     },
   ];
-
-  for (const tl of timelineData) {
-    const existingTl = await prisma.locationTimeline.findFirst({
-      where: { tenantId: tenant1.id, locationId: loc1.id, milestoneName: tl.milestoneName },
+  const locations = new Map<string, { id: string; areaCode: string; name: string; owner: string }>();
+  for (const l of locationSeeds) {
+    const loc = await prisma.location.create({
+      data: {
+        tenantId,
+        orgNodeId: l.orgNodeId,
+        areaCode: l.areaCode,
+        name: l.name,
+        locationType: l.locationType,
+        riskLevel: l.riskLevel,
+        auditFrequency: 'MONTHLY',
+        building: l.building,
+        floor: l.floor,
+        description: l.description,
+        heroPhotoUrl: await photo(l.photo, 'pooja', 'locations.heroPhotoUrl', setupDate),
+        qrCodeData: `5s://${encodeURIComponent(tenantId)}/locations/${encodeURIComponent(l.areaCode)}`,
+        status: 'ACTIVE',
+        ownerId: uid(l.owner),
+        backupOwnerId: l.backup ? uid(l.backup) : null,
+        createdAt: setupDate,
+      },
     });
-    if (!existingTl) {
-      await prisma.locationTimeline.create({
-        data: {
-          tenantId: tenant1.id,
-          locationId: loc1.id,
-          ...tl,
-        },
-      });
-    }
+    locations.set(l.key, { id: loc.id, areaCode: loc.areaCode, name: loc.name, owner: l.owner });
   }
+  const loc = (key: string) => locations.get(key);
 
-  // Location Documents for LOC-BLR-MACH-CNC01 (SOPs, Blueprints, Safety Guides)
-  const documentsData = [
+  // ---------------------------------------------------------------- 7. Standards
+  const standardSeeds = [
     {
-      title: 'SOP-CNC-5S-DAILY-01: Daily 5-Axis CNC Autonomous Maintenance & 5S Cleaning Routine',
-      docType: 'SOP',
-      fileUrl: 'https://storage.5s-saas.com/sops/sop-cnc-daily-maintenance.pdf',
-      fileSizeKb: 1420,
-      version: '2.1',
-      uploadedById: userMap.get('coordinator.5s@skilglobal.com'),
+      key: 'shadow', code: 'STD-2S-001', title: 'Tool shadow board layout', category: 'S2_SET_IN_ORDER',
+      scopeType: 'DEPARTMENT', targetOrgNodeId: machining.id, approver: 'sneha',
+      description: 'How tools are stored on the shadow boards in Machining.',
+      rules: [
+        'Every tool has its own outlined place on the board.',
+        'Each place is labelled with the tool name.',
+        'A tool in use is replaced by a "tool in use" tag with the user\'s name.',
+        'All tools are back on the board at the end of each shift.',
+      ],
+      photos: [
+        { type: 'STANDARD_CONDITION', scene: 'toolsOnBoard' as SceneName, label: 'Correct', description: 'Every tool in its outlined place.' },
+        { type: 'CURRENT_CONDITION', scene: 'toolsOffBoard' as SceneName, label: 'Not correct', description: 'Tools left on the bench; their places on the board are empty.' },
+      ],
     },
     {
-      title: 'STD-LAYOUT-CNC01: Approved Workstation Boundary Floor Demarcation & Shadow Board Layout',
-      docType: 'LAYOUT_MAP',
-      fileUrl: 'https://storage.5s-saas.com/layouts/layout-cnc01-boundary.pdf',
-      fileSizeKb: 2850,
-      version: '1.0',
-      uploadedById: userMap.get('admin@skilglobal.com'),
+      key: 'floor', code: 'STD-2S-002', title: 'Floor marking colours', category: 'S2_SET_IN_ORDER',
+      scopeType: 'GLOBAL', targetOrgNodeId: null, approver: 'rajesh',
+      description: 'One colour scheme for floor markings across the plant.',
+      rules: [
+        'Yellow: walkways and work area borders.',
+        'Red: red-tag area and fire equipment (keep 1 metre clear).',
+        'Green: finished goods.',
+        'Blue: raw material and parts.',
+        'Damaged or faded markings are repainted within one week.',
+      ],
+      photos: [{ type: 'STANDARD_CONDITION', scene: 'floorColours' as SceneName, label: 'Colour scheme', description: 'Yellow walkways, green finished goods, blue raw material, red fire equipment box.' }],
     },
     {
-      title: 'SOP-EHS-LOTO-04: Machine Lockout/Tagout & Hydraulic Emergency Isolation Procedure',
-      docType: 'SAFETY_GUIDELINE',
-      fileUrl: 'https://storage.5s-saas.com/safety/loto-cnc-milling.pdf',
-      fileSizeKb: 980,
-      version: '3.0',
-      uploadedById: userMap.get('coordinator.5s@skilglobal.com'),
-    },
-    {
-      title: 'STD-TOOLING-SPEC-02: Approved CNC Tooling Calibrated Torque Limits & Visual Standards',
-      docType: 'CLEANING_STANDARD',
-      fileUrl: 'https://storage.5s-saas.com/standards/tooling-specs-cnc.pdf',
-      fileSizeKb: 1150,
-      version: '1.2',
-      uploadedById: userMap.get('owner.cnc01@skilglobal.com'),
+      key: 'cleaning', code: 'STD-3S-001', title: 'Daily cleaning checklist', category: 'S3_SHINE',
+      scopeType: 'GLOBAL', targetOrgNodeId: null, approver: 'sneha',
+      description: 'Ten-minute cleaning routine at the end of every shift.',
+      rules: [
+        'Sweep the floor of the work area.',
+        'Wipe machine covers and control panels.',
+        'Empty chip trays and scrap bins.',
+        'Report leaks or damage straight away.',
+        'Tick the checklist on the area board.',
+      ],
+      photos: [{ type: 'STANDARD_CONDITION', scene: 'cleanMachine' as SceneName, label: 'End of shift', description: 'Clean machine and the ticked checklist on the area board.' }],
     },
   ];
-
-  for (const doc of documentsData) {
-    const existingDoc = await prisma.locationDocument.findFirst({
-      where: { tenantId: tenant1.id, locationId: loc1.id, title: doc.title },
+  const standardIds = new Map<string, string>();
+  for (const s of standardSeeds) {
+    const standard = await prisma.standard.create({
+      data: {
+        tenantId,
+        code: s.code,
+        title: s.title,
+        category: s.category,
+        scopeType: s.scopeType,
+        targetOrgNodeId: s.targetOrgNodeId,
+        status: 'PUBLISHED',
+        createdAt: setupDate,
+      },
     });
-    if (!existingDoc) {
-      await prisma.locationDocument.create({
-        data: {
-          tenantId: tenant1.id,
-          locationId: loc1.id,
-          ...doc,
-        },
-      });
-    }
+    await prisma.standardRevision.create({
+      data: {
+        tenantId,
+        standardId: standard.id,
+        revisionNumber: '1.0',
+        description: s.description,
+        rules: JSON.stringify(s.rules),
+        referencePhotos: JSON.stringify(
+          await Promise.all(s.photos.map(async (p) => ({ type: p.type, photoUrl: await photo(p.scene, 'sneha', 'standardRevisions.referencePhotos', setupDate), label: p.label, description: p.description }))),
+        ),
+        effectiveDate: setupDate,
+        revisionComments: 'First version.',
+        authorId: uid('sneha'),
+        approvedById: uid(s.approver),
+        approvedAt: setupDate,
+        approvalComments: 'Approved for use.',
+        isCurrent: true,
+        createdAt: setupDate,
+      },
+    });
+    standardIds.set(s.key, standard.id);
   }
 
-  // Location Audit Logs for LOC-BLR-MACH-CNC01
-  const auditLogsData = [
-    {
-      actionType: 'CREATED',
-      details: 'Centralized Location Master record established for CNC Machining Bay 04 with High Risk Daily Cadence.',
-      userId: userMap.get('admin@skilglobal.com'),
-    },
-    {
-      actionType: 'OWNERSHIP_ASSIGNED',
-      details: 'Assigned Primary Owner David Chen (CNC Line Team Leader) and Backup Owner Marcus Brody (Machining Ops Manager).',
-      userId: userMap.get('admin@skilglobal.com'),
-    },
-    {
-      actionType: 'TIMELINE_UPDATED',
-      details: '1S Sort and 2S Set-in-Order milestones formally verified and signed off at 100% completion.',
-      userId: userMap.get('coordinator.5s@skilglobal.com'),
-    },
-    {
-      actionType: 'STANDARD_ATTACHED',
-      details: 'Linked approved Visual Standard STD-5S-MACH-01 (CNC Tooling & Shadow Board Standard) as baseline benchmark.',
-      userId: userMap.get('coordinator.5s@skilglobal.com'),
-    },
-  ];
-
-  for (const log of auditLogsData) {
-    const existingLog = await prisma.locationAuditLog.findFirst({
-      where: { tenantId: tenant1.id, locationId: loc1.id, actionType: log.actionType },
-    });
-    if (!existingLog) {
-      await prisma.locationAuditLog.create({
-        data: {
-          tenantId: tenant1.id,
-          locationId: loc1.id,
-          ...log,
-        },
-      });
-    }
-  }
-
-  const loc2 = await prisma.location.upsert({
-    where: { tenantId_areaCode: { tenantId: tenant1.id, areaCode: 'LOC-BLR-ASM-LINE01' } },
-    update: { heroPhotoUrl: '/assets/5s/smt_electronics_clean.jpg' },
-    create: {
-      tenantId: tenant1.id,
-      orgNodeId: deptAssembly.id,
-      areaCode: 'LOC-BLR-ASM-LINE01',
-      name: 'Chassis Main Assembly Station A',
-      locationType: 'PRODUCTION_LINE',
-      riskLevel: 'MEDIUM',
-      auditFrequency: 'WEEKLY',
-      building: 'Building B',
-      floor: '1st Floor',
-      description: 'Powertrain assembly station with pneumatic balancers and visual parts racks.',
-      heroPhotoUrl: '/assets/5s/smt_electronics_clean.jpg',
-      qrCodeData: `5s://${tenant1.slug}/locations/LOC-BLR-ASM-LINE01`,
-      status: 'ACTIVE',
-      ownerId: userMap.get('owner.asm01@skilglobal.com'),
-    },
-  });
-
-  const loc3 = await prisma.location.upsert({
-    where: { tenantId_areaCode: { tenantId: tenant1.id, areaCode: 'LOC-BLR-WH-REDTAG01' } },
-    update: { heroPhotoUrl: '/assets/5s/warehouse_racks_clean.jpg' },
-    create: {
-      tenantId: tenant1.id,
-      orgNodeId: deptWarehouse.id,
-      areaCode: 'LOC-BLR-WH-REDTAG01',
-      name: 'Central Holding & Red Tag Zone',
-      locationType: 'RED_TAG_ZONE',
-      riskLevel: 'HIGH',
-      auditFrequency: 'DAILY',
-      building: 'Logistics Annex',
-      floor: 'Ground Floor',
-      description: 'Designated 5S quarantine zone for segregated unneeded items.',
-      heroPhotoUrl: '/assets/5s/warehouse_racks_clean.jpg',
-      qrCodeData: `5s://${tenant1.slug}/locations/LOC-BLR-WH-REDTAG01`,
-      status: 'ACTIVE',
-      ownerId: userMap.get('coordinator.5s@skilglobal.com'),
-    },
-  });
-
-  // ==========================================
-  // PHASE 2 SEEDING: STANDARDS & REVISIONS
-  // ==========================================
-  console.log('📦 Seeding Phase 2: 5S Standards...');
-
-  const std1 = await prisma.standard.upsert({
-    where: { tenantId_code: { tenantId: tenant1.id, code: 'STD-5S-MACH-01' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      code: 'STD-5S-MACH-01',
-      title: 'CNC Machining Tooling & Shadow Board Standard',
-      category: 'S2_SET_IN_ORDER',
-      scopeType: 'LOCATION_TYPE',
-      status: 'PUBLISHED',
-    },
-  });
-
-  await prisma.standardRevision.create({
+  // ---------------------------------------------------------------- 8. Audit template
+  const template = await prisma.auditTemplate.create({
     data: {
-      tenantId: tenant1.id,
-      standardId: std1.id,
-      revisionNumber: '1.0',
-      description: 'Approved visual standard for 5-axis CNC machining tool shadow boards and metric socket racks.',
-      rules: JSON.stringify([
-        'Tool must be stored in designated labelled position on shadow board.',
-        'Shadow foam cutout color contrast must match physical tool silhouette.',
-        'No missing tools allowed at end of shift handoff.',
-        'Broken, chipped or worn tools strictly prohibited on bench.',
-        'Maximum quantity of torque wrenches: 2.',
-      ]),
-      referencePhotos: JSON.stringify([
-        {
-          type: 'STANDARD_CONDITION',
-          photoUrl: '/assets/5s/shadow_board_std.jpg',
-          label: 'Approved Shadow Board (Standard Condition)',
-          description: 'All wrenches in cutouts with tool numbers clearly visible.',
-        },
-        {
-          type: 'CURRENT_CONDITION',
-          photoUrl: '/assets/5s/shadow_board_clutter.jpg',
-          label: 'Current Condition Snapshot (Defect / Cluttered)',
-          description: 'Recent photo taken during shift audit showing disorganized bench.',
-        },
-      ]),
-      videoUrl: 'https://youtube.com/watch?v=sample-5s-standard',
-      sopDocumentUrl: 'https://storage.5s-saas.com/standards/sop-shadow-board.pdf',
-      authorId: userMap.get('coordinator.5s@skilglobal.com'),
-      approvedById: userMap.get('admin@skilglobal.com'),
-      approvedAt: new Date(),
-      isCurrent: true,
-      revisionComments: 'Initial formal publication of tooling standard.',
-    },
-  });
-
-  const std2 = await prisma.standard.upsert({
-    where: { tenantId_code: { tenantId: tenant1.id, code: 'STD-5S-SAFETY-01' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      code: 'STD-5S-SAFETY-01',
-      title: 'Emergency Gangway & Fire Extinguisher Demarcation',
-      category: 'S6_SAFETY',
-      scopeType: 'GLOBAL',
-      status: 'PUBLISHED',
-    },
-  });
-
-  await prisma.standardRevision.create({
-    data: {
-      tenantId: tenant1.id,
-      standardId: std2.id,
-      revisionNumber: '1.0',
-      description: 'Safety standard for floor boundary tapes and 1-meter obstruction clearance around fire extinguishers.',
-      rules: JSON.stringify([
-        'Minimum 1-meter clear radial radius around all fire extinguishers and electrical breaker panels.',
-        'Yellow/black hazard tape (100mm width) demarcating fire equipment zone.',
-        'Gangways must remain completely unobstructed by pallets, cables, or totes at all times.',
-      ]),
-      referencePhotos: JSON.stringify([
-        {
-          type: 'STANDARD_CONDITION',
-          photoUrl: '/assets/5s/fire_safety_std.jpg',
-          label: 'Clear Gangway & Extinguisher (Standard)',
-          description: 'Zero items within 1-meter safety boundary with KEEP CLEAR floor marking.',
-        },
-        {
-          type: 'CURRENT_CONDITION',
-          photoUrl: '/assets/5s/fire_safety_blocked.jpg',
-          label: 'Blocked Fire Extinguisher (Safety Violation)',
-          description: 'Wooden pallets and cables obstructing emergency equipment access.',
-        },
-      ]),
-      authorId: userMap.get('coordinator.5s@skilglobal.com'),
-      approvedById: userMap.get('admin@skilglobal.com'),
-      approvedAt: new Date(),
-      isCurrent: true,
-    },
-  });
-
-  // ==========================================
-  // PHASE 2 SEEDING: AUDIT TEMPLATES & ALL 11 QUESTION TYPES
-  // ==========================================
-  console.log('📋 Seeding Phase 2: Audit Template Builder with All 11 Question Types & Safety Caps...');
-
-  const template = await prisma.auditTemplate.upsert({
-    where: { tenantId_code: { tenantId: tenant1.id, code: 'TPL-5S-DISCRETE-01' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      code: 'TPL-5S-DISCRETE-01',
-      name: 'Discrete Manufacturing Comprehensive 5S & Safety Audit',
-      description: 'Master operational audit checklist covering S1-S5 and Critical Safety dimensions (§19–21).',
+      tenantId,
+      code: 'TPL-5S-AREA-01',
+      name: '5S Area Audit',
+      description: 'Monthly audit of a work area: two questions for each of the six pillars.',
       auditType: 'ROUTINE',
       categoryScoringModel: JSON.stringify({ S1: 20, S2: 20, S3: 20, S4: 20, S5: 20 }),
       status: 'ACTIVE',
+      createdAt: setupDate,
     },
   });
-
-  const templateVersion = await prisma.auditTemplateVersion.create({
+  const version = await prisma.auditTemplateVersion.create({
     data: {
-      tenantId: tenant1.id,
+      tenantId,
       templateId: template.id,
       versionNumber: '1.0',
-      changeSummary: 'Master approved baseline version',
+      changeSummary: 'First version.',
       isPublished: true,
-      publishedAt: new Date(),
-      publishedById: userMap.get('admin@skilglobal.com'),
+      publishedAt: setupDate,
+      publishedById: uid('sneha'),
+      createdAt: setupDate,
     },
   });
 
-  // Section 1: 1S - Sort
-  const secSort = await prisma.auditTemplateSection.create({
+  const sectionSeeds: SectionSeed[] = [
+    {
+      category: 'S1_SORT', title: '1S Sort', description: 'Only what is needed is kept in the area.',
+      questions: [
+        { code: 'Q-SORT-01', type: 'YES_NO', severity: 'MODERATE', text: 'Are only the items needed for today\'s work kept in the area?', guidance: 'Check benches, shelves and under machines.' },
+        { code: 'Q-SORT-02', type: 'NUMERIC_0_5', severity: 'MINOR', text: 'How well are unneeded items red-tagged and removed?', guidance: '0 = not at all, 5 = every unneeded item is tagged or gone.' },
+      ],
+    },
+    {
+      category: 'S2_SET_IN_ORDER', title: '2S Set in order', description: 'Everything has a marked place and is in it.',
+      questions: [
+        { code: 'Q-SET-01', type: 'YES_NO', severity: 'MODERATE', standardKey: 'shadow', text: 'Is every tool on the shadow board in its marked place?', guidance: 'Missing tools need a "tool in use" tag.' },
+        { code: 'Q-SET-02', type: 'NUMERIC_0_5', severity: 'MINOR', standardKey: 'floor', text: 'How clear and complete are the floor markings and labels?', guidance: 'Compare with the floor marking colours standard.' },
+      ],
+    },
+    {
+      category: 'S3_SHINE', title: '3S Shine', description: 'The area and equipment are clean.',
+      questions: [
+        { code: 'Q-SHINE-01', type: 'YES_NO', severity: 'MAJOR', text: 'Are the floor and machines free of oil, dust and scrap?', guidance: 'Look under and behind machines too.' },
+        { code: 'Q-SHINE-02', type: 'NUMERIC_0_5', severity: 'MINOR', standardKey: 'cleaning', text: 'How well is the daily cleaning checklist being followed?', guidance: 'Check the ticks on the area board for the last week.' },
+      ],
+    },
+    {
+      category: 'S4_STANDARDIZE', title: '4S Standardize', description: 'Standards are visible and followed.',
+      questions: [
+        { code: 'Q-STD-01', type: 'YES_NO', severity: 'MODERATE', text: 'Are the area\'s 5S standards displayed and up to date?', guidance: 'The board shows the current version of each standard.' },
+        { code: 'Q-STD-02', type: 'NUMERIC_0_5', severity: 'MINOR', text: 'How closely does the area match its standards?', guidance: '0 = not at all, 5 = exactly as described.' },
+      ],
+    },
+    {
+      category: 'S5_SUSTAIN', title: '5S Sustain', description: 'Good habits are kept up.',
+      questions: [
+        { code: 'Q-SUS-01', type: 'YES_NO', severity: 'MODERATE', text: 'Were the actions from the last audit completed on time?', guidance: 'Check the corrective actions for this area.' },
+        { code: 'Q-SUS-02', type: 'NUMERIC_0_5', severity: 'MINOR', text: 'How well does the team do its daily 5S checks?', guidance: 'Look at the daily checks for the last two weeks.' },
+      ],
+    },
+    {
+      category: 'S6_SAFETY', title: '6S Safety', description: 'The area is safe to work in.',
+      questions: [
+        { code: 'Q-SAFE-01', type: 'YES_NO', severity: 'CRITICAL', isCritical: true, scoreCapOnFail: 70, standardKey: 'floor', text: 'Are fire extinguishers, exits and walkways clear?', guidance: 'Any "No" limits the audit score to 70%.' },
+        { code: 'Q-SAFE-02', type: 'NUMERIC_0_5', severity: 'MODERATE', text: 'How consistently is the required safety gear worn?', guidance: 'Safety shoes, glasses and gloves where signposted.' },
+      ],
+    },
+  ];
+
+  const questions: SeededQuestion[] = [];
+  for (let s = 0; s < sectionSeeds.length; s++) {
+    const sec = sectionSeeds[s];
+    const section = await prisma.auditTemplateSection.create({
+      data: { tenantId, templateVersionId: version.id, title: sec.title, description: sec.description, category: sec.category, sortOrder: s + 1 },
+    });
+    for (let q = 0; q < sec.questions.length; q++) {
+      const qs = sec.questions[q];
+      const question = await prisma.auditTemplateQuestion.create({
+        data: {
+          tenantId,
+          sectionId: section.id,
+          questionCode: qs.code,
+          questionText: qs.text,
+          guidance: qs.guidance,
+          standardId: qs.standardKey ? standardIds.get(qs.standardKey) : null,
+          questionType: qs.type,
+          weightage: 1,
+          severity: qs.severity,
+          isCritical: qs.isCritical ?? false,
+          scoreCapOnFail: qs.scoreCapOnFail ?? null,
+          sortOrder: q + 1,
+        },
+      });
+      questions.push({ id: question.id, code: qs.code, sectionId: section.id, category: sec.category, type: qs.type, severity: qs.severity, isCritical: qs.isCritical ?? false });
+    }
+  }
+  const scoringQuestions = new Map<string, ScoringQuestion>(
+    questions.map((q) => [q.id, { id: q.id, weightage: 1, isCritical: q.isCritical, scoreCapOnFail: q.isCritical ? 70 : null, severity: q.severity }]),
+  );
+  const sectionCategories = new Map<string, string>(questions.map((q) => [q.sectionId, q.category]));
+  const scoringRules = { passScore: 70, criticalFailCap: 70, findingThresholdPercent: 60, pillarWeights: null };
+
+  /**
+   * Ratings (0–5) per question code that give `targetPercent` of the 60 available points: forced "No" answers
+   * first, then the weakest pillars' rating questions are lowered (not below 2), then further "No" answers.
+   */
+  function planRatings(targetPercent: number, weakOrder: string[], forceNo: string[] = []): Map<string, number> {
+    const ratings = new Map<string, number>(questions.map((q) => [q.code, MAX_RATING]));
+    let drop = questions.length * MAX_RATING - Math.round((targetPercent / 100) * questions.length * MAX_RATING);
+    for (const code of forceNo) {
+      ratings.set(code, 0);
+      drop -= MAX_RATING;
+    }
+    const ofType = (type: QuestionSeed['type']) =>
+      weakOrder.map((cat) => questions.find((q) => q.category === cat && q.type === type)).filter((q) => q && !q.isCritical);
+    for (const q of ofType('NUMERIC_0_5')) {
+      while (drop > 0 && ratings.get(q.code) > 2) {
+        ratings.set(q.code, ratings.get(q.code) - 1);
+        drop--;
+      }
+    }
+    for (const q of ofType('YES_NO')) {
+      if (drop <= 0) break;
+      if (ratings.get(q.code) === 0) continue;
+      ratings.set(q.code, 0);
+      drop -= MAX_RATING;
+    }
+    // Give back points when a "No" overshot the target
+    for (const q of ofType('NUMERIC_0_5').reverse()) {
+      while (drop < 0 && ratings.get(q.code) < MAX_RATING) {
+        ratings.set(q.code, ratings.get(q.code) + 1);
+        drop++;
+      }
+    }
+    if (drop !== 0) throw new Error(`Cannot reach ${targetPercent}% with the audit questions`);
+    return ratings;
+  }
+
+  // ---------------------------------------------------------------- 9 & 10. Schedule, audit history, this month's audits
+  const firstAuditDay = (areaIndex: number) => 6 + areaIndex * 4;
+  const schedule = await prisma.auditSchedule.create({
     data: {
-      tenantId: tenant1.id,
-      templateVersionId: templateVersion.id,
-      title: '1S - Sort Physical Area Cleanout',
-      category: 'S1_SORT',
-      sortOrder: 1,
-    },
-  });
-
-  await prisma.auditTemplateQuestion.create({
-    data: {
-      tenantId: tenant1.id,
-      sectionId: secSort.id,
-      questionCode: 'Q-SORT-01',
-      questionText: 'Are all unnecessary tools, defective parts, and surplus scrap containers removed from the immediate workstation?',
-      guidance: 'Inspect underneath benches, machine corners, and conveyor bases.',
-      questionType: 'PASS_FAIL',
-      weightage: 1.5,
-      severity: 'MAJOR',
-      isCritical: false,
-      requireEvidenceOnScoreBelow: 100,
-      mandatoryEvidence: true,
-      sortOrder: 1,
-    },
-  });
-
-  await prisma.auditTemplateQuestion.create({
-    data: {
-      tenantId: tenant1.id,
-      sectionId: secSort.id,
-      questionCode: 'Q-SORT-02',
-      questionText: 'Rate the Red Tag quarantine adherence: Are unneeded items properly tagged with date, reason, and estimated value?',
-      guidance: 'Verify items stored for >48 hours have formal Red Tag disposition decision.',
-      questionType: 'NUMERIC_0_5',
-      weightage: 1.0,
-      severity: 'MODERATE',
-      sortOrder: 2,
-    },
-  });
-
-  // Section 2: 2S - Set in Order
-  const secSetInOrder = await prisma.auditTemplateSection.create({
-    data: {
-      tenantId: tenant1.id,
-      templateVersionId: templateVersion.id,
-      title: '2S - Set in Order Visual Storage & Demarcation',
-      category: 'S2_SET_IN_ORDER',
-      sortOrder: 2,
-    },
-  });
-
-  await prisma.auditTemplateQuestion.create({
-    data: {
-      tenantId: tenant1.id,
-      sectionId: secSetInOrder.id,
-      questionCode: 'Q-SET-01',
-      questionText: 'Do all hand tools match the designated shadow board foam cutout and carry legible tool IDs?',
-      guidance: 'Reference Standard STD-5S-MACH-01. Check for missing or misplaced tools.',
-      standardId: std1.id,
-      questionType: 'MULTIPLE_CHOICE',
-      options: JSON.stringify([
-        { label: '100% - All tools in position with shadow cutout', score: 100 },
-        { label: '70% - Minor tool misalignment, no missing tools', score: 70 },
-        { label: '30% - Multiple missing tools without checkout tag', score: 30 },
-        { label: '0% - Severe clutter, no shadow board adherence', score: 0 },
-      ]),
-      weightage: 2.0,
-      severity: 'MAJOR',
-      sortOrder: 1,
-    },
-  });
-
-  await prisma.auditTemplateQuestion.create({
-    data: {
-      tenantId: tenant1.id,
-      sectionId: secSetInOrder.id,
-      questionCode: 'Q-SET-02',
-      questionText: 'Are aisle markings, gangway lines, and storage boundaries clearly visible and intact?',
-      questionType: 'PERCENTAGE',
-      weightage: 1.0,
-      severity: 'MODERATE',
-      sortOrder: 2,
-    },
-  });
-
-  // Section 3: 3S - Shine
-  const secShine = await prisma.auditTemplateSection.create({
-    data: {
-      tenantId: tenant1.id,
-      templateVersionId: templateVersion.id,
-      title: '3S - Shine Cleanliness & Inspection',
-      category: 'S3_SHINE',
-      sortOrder: 3,
-    },
-  });
-
-  await prisma.auditTemplateQuestion.create({
-    data: {
-      tenantId: tenant1.id,
-      sectionId: secShine.id,
-      questionCode: 'Q-SHINE-01',
-      questionText: 'Is the equipment free of oil leaks, coolant spills, and metal swarf build-up?',
-      questionType: 'YES_NO',
-      weightage: 1.5,
-      severity: 'MAJOR',
-      requireEvidenceOnScoreBelow: 1,
-      mandatoryEvidence: true,
-      sortOrder: 1,
-    },
-  });
-
-  await prisma.auditTemplateQuestion.create({
-    data: {
-      tenantId: tenant1.id,
-      sectionId: secShine.id,
-      questionCode: 'Q-SHINE-02',
-      questionText: 'Verify execution of autonomous cleaning checklists:',
-      questionType: 'CHECKLIST',
-      options: JSON.stringify([
-        { label: 'Spindle nose cleaned & wiped', score: 25 },
-        { label: 'Chip conveyor bin emptied', score: 25 },
-        { label: 'Coolant tank level checked', score: 25 },
-        { label: 'Floor swept and degreased', score: 25 },
-      ]),
-      weightage: 1.5,
-      severity: 'MODERATE',
-      sortOrder: 2,
-    },
-  });
-
-  // Section 4: 6S - Safety with Score Cap!
-  const secSafety = await prisma.auditTemplateSection.create({
-    data: {
-      tenantId: tenant1.id,
-      templateVersionId: templateVersion.id,
-      title: '6S - Safety & Environmental Compliance (Critical Caps)',
-      category: 'S6_SAFETY',
-      sortOrder: 4,
-    },
-  });
-
-  await prisma.auditTemplateQuestion.create({
-    data: {
-      tenantId: tenant1.id,
-      sectionId: secSafety.id,
-      questionCode: 'Q-SAFE-01',
-      questionText: 'CRITICAL SAFETY: Are all fire extinguishers, emergency eyewash stations, and fire exit doors 100% unobstructed?',
-      guidance: 'BRD §43 Critical Rule: Any failure automatically caps overall audit score at 70% max.',
-      standardId: std2.id,
-      questionType: 'PASS_FAIL',
-      weightage: 2.5,
-      severity: 'CRITICAL',
-      isCritical: true,
-      scoreCapOnFail: 70, // Caps audit at 70% if failed!
-      mandatoryEvidence: true,
-      sortOrder: 1,
-    },
-  });
-
-  // ==========================================
-  // PHASE 2 SEEDING: AUDIT SCHEDULING ENGINE
-  // ==========================================
-  console.log('⏰ Seeding Phase 2: Audit Scheduling Engine with Auditor Rotation...');
-
-  const schedule1 = await prisma.auditSchedule.upsert({
-    where: { tenantId_scheduleCode: { tenantId: tenant1.id, scheduleCode: 'SCHED-BLR-WEEKLY-01' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      scheduleCode: 'SCHED-BLR-WEEKLY-01',
-      title: 'Weekly Autonomous 5S Assessment — Plant 1 Workstations',
+      tenantId,
+      scheduleCode: `SCHED-${now.getFullYear()}-0001`,
+      title: 'Monthly 5S audit - Bengaluru Plant',
       templateId: template.id,
-      templateVersionId: templateVersion.id,
+      templateVersionId: version.id,
       auditType: 'ROUTINE',
       targetType: 'ALL_AREAS',
-      recurrence: 'WEEKLY',
-      recurrenceIntervalDays: 7,
-      rotationRule: 'DEPT_INDEPENDENCE',
-      leadTimeDays: 2,
+      targetLocationIds: JSON.stringify([]),
+      recurrence: 'MONTHLY',
+      recurrenceIntervalDays: 30,
+      preferredAuditorId: uid('amit'),
+      rotationRule: 'ASSIGNED_AUDITOR',
+      startDate: dayInPastMonth(3, firstAuditDay(0), 9),
+      leadTimeDays: 3,
       status: 'ACTIVE',
-      nextRunAt: new Date(Date.now() + 2 * 86400000),
+      createdAt: setupDate,
     },
   });
 
-  // Generate initial scheduled audit instances for seeded locations across Calendar
-  const locations = [loc1, loc2, loc3];
-  const auditors = [
-    userMap.get('auditor.lead@skilglobal.com'),
-    userMap.get('coordinator.5s@skilglobal.com'),
-    userMap.get('admin@skilglobal.com'),
+  interface AuditPlan {
+    area: string;
+    scores: [number, number, number]; // three months ago, two months ago, last month
+    weakOrder: string[];
+    /** Questions answered "No" in last month's audit (they became the findings below). */
+    lastMonthNo: string[];
+  }
+  const auditPlans: AuditPlan[] = [
+    { area: 'cnc', scores: [62, 71, 80], weakOrder: ['S3_SHINE', 'S1_SORT', 'S2_SET_IN_ORDER', 'S5_SUSTAIN', 'S4_STANDARDIZE', 'S6_SAFETY'], lastMonthNo: ['Q-SHINE-01'] },
+    { area: 'crib', scores: [70, 74, 78], weakOrder: ['S2_SET_IN_ORDER', 'S1_SORT', 'S4_STANDARDIZE', 'S3_SHINE', 'S5_SUSTAIN', 'S6_SAFETY'], lastMonthNo: ['Q-SET-01'] },
+    { area: 'line1', scores: [55, 63, 72], weakOrder: ['S3_SHINE', 'S2_SET_IN_ORDER', 'S1_SORT', 'S5_SUSTAIN', 'S4_STANDARDIZE', 'S6_SAFETY'], lastMonthNo: [] },
+    { area: 'pack', scores: [81, 84, 88], weakOrder: ['S2_SET_IN_ORDER', 'S1_SORT', 'S4_STANDARDIZE', 'S5_SUSTAIN', 'S3_SHINE', 'S6_SAFETY'], lastMonthNo: [] },
   ];
-  const now = new Date();
+  const findingNotes: Record<string, string> = {
+    'Q-SHINE-01': 'Oil leaking under CNC machine 2; drip tray full.',
+    'Q-SET-01': 'Several tools left on the bench instead of on the shadow board.',
+  };
+  /** Photo the auditor took for each of last month's "No" answers (also the finding's photo). */
+  const findingPhotos: Record<string, SceneName> = { 'Q-SHINE-01': 'oilLeak', 'Q-SET-01': 'toolsOffBoard' };
+  // Due dates the area owners agreed when acknowledging last month's audits (they become the action due dates)
+  const agreedResolution: Record<string, Date> = { cnc: daysFromNow(1, 17), crib: daysFromNow(5, 17) };
 
-  const sampleScheduledData = [
-    { offsetDays: -4, status: 'SUBMITTED', locIdx: 0, audIdx: 0, code: 'AUD-BLR-2026-0001', notes: 'Completed with 84.5% score' },
-    { offsetDays: -2, status: 'SUBMITTED', locIdx: 1, audIdx: 1, code: 'AUD-BLR-2026-0002', notes: 'Completed with 78% score' },
-    { offsetDays: 0, status: 'IN_PROGRESS', locIdx: 2, audIdx: 0, code: 'AUD-BLR-2026-0003', notes: 'Active inspection on warehouse floor' },
-    { offsetDays: 1, status: 'SCHEDULED', locIdx: 0, audIdx: 0, code: 'AUD-BLR-2026-0004', notes: 'Tomorrow morning shift 1 5S check' },
-    { offsetDays: 3, status: 'SCHEDULED', locIdx: 1, audIdx: 1, code: 'AUD-BLR-2026-0005', notes: 'Chassis assembly line bi-weekly audit' },
-    { offsetDays: 6, status: 'SCHEDULED', locIdx: 2, audIdx: 2, code: 'AUD-BLR-2026-0006', notes: 'Logistics and red tag quarantine check' },
-    { offsetDays: 8, status: 'SCHEDULED', locIdx: 0, audIdx: 1, code: 'AUD-BLR-2026-0007', notes: 'CNC bay deep autonomous clean audit' },
-    { offsetDays: 12, status: 'SCHEDULED', locIdx: 1, audIdx: 0, code: 'AUD-BLR-2026-0008', notes: 'Final assembly shadow board verification' },
-    { offsetDays: 15, status: 'SCHEDULED', locIdx: 2, audIdx: 1, code: 'AUD-BLR-2026-0009', notes: 'Monthly hazardous chemical storage audit' },
-    { offsetDays: 18, status: 'SCHEDULED', locIdx: 0, audIdx: 0, code: 'AUD-BLR-2026-0010', notes: 'Precision tooling calibration cadence' },
-  ];
+  /** Last month's execution and the answers per question code, for linking findings. */
+  const lastMonth = new Map<string, { executionId: string; auditCode: string; completedAt: Date; acknowledgedAt: Date; answerIds: Map<string, string> }>();
+  let executionCount = 0;
+  let answerCount = 0;
 
-  for (const item of sampleScheduledData) {
-    const loc = locations[item.locIdx % locations.length];
-    const plannedDate = new Date(now.getTime() + item.offsetDays * 86400000);
-    const dueDate = new Date(plannedDate.getTime() + 2 * 86400000);
+  for (let monthsAgo = 3; monthsAgo >= 1; monthsAgo--) {
+    for (let i = 0; i < auditPlans.length; i++) {
+      const ap = auditPlans[i];
+      const area = loc(ap.area);
+      const target = ap.scores[3 - monthsAgo];
+      const isLastMonth = monthsAgo === 1;
+      const plannedDate = dayInPastMonth(monthsAgo, firstAuditDay(i), 9);
+      const startedAt = dayInPastMonth(monthsAgo, firstAuditDay(i), 10);
+      const completedAt = dayInPastMonth(monthsAgo, firstAuditDay(i), 11, 15);
+      const acknowledgedAt = dayInPastMonth(monthsAgo, firstAuditDay(i) + 1, 9, 30);
 
-    await prisma.scheduledAuditInstance.upsert({
-      where: { tenantId_auditCode: { tenantId: tenant1.id, auditCode: item.code } },
-      update: {
-        plannedDate,
-        dueDate,
-        status: item.status,
-        notes: item.notes,
-        auditorId: auditors[item.audIdx % auditors.length],
-      },
-      create: {
-        tenantId: tenant1.id,
-        scheduleId: schedule1.id,
-        auditCode: item.code,
-        templateVersionId: templateVersion.id,
-        locationId: loc.id,
-        auditorId: auditors[item.audIdx % auditors.length],
+      const ratings = planRatings(target, ap.weakOrder, isLastMonth ? ap.lastMonthNo : []);
+      const answers = questions.map((q) => {
+        const rating = ratings.get(q.code);
+        const failed = q.type === 'YES_NO' && rating === 0;
+        return {
+          questionId: q.id,
+          sectionId: q.sectionId,
+          score: rating,
+          status: failed ? (q.isCritical ? 'CRITICAL_FAIL' : q.severity === 'MAJOR' ? 'MAJOR_NC' : 'MINOR_NC') : 'CONFORMING',
+          notes: failed && isLastMonth ? findingNotes[q.code] ?? null : null,
+        };
+      });
+      const result = scoreAudit(scoringQuestions, sectionCategories, answers, scoringRules);
+
+      const instance = await prisma.scheduledAuditInstance.create({
+        data: {
+          tenantId,
+          scheduleId: schedule.id,
+          auditCode: nextCode('AUD', area.areaCode, plannedDate),
+          templateVersionId: version.id,
+          locationId: area.id,
+          auditorId: uid('amit'),
+          auditType: 'ROUTINE',
+          plannedDate,
+          dueDate: new Date(plannedDate.getTime() + 3 * DAY_MS),
+          status: 'SUBMITTED',
+          score: result.overallScore,
+          notes: `Automated scheduled audit for ${schedule.title}`,
+          createdAt: new Date(plannedDate.getTime() - 3 * DAY_MS),
+        },
+      });
+
+      const execution = await prisma.auditExecution.create({
+        data: {
+          tenantId,
+          auditInstanceId: instance.id,
+          locationId: area.id,
+          templateId: template.id,
+          templateVersionId: version.id,
+          auditorId: uid('amit'),
+          auditCode: nextCode('EXEC', area.areaCode, startedAt),
+          auditType: 'ROUTINE',
+          status: 'ACKNOWLEDGED',
+          startedAt,
+          completedAt,
+          overallScore: result.overallScore,
+          maxPossibleScore: result.maxPossibleScore,
+          earnedScore: result.earnedScore,
+          pillarScores: JSON.stringify(result.pillarScores),
+          isPassed: result.isPassed,
+          criticalFailureCount: result.criticalFailureCount,
+          summaryNotes: result.isPassed
+            ? `Monthly audit of ${area.name}. Area is in good shape.`
+            : `Monthly audit of ${area.name}. Below the 70% pass mark; see the weakest pillars.`,
+          auditorName: uname('amit'),
+          acknowledgedAt,
+          acknowledgedById: uid(area.owner),
+          acknowledgedByName: uname(area.owner),
+          acknowledgementNotes: 'Results discussed with the team.',
+          targetResolutionDate: isLastMonth ? agreedResolution[ap.area] ?? null : null,
+          disputeStatus: 'NONE',
+          createdAt: startedAt,
+        },
+      });
+      executionCount++;
+
+      const answerIds = new Map<string, string>();
+      for (const a of answers) {
+        const code = questions.find((q) => q.id === a.questionId).code;
+        const evidence = isLastMonth && a.notes && findingPhotos[code] ? [await photo(findingPhotos[code], 'amit', 'auditAnswers.evidenceUrls', completedAt)] : [];
+        const answer = await prisma.auditAnswer.create({
+          data: {
+            tenantId,
+            executionId: execution.id,
+            questionId: a.questionId,
+            sectionId: a.sectionId,
+            score: a.score,
+            maxScore: MAX_RATING,
+            status: a.status,
+            notes: a.notes,
+            evidenceUrls: JSON.stringify(evidence),
+            createdAt: completedAt,
+          },
+        });
+        answerIds.set(code, answer.id);
+        answerCount++;
+      }
+      if (isLastMonth) {
+        lastMonth.set(ap.area, { executionId: execution.id, auditCode: execution.auditCode, completedAt, acknowledgedAt, answerIds });
+      }
+    }
+  }
+
+  // This month's audits: planned for next week, due three days later
+  const upcomingStart = daysFromNow(7, 9);
+  for (let i = 0; i < auditPlans.length; i++) {
+    const area = loc(auditPlans[i].area);
+    const plannedDate = new Date(upcomingStart.getTime() + i * DAY_MS);
+    await prisma.scheduledAuditInstance.create({
+      data: {
+        tenantId,
+        scheduleId: schedule.id,
+        auditCode: nextCode('AUD', area.areaCode, plannedDate),
+        templateVersionId: version.id,
+        locationId: area.id,
+        auditorId: uid('amit'),
         auditType: 'ROUTINE',
         plannedDate,
-        dueDate,
-        status: item.status,
-        notes: item.notes,
+        dueDate: new Date(plannedDate.getTime() + 3 * DAY_MS),
+        status: 'SCHEDULED',
+        notes: `Automated scheduled audit for ${schedule.title}`,
+        createdAt: daysFromNow(-1, 6),
+      },
+    });
+  }
+  await prisma.auditSchedule.update({
+    where: { id: schedule.id },
+    data: { lastRunAt: daysFromNow(-1, 6), nextRunAt: new Date(upcomingStart.getTime() + 30 * DAY_MS) },
+  });
+
+  // ---------------------------------------------------------------- 11. Observations
+  const cncAudit = lastMonth.get('cnc');
+  const cribAudit = lastMonth.get('crib');
+  const observationSeeds = [
+    {
+      key: 'oil', area: 'cnc', photo: 'oilLeak' as SceneName, category: 'S3_SHINE', severity: 'MAJOR', status: 'ACTION_ASSIGNED',
+      title: 'Oil leak under CNC machine 2',
+      description: 'Oil is leaking under CNC machine 2 and the drip tray is full. Slipping risk for operators.',
+      loggedBy: 'amit', createdAt: cncAudit.completedAt, executionId: cncAudit.executionId, answerId: cncAudit.answerIds.get('Q-SHINE-01'),
+    },
+    {
+      key: 'tools', area: 'crib', photo: 'toolsOffBoard' as SceneName, category: 'S2_SET_IN_ORDER', severity: 'MODERATE', status: 'ACTION_ASSIGNED',
+      title: 'Tools left outside shadow board',
+      description: 'Several spanners and a torque wrench were left on the bench instead of on the shadow board.',
+      loggedBy: 'amit', createdAt: cribAudit.completedAt, executionId: cribAudit.executionId, answerId: cribAudit.answerIds.get('Q-SET-01'),
+    },
+    {
+      key: 'faded', area: 'pack', photo: 'floorWorn' as SceneName, category: 'S2_SET_IN_ORDER', severity: 'MAJOR', status: 'CLOSED',
+      title: 'Faded floor marking near dispatch',
+      description: 'The yellow walkway line next to the dispatch door has worn away, so forklifts and people share the same path.',
+      loggedBy: 'sneha', createdAt: daysFromNow(-20, 14), executionId: null, answerId: null,
+    },
+    {
+      key: 'extinguisher', area: 'line1', photo: 'blockedExtinguisher' as SceneName, category: 'S6_SAFETY', severity: 'CRITICAL', status: 'ACTION_ASSIGNED',
+      title: 'Blocked fire extinguisher at Line 1',
+      description: 'Empty parts crates are stacked in front of the fire extinguisher at station 4. It cannot be reached quickly.',
+      loggedBy: 'ravi', createdAt: daysFromNow(-4, 10), executionId: null, answerId: null,
+    },
+    {
+      key: 'boxes', area: 'pack', photo: 'boxesUnlabelled' as SceneName, category: 'S1_SORT', severity: 'MODERATE', status: 'PENDING_VERIFICATION',
+      title: 'Unlabelled boxes in packing area',
+      description: 'Five boxes without labels are on the packing table. Nobody knows which order they belong to.',
+      loggedBy: 'ravi', createdAt: daysFromNow(-6, 11), executionId: null, answerId: null,
+    },
+    {
+      key: 'dust', area: 'line1', photo: 'dustyPanel' as SceneName, category: 'S3_SHINE', severity: 'MINOR', status: 'OPEN',
+      title: 'Dust on control panel',
+      description: 'The control panel at station 2 is dusty and the screen is hard to read.',
+      loggedBy: 'amit', createdAt: daysFromNow(-2, 15), executionId: null, answerId: null,
+    },
+  ].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+
+  const observations = new Map<string, { id: string; code: string; createdAt: Date }>();
+  for (const o of observationSeeds) {
+    const area = loc(o.area);
+    const code = nextCode('OBS', area.areaCode, o.createdAt);
+    const observation = await prisma.observation.create({
+      data: {
+        tenantId,
+        observationCode: code,
+        executionId: o.executionId,
+        answerId: o.answerId,
+        locationId: area.id,
+        category: o.category,
+        severity: o.severity,
+        title: o.title,
+        description: o.description,
+        status: o.status,
+        tags: JSON.stringify(o.executionId ? [o.category, o.severity, 'AuditTriggered'] : [o.category, o.severity]),
+        loggedById: uid(o.loggedBy),
+        beforePhotoUrl: await photo(o.photo, o.loggedBy, 'observations.beforePhotoUrl', o.createdAt),
+        createdAt: o.createdAt,
+      },
+    });
+    observations.set(o.key, { id: observation.id, code, createdAt: o.createdAt });
+  }
+
+  // ---------------------------------------------------------------- 12. Corrective actions
+  type HistoryEntry = { at: Date; actor: string | null; actorName?: string; from: string; to: string; comment: string; metadata?: Record<string, unknown> };
+  interface ActionSeed {
+    observation: string;
+    area: string;
+    title: string;
+    description: string;
+    source: 'AUDIT' | 'OBSERVATION';
+    rootCauseCategory: string;
+    assignee: string;
+    assignedBy: string;
+    targetDate: Date;
+    slaHours: number;
+    status: string;
+    isOverdue?: boolean;
+    escalationTier?: string;
+    closureNotes?: string;
+    closureSubmittedAt?: Date;
+    afterPhoto?: SceneName;
+    fiveWhy?: { why1: string; why2: string; why3: string };
+    history: HistoryEntry[];
+  }
+  const boxesObs = observations.get('boxes');
+  const extinguisherObs = observations.get('extinguisher');
+  const pendingAck = (auditCode: string, at: Date): HistoryEntry => ({
+    at, actor: 'amit', from: 'OPEN', to: 'PENDING_ACKNOWLEDGEMENT',
+    comment: `Action raised from audit ${auditCode}; waiting for the area owner to acknowledge the audit.`,
+  });
+  const acknowledged = (owner: string, at: Date, target: Date): HistoryEntry => ({
+    at, actor: owner, from: 'PENDING_ACKNOWLEDGEMENT', to: 'ASSIGNED',
+    comment: `Area owner accepted the audit findings. Target date ${isoDay(target)}.`,
+  });
+
+  const actionSeeds: ActionSeed[] = [
+    {
+      observation: 'oil', area: 'cnc', source: 'AUDIT', rootCauseCategory: 'MACHINE',
+      title: 'Fix oil leak on CNC machine 2',
+      description: 'Replace the leaking seal on CNC machine 2, clean the floor and empty the drip tray.',
+      assignee: 'arun', assignedBy: 'amit', targetDate: agreedResolution.cnc, slaHours: 72, status: 'IN_PROGRESS',
+      fiveWhy: { why1: 'Oil on the floor: the coolant pump seal is leaking.', why2: 'The seal is worn out.', why3: 'The seal was not on the maintenance plan.' },
+      history: [
+        pendingAck(cncAudit.auditCode, cncAudit.completedAt),
+        acknowledged('arun', cncAudit.acknowledgedAt, agreedResolution.cnc),
+        { at: daysFromNow(-3, 10), actor: 'arun', from: 'ASSIGNED', to: 'IN_PROGRESS', comment: 'Work started: new seal ordered, absorbent pads placed under the machine.' },
+      ],
+    },
+    {
+      observation: 'tools', area: 'crib', source: 'AUDIT', rootCauseCategory: 'METHOD',
+      title: 'Return tools to the shadow board after each shift',
+      description: 'Put all tools back on the shadow board and add an end-of-shift tool check to the handover.',
+      assignee: 'arun', assignedBy: 'amit', targetDate: agreedResolution.crib, slaHours: 168, status: 'ASSIGNED',
+      history: [pendingAck(cribAudit.auditCode, cribAudit.completedAt), acknowledged('arun', cribAudit.acknowledgedAt, agreedResolution.crib)],
+    },
+    {
+      observation: 'boxes', area: 'pack', source: 'OBSERVATION', rootCauseCategory: 'METHOD',
+      title: 'Label or remove the unlabelled boxes',
+      description: 'Find the order for each unlabelled box, label it, and red-tag any box nobody claims.',
+      assignee: 'deepa', assignedBy: 'sneha', targetDate: new Date(boxesObs.createdAt.getTime() + 7 * DAY_MS), slaHours: 168, status: 'PENDING_VERIFICATION',
+      closureNotes: 'All five boxes matched to orders and labelled. Labels are now printed at the packing table.',
+      closureSubmittedAt: daysFromNow(-1, 16),
+      afterPhoto: 'boxesLabelled',
+      history: [
+        { at: new Date(boxesObs.createdAt.getTime() + 2 * 3600000), actor: 'sneha', from: 'OPEN', to: 'ASSIGNED', comment: 'Raised from an observation with 168h SLA.', metadata: { type: 'CREATED', toAssigneeId: uid('deepa') } },
+        { at: daysFromNow(-4, 9), actor: 'deepa', from: 'ASSIGNED', to: 'IN_PROGRESS', comment: 'Status updated to IN_PROGRESS.' },
+        {
+          at: daysFromNow(-1, 16), actor: 'deepa', from: 'IN_PROGRESS', to: 'PENDING_VERIFICATION',
+          comment: 'Closure evidence submitted: All five boxes matched to orders and labelled. Labels are now printed at the packing table.',
+          metadata: { type: 'SUBMITTED', withoutPhoto: false, reason: null },
+        },
+      ],
+    },
+    {
+      observation: 'extinguisher', area: 'line1', source: 'OBSERVATION', rootCauseCategory: 'MANPOWER',
+      title: 'Clear the area in front of the fire extinguisher',
+      description: 'Move the empty crates away from the extinguisher at station 4 and mark a keep-clear box on the floor.',
+      assignee: 'deepa', assignedBy: 'sneha', targetDate: new Date(extinguisherObs.createdAt.getTime() + DAY_MS), slaHours: 24, status: 'ASSIGNED',
+      isOverdue: true, escalationTier: 'ESCALATED_L1',
+      history: [
+        { at: new Date(extinguisherObs.createdAt.getTime() + 3600000), actor: 'sneha', from: 'OPEN', to: 'ASSIGNED', comment: 'Raised from an observation with 24h SLA.', metadata: { type: 'CREATED', toAssigneeId: uid('deepa') } },
+        { at: daysFromNow(-1, 8), actor: null, actorName: 'Escalation', from: 'ASSIGNED', to: 'ASSIGNED', comment: 'Action is 2 days overdue: escalated (level 1).', metadata: { type: 'ESCALATED', escalationTier: 'ESCALATED_L1' } },
+      ],
+    },
+  ];
+  // Codes follow creation order
+  actionSeeds.sort((a, b) => a.history[0].at.getTime() - b.history[0].at.getTime());
+
+  for (const a of actionSeeds) {
+    const area = loc(a.area);
+    const createdAt = a.history[0].at;
+    const action = await prisma.correctiveAction.create({
+      data: {
+        tenantId,
+        actionCode: nextCode('CAPA', area.areaCode, createdAt),
+        observationId: observations.get(a.observation).id,
+        locationId: area.id,
+        title: a.title,
+        description: a.description,
+        actionType: 'CORRECTIVE',
+        source: a.source,
+        rootCauseCategory: a.rootCauseCategory,
+        fiveWhyAnalysis: JSON.stringify({ why1: '', why2: '', why3: '', why4: '', why5: '', ...a.fiveWhy }),
+        assigneeId: uid(a.assignee),
+        assignedById: uid(a.assignedBy),
+        targetDate: a.targetDate,
+        slaHours: a.slaHours,
+        isOverdue: a.isOverdue ?? false,
+        escalationTier: a.escalationTier ?? 'NORMAL',
+        status: a.status,
+        closureNotes: a.closureNotes ?? null,
+        closureSubmittedAt: a.closureSubmittedAt ?? null,
+        afterPhotoUrl: a.afterPhoto ? await photo(a.afterPhoto, a.assignee, 'correctiveActions.afterPhotoUrl', a.closureSubmittedAt ?? createdAt) : null,
+        createdAt,
+      },
+    });
+    await prisma.actionHistoryLog.createMany({
+      data: a.history.map((h): Prisma.ActionHistoryLogCreateManyInput => ({
+        tenantId,
+        actionId: action.id,
+        actorId: h.actor ? uid(h.actor) : null,
+        actorName: h.actorName ?? (h.actor ? uname(h.actor) : null),
+        fromStatus: h.from,
+        toStatus: h.to,
+        comment: h.comment,
+        metadata: h.metadata ? JSON.stringify(h.metadata) : null,
+        createdAt: h.at,
+      })),
+    });
+  }
+
+  // ---------------------------------------------------------------- 13. Red tags
+  const holdingArea = loc('pack');
+  const redTagSeeds = [
+    {
+      area: 'cnc', itemName: 'Old fixture plates', photo: 'fixturePlates' as SceneName, category: 'UNNEEDED_TOOL', quantity: 3, unitOfMeasure: 'PCS', estimatedValue: 4500,
+      reason: 'Fixtures for a part that is no longer made.', taggedBy: 'arun', taggedDate: daysFromNow(-40, 10),
+      status: 'DISPOSED', holding: true, dispositionAction: 'DISPOSE_SCRAP', dispositionJustification: 'No other plant uses these fixtures.',
+      targetDispositionDate: daysFromNow(-26, 17), approvedBy: 'suresh', actualDispositionAction: 'DISPOSE_SCRAP',
+      actualDispositionDate: daysFromNow(-30, 15), disposedBy: 'arun', financialRecovered: 1200,
+    },
+    {
+      area: 'crib', itemName: 'Old manual grease guns', photo: 'greaseGuns' as SceneName, category: 'UNNEEDED_TOOL', quantity: 4, unitOfMeasure: 'PCS', estimatedValue: 2000,
+      reason: 'Replaced by the new battery grease gun; not used for months.', taggedBy: 'arun', taggedDate: daysFromNow(-24, 11),
+      status: 'IN_HOLDING_AREA', holding: true, targetDispositionDate: daysFromNow(-10, 17),
+    },
+    {
+      area: 'line1', itemName: 'Extra stock of old bracket parts', photo: 'bracketBoxes' as SceneName, category: 'SURPLUS_INVENTORY', quantity: 3, unitOfMeasure: 'BOXES', estimatedValue: 8000,
+      reason: 'Brackets for the previous model, kept at the line after the model change.', taggedBy: 'deepa', taggedDate: daysFromNow(-6, 14),
+      status: 'PENDING_DISPOSITION', holding: true, dispositionAction: 'RELOCATE',
+      dispositionJustification: 'Move back to the main store for spare-part orders.', targetDispositionDate: daysFromNow(8, 17),
+    },
+    {
+      area: 'cnc', itemName: 'Broken drill chuck', photo: 'drillChuck' as SceneName, category: 'BROKEN_EQUIPMENT', quantity: 1, unitOfMeasure: 'PCS', estimatedValue: 1500,
+      reason: 'Jaws do not close fully; found in a drawer at machine 1.', taggedBy: 'arun', taggedDate: daysFromNow(-1, 15),
+      status: 'RED_TAGGED', holding: false, targetDispositionDate: daysFromNow(13, 17),
+    },
+  ];
+  for (const t of redTagSeeds) {
+    const area = loc(t.area);
+    await prisma.redTag.create({
+      data: {
+        tenantId,
+        tagNumber: nextCode('RT', area.areaCode, t.taggedDate),
+        locationId: area.id,
+        targetHoldingAreaId: t.holding ? holdingArea.id : null,
+        itemName: t.itemName,
+        category: t.category,
+        quantity: t.quantity,
+        unitOfMeasure: t.unitOfMeasure,
+        estimatedValue: t.estimatedValue,
+        taggedById: uid(t.taggedBy),
+        taggedDate: t.taggedDate,
+        reason: t.reason,
+        photoUrl: await photo(t.photo, t.taggedBy, 'redTags.photoUrl', t.taggedDate),
+        status: t.status,
+        dispositionAction: t.dispositionAction ?? null,
+        dispositionJustification: t.dispositionJustification ?? null,
+        targetDispositionDate: t.targetDispositionDate,
+        actualDispositionDate: t.actualDispositionDate ?? null,
+        actualDispositionAction: t.actualDispositionAction ?? null,
+        disposedById: t.disposedBy ? uid(t.disposedBy) : null,
+        supervisorApprovedById: t.approvedBy ? uid(t.approvedBy) : null,
+        financialRecovered: t.financialRecovered ?? null,
+        closurePhotoUrl: t.status === 'DISPOSED' ? await photo('scrapBin', t.disposedBy, 'redTags.closurePhotoUrl', t.actualDispositionDate) : null,
+        createdAt: t.taggedDate,
       },
     });
   }
 
-  // ==========================================
-  // PHASE 3 SEED: AUDIT EXECUTION, OBSERVATIONS, CAPA & RED TAGS
-  // ==========================================
-
-  const defaultAdmin = userMap.get('admin@skilglobal.com')!;
-  const leadAuditor = userMap.get('auditor.lead@skilglobal.com') || defaultAdmin;
-  const areaOwner = userMap.get('owner.asm01@skilglobal.com') || defaultAdmin;
-  const coordinator = userMap.get('coordinator.5s@skilglobal.com') || defaultAdmin;
-
-  // 1. Audit Execution
-  const execution1 = await prisma.auditExecution.upsert({
-    where: { tenantId_auditCode: { tenantId: tenant1.id, auditCode: 'EXEC-BLR-2026-0001' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      locationId: loc1.id,
-      templateId: template.id,
-      templateVersionId: templateVersion.id,
-      auditorId: leadAuditor,
-      auditCode: 'EXEC-BLR-2026-0001',
-      auditType: 'ROUTINE',
-      status: 'SUBMITTED',
-      startedAt: new Date(now.getTime() - 2 * 3600000),
-      completedAt: new Date(now.getTime() - 1 * 3600000),
-      overallScore: 84.5,
-      maxPossibleScore: 100.0,
-      earnedScore: 84.5,
-      pillarScores: JSON.stringify({
-        S1_SORT: 78.0,
-        S2_SET_IN_ORDER: 88.0,
-        S3_SHINE: 75.0,
-        S4_STANDARDIZE: 95.0,
-        S5_SUSTAIN: 86.0,
-        S6_SAFETY: 100.0,
-      }),
-      isPassed: true,
-      criticalFailureCount: 0,
-      summaryNotes: 'Comprehensive 5S audit completed. Strong adherence in standardized floor markings and safety protocols. Non-conformances noted in obsolete tooling clutter (1S) and hydraulic lubricant seepage under conveyor motor (3S).',
-      auditorName: 'Vikram Joshi (Lead 5S Auditor)',
-      auditorSignature: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-    },
-  });
-
-  const execution2 = await prisma.auditExecution.upsert({
-    where: { tenantId_auditCode: { tenantId: tenant1.id, auditCode: 'EXEC-BLR-2026-0004' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      locationId: loc1.id,
-      templateId: template.id,
-      templateVersionId: templateVersion.id,
-      auditorId: userMap.get('coordinator.5s@skilglobal.com') || leadAuditor,
-      auditCode: 'EXEC-BLR-2026-0004',
-      auditType: 'ROUTINE',
-      status: 'SUBMITTED',
-      startedAt: new Date(now.getTime() - 24 * 3600000),
-      completedAt: new Date(now.getTime() - 23 * 3600000),
-      overallScore: 92.5,
-      maxPossibleScore: 100.0,
-      earnedScore: 92.5,
-      pillarScores: JSON.stringify({
-        S1_SORT: 92.0,
-        S2_SET_IN_ORDER: 95.0,
-        S3_SHINE: 88.0,
-        S4_STANDARDIZE: 95.0,
-        S5_SUSTAIN: 92.0,
-        S6_SAFETY: 100.0,
-      }),
-      isPassed: true,
-      criticalFailureCount: 0,
-      summaryNotes: 'Re-audit of CNC Milling Cell 01 confirmed substantial 5S improvements. Sub-bench clutter completely eradicated and shadow board tool tags 100% compliant.',
-      auditorName: 'Sarah Jenkins (5S Program Coordinator)',
-      auditorSignature: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
-    },
-  });
-
-  // 2. Observations
-  const obs1 = await prisma.observation.upsert({
-    where: { tenantId_observationCode: { tenantId: tenant1.id, observationCode: 'OBS-BLR-2026-0001' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      observationCode: 'OBS-BLR-2026-0001',
-      executionId: execution1.id,
-      locationId: loc1.id,
-      category: 'S1_SORT',
-      severity: 'CRITICAL',
-      title: 'Obsolete and Unlabelled Fixtures Stored Under Workstation Bench',
-      description: 'Found 4 unlabelled machining fixtures and corroded cutting dies stored directly on the floor under Assembly Station 01. Obstructs operator legroom and poses tripping hazard.',
-      beforePhotoUrl: '/assets/5s/cluttered_under_bench.jpg',
-      annotatedPhotoUrl: '/assets/5s/cluttered_under_bench.jpg',
-      annotationData: JSON.stringify([{ type: 'circle', x: 250, y: 180, radius: 45, color: '#EF4444', text: 'Obsolete Fixture' }]),
-      status: 'ACTION_ASSIGNED',
-      riskAssessment: 'High safety risk and potential parts mix-up during changeovers.',
-      tags: JSON.stringify(['1S-Sort', 'Clutter', 'TripHazard']),
-      loggedById: leadAuditor,
-    },
-  });
-
-  const obs2 = await prisma.observation.upsert({
-    where: { tenantId_observationCode: { tenantId: tenant1.id, observationCode: 'OBS-BLR-2026-0002' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      observationCode: 'OBS-BLR-2026-0002',
-      executionId: execution1.id,
-      locationId: loc2.id,
-      category: 'S3_SHINE',
-      severity: 'MAJOR',
-      title: 'Hydraulic Oil Sheen and Leakage around Pump Motor Seal',
-      description: 'Secondary hydraulic power pack shows slow dripping oil accumulating in drip tray without absorbent pads. Originating from flange coupling gasket.',
-      beforePhotoUrl: '/assets/5s/oil_leak_defect.jpg',
-      annotatedPhotoUrl: '/assets/5s/oil_leak_defect.jpg',
-      annotationData: JSON.stringify([{ type: 'arrow', fromX: 100, fromY: 100, toX: 220, toY: 190, color: '#F59E0B', text: 'Oil Leak' }]),
-      status: 'IN_PROGRESS',
-      riskAssessment: 'Slip hazard and environmental non-conformance.',
-      tags: JSON.stringify(['3S-Shine', 'OilLeak', 'Equipment']),
-      loggedById: leadAuditor,
-    },
-  });
-
-  const obs3 = await prisma.observation.upsert({
-    where: { tenantId_observationCode: { tenantId: tenant1.id, observationCode: 'OBS-BLR-2026-0003' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      observationCode: 'OBS-BLR-2026-0003',
-      executionId: execution1.id,
-      locationId: loc3.id,
-      category: 'S2_SET_IN_ORDER',
-      severity: 'MODERATE',
-      title: 'Missing Shadow Board Color-Coding Tape for Torque Wrenches',
-      description: 'Torque wrench slots #3 and #4 on tool board have degraded color tape and faded torque limit labels.',
-      beforePhotoUrl: '/assets/5s/shadow_board_clutter.jpg',
-      status: 'PENDING_VERIFICATION',
-      riskAssessment: 'Risk of operator using incorrect torque rating.',
-      tags: JSON.stringify(['2S-SetInOrder', 'VisualControl', 'Tools']),
-      loggedById: leadAuditor,
-    },
-  });
-
-  const obs4 = await prisma.observation.upsert({
-    where: { tenantId_observationCode: { tenantId: tenant1.id, observationCode: 'OBS-BLR-2026-0004' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      observationCode: 'OBS-BLR-2026-0004',
-      executionId: execution1.id,
-      locationId: loc1.id,
-      category: 'S5_SUSTAIN',
-      severity: 'KAIZEN_OPPORTUNITY',
-      title: 'Exemplary Digital 5S Kaizen Board Implemented by Team Alpha',
-      description: 'Workstation team built an innovative magnetic QR holder allowing shift operators to view SOPs directly on tablets with 1 tap.',
-      beforePhotoUrl: '/assets/5s/kaizen_board_digital.jpg',
-      status: 'RESOLVED',
-      riskAssessment: 'Best practice recommended for plant-wide rollout.',
-      tags: JSON.stringify(['5S-Kaizen', 'BestPractice', 'Innovation']),
-      loggedById: leadAuditor,
-    },
-  });
-
-  // 3. Corrective Actions (CAPA)
-  const capa1 = await prisma.correctiveAction.upsert({
-    where: { tenantId_actionCode: { tenantId: tenant1.id, actionCode: 'CAPA-BLR-2026-0001' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      actionCode: 'CAPA-BLR-2026-0001',
-      observationId: obs1.id,
-      locationId: loc1.id,
-      title: 'Remove Obsolete Fixtures and Red Tag to Holding Area',
-      description: 'Inspect all sub-bench storage areas, segregate obsolete tooling, and transfer to Plant Red Tag Holding Area for disposal evaluation.',
-      actionType: 'CORRECTIVE',
-      rootCauseCategory: 'METHOD',
-      fiveWhyAnalysis: JSON.stringify({
-        why1: 'Why were obsolete tools stored under bench? Operator kept them as backups.',
-        why2: 'Why were backups needed? No clear procedure for tool decommissioning.',
-        why3: 'Why was there no decommissioning procedure? Red Tag workflow not trained for shift 2.',
-        why4: 'Why was training missing? New onboarding module had not covered red tagging.',
-        why5: 'Root Cause: Absence of standard 1S sorting cadence and shift handover checklist.',
-        rootCauseConclusion: 'Absence of standard 1S sorting routine and shift handover checklist for tooling quarantine.',
-        solution: 'Establish dedicated tooling quarantine zone and install red-tag holding rack with 48h SLA disposal policy.',
-        preventiveAction: 'Incorporate 5-minute end-of-shift 1S sorting checklist into shift handover standard SOP-5S-01.',
-        verificationCriteria: '0 unlabelled or obsolete tools found under assembly benches during 3 consecutive weekly audits.',
-      }),
-      assigneeId: areaOwner,
-      assignedById: leadAuditor,
-      targetDate: new Date(now.getTime() + 24 * 3600000), // 24 Hours SLA
-      slaHours: 24,
-      isOverdue: false,
-      escalationTier: 'NORMAL',
-      status: 'ASSIGNED',
-    },
-  });
-
-  const capa2 = await prisma.correctiveAction.upsert({
-    where: { tenantId_actionCode: { tenantId: tenant1.id, actionCode: 'CAPA-BLR-2026-0002' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      actionCode: 'CAPA-BLR-2026-0002',
-      observationId: obs2.id,
-      locationId: loc2.id,
-      title: 'Replace Flange Gasket and Clean Power Pack Basin',
-      description: 'Lockout/Tagout hydraulic unit, replace worn Viton flange seal, torque bolts to 65 Nm, and install absorbent containment socks in drip tray.',
-      actionType: 'CORRECTIVE',
-      rootCauseCategory: 'MACHINE',
-      fiveWhyAnalysis: JSON.stringify({
-        why1: 'Why is pump leaking? Flange gasket degraded from heat cycles.',
-        why2: 'Why did gasket degrade? Gasket was standard Buna-N instead of high-temp Viton.',
-        why3: 'Why was wrong gasket installed? Maintenance storeroom stock part mismatch.',
-        why4: 'Why was there a part mismatch? Bill of materials had generic gasket code.',
-        why5: 'Root Cause: Preventative maintenance BOM lacked temperature-rated part spec.',
-        rootCauseConclusion: 'Preventative maintenance BOM lacked high-temperature Viton gasket specification.',
-        solution: 'Replace flange seal with Viton high-temp grade (Part #VT-882), torque bolts to 65 Nm, and install catchment drip tray.',
-        preventiveAction: 'Update CMMS maintenance BOM master and supplier catalogue to restrict standard Buna-N gaskets for high-heat pumps.',
-        verificationCriteria: 'Zero hydraulic fluid seepage across 100 operating hours post-restart.',
-      }),
-      assigneeId: areaOwner,
-      assignedById: leadAuditor,
-      targetDate: new Date(now.getTime() + 72 * 3600000), // 3 Days SLA
-      slaHours: 72,
-      isOverdue: false,
-      escalationTier: 'NORMAL',
-      status: 'IN_PROGRESS',
-    },
-  });
-
-  const capa3 = await prisma.correctiveAction.upsert({
-    where: { tenantId_actionCode: { tenantId: tenant1.id, actionCode: 'CAPA-BLR-2026-0003' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      actionCode: 'CAPA-BLR-2026-0003',
-      observationId: obs3.id,
-      locationId: loc3.id,
-      title: 'Re-tape Shadow Board with High-Durability 3M Visual Striping',
-      description: 'Applied new high-contrast yellow/black border tape and laminated torque specification guide next to wrench slots.',
-      actionType: 'CORRECTIVE',
-      rootCauseCategory: 'METHOD',
-      fiveWhyAnalysis: JSON.stringify({
-        why1: 'Why was shadow board outline missing? Adhesive tape peeled from solvent wipe-downs.',
-        why2: 'Why did tape peel? Standard paper tape used instead of vinyl industrial grade.',
-        why3: 'Why was paper tape used? Quick temporary fix was never replaced.',
-        why4: 'Why was it not replaced? Visual standard maintenance was not on 5S audit checklist.',
-        why5: 'Root Cause: Shadow board visual standards lacked scheduled maintenance inspection.',
-        rootCauseConclusion: 'Shadow board visual striping degraded from solvent cleaning and lacked preventative audit check.',
-        solution: 'Apply heavy-duty 3M 5700 vinyl safety tape with protective poly-laminate and re-mount calibrated torque wrench brackets.',
-        preventiveAction: 'Update cleaning SOP to mandate non-solvent cleaner on visual boards and add monthly visual audit check.',
-        verificationCriteria: '100% tool return compliance verified by shift lead at end of each production shift.',
-      }),
-      assigneeId: areaOwner,
-      assignedById: leadAuditor,
-      targetDate: new Date(now.getTime() + 7 * 86400000),
-      slaHours: 168,
-      isOverdue: false,
-      escalationTier: 'NORMAL',
-      status: 'PENDING_VERIFICATION',
-      closureNotes: 'Completed visual striping renewal using industrial 3M 5700 vinyl safety tape. Calibrated all 4 torque wrenches.',
-      afterPhotoUrl: '/assets/5s/shadow_board_std.jpg',
-      closureSubmittedAt: new Date(now.getTime() - 4 * 3600000),
-      verifiedById: coordinator,
-    },
-  });
-
-  // Action History Logs
-  await prisma.actionHistoryLog.createMany({
+  // ---------------------------------------------------------------- 14. Daily routine for the CNC Machining Cell
+  const cnc = loc('cnc');
+  await prisma.routineItem.createMany({
     data: [
-      {
-        tenantId: tenant1.id,
-        actionId: capa1.id,
-        actorId: leadAuditor,
-        actorName: 'Vikram Joshi (Lead Auditor)',
-        fromStatus: 'OPEN',
-        toStatus: 'ASSIGNED',
-        comment: 'Action generated automatically from Critical Observation OBS-BLR-2026-0001 during 5S audit.',
+      { kind: 'KAMISHIBAI', text: 'Only the tools needed for today\'s job are at the machines', category: 'S1_SORT' },
+      { kind: 'KAMISHIBAI', text: 'Chip trays are emptied and there is no oil or coolant on the floor', category: 'S3_SHINE' },
+      { kind: 'KAMISHIBAI', text: 'Walkways and the fire extinguisher are clear', category: 'S6_SAFETY' },
+      { kind: 'SHADOW_TOOL', text: 'Spanner set', position: 'A1', category: 'S2_SET_IN_ORDER' },
+      { kind: 'SHADOW_TOOL', text: 'Torque wrench', position: 'A2', category: 'S2_SET_IN_ORDER' },
+      { kind: 'SHADOW_TOOL', text: 'Digital caliper', position: 'B1', category: 'S2_SET_IN_ORDER' },
+    ].map((item, i) => ({ ...item, tenantId, locationId: cnc.id, sortOrder: i + 1, createdById: uid('arun') })),
+  });
+
+  // ---------------------------------------------------------------- 15. Before / after photos of improvements
+  const evidenceSeeds = [
+    {
+      area: 'cnc', category: 'S2_SET_IN_ORDER', before: 'toolsOffBoard' as SceneName, after: 'toolsOnBoard' as SceneName, by: 'arun', at: dayInPastMonth(3, 20, 15),
+      description: 'Shadow board put up at the CNC cell: every tool now has an outlined, labelled place.', afterLabel: 'Shadow board in use',
+    },
+    {
+      area: 'pack', category: 'S6_SAFETY', before: 'floorWorn' as SceneName, after: 'floorRepainted' as SceneName, by: 'deepa', at: daysFromNow(-14, 16),
+      description: 'Worn walkway line at the dispatch door repainted, with a walkway arrow for forklift drivers.', afterLabel: 'Repainted walkway',
+    },
+  ];
+  for (const e of evidenceSeeds) {
+    await prisma.locationEvidence.create({
+      data: {
+        tenantId,
+        locationId: loc(e.area).id,
+        category: e.category,
+        description: e.description,
+        beforePhotoUrl: await photo(e.before, e.by, 'locationEvidence.beforePhotoUrl', e.at),
+        afterPhotoUrl: await photo(e.after, e.by, 'locationEvidence.afterPhotoUrl', e.at),
+        afterLabel: e.afterLabel,
+        uploadedById: uid(e.by),
+        createdAt: e.at,
       },
-      {
-        tenantId: tenant1.id,
-        actionId: capa3.id,
-        actorId: areaOwner,
-        actorName: 'Ramesh Kumar (Area Owner)',
-        fromStatus: 'IN_PROGRESS',
-        toStatus: 'PENDING_VERIFICATION',
-        comment: 'Shadow board striping replaced and torque specs verified. Ready for independent verification.',
+    });
+  }
+
+  // ---------------------------------------------------------------- 16. Recognition: floating trophies and kudos
+  // Packing & Dispatch has scored best every month, the Tool Crib kept its 3S Shine high and the CNC cell improved most.
+  // The Kaizen Shield is left unawarded: no area has three on-time verified actions yet.
+  const quarterStart = dayInPastMonth(3, 1, 10);
+  const trophySeeds = [
+    {
+      trophyKey: 'PLANT_EXCELLENCE', area: 'crib', awardedBy: 'rajesh', awardedAt: dayInPastMonth(6, 2, 10), endedAt: quarterStart, scoreAtAward: 76.4,
+      citation: 'Highest average score in the plant last quarter, with the new shadow boards in daily use.',
+    },
+    {
+      trophyKey: 'PLANT_EXCELLENCE', area: 'pack', awardedBy: 'rajesh', awardedAt: quarterStart, endedAt: null, scoreAtAward: 84.3,
+      citation: 'Best score in every monthly audit this quarter. Clear labelling and an orderly dispatch bay.',
+    },
+    {
+      trophyKey: 'GOLDEN_BROOM', area: 'pack', awardedBy: 'sneha', awardedAt: dayInPastMonth(3, 3, 11), endedAt: dayInPastMonth(1, 2, 11), scoreAtAward: 82.5,
+      citation: 'Spotless packing tables and a red-tag corner that is always tidy.',
+    },
+    {
+      trophyKey: 'GOLDEN_BROOM', area: 'crib', awardedBy: 'sneha', awardedAt: dayInPastMonth(1, 2, 11), endedAt: null, scoreAtAward: 75.7,
+      citation: 'Shelves and bins cleaned and relabelled; the daily cleaning checklist has been ticked every day this month.',
+    },
+    {
+      trophyKey: 'SAFETY_VANGUARD', area: 'line1', awardedBy: 'rajesh', awardedAt: dayInPastMonth(5, 4, 10), endedAt: dayInPastMonth(2, 1, 10), scoreAtAward: 61.0,
+      citation: 'New walkway markings and a keep-clear box at every station.',
+    },
+    {
+      trophyKey: 'SAFETY_VANGUARD', area: 'cnc', awardedBy: 'rajesh', awardedAt: dayInPastMonth(2, 1, 10), endedAt: null, scoreAtAward: 71.0,
+      citation: 'Machine guards checked every shift and safety glasses worn by everyone at every audit.',
+    },
+  ];
+  for (const t of trophySeeds) {
+    await prisma.trophyAward.create({
+      data: {
+        tenantId,
+        trophyKey: t.trophyKey,
+        locationId: loc(t.area).id,
+        awardedById: uid(t.awardedBy),
+        citation: t.citation,
+        scoreAtAward: t.scoreAtAward,
+        awardedAt: t.awardedAt,
+        endedAt: t.endedAt,
       },
-    ],
+    });
+  }
+
+  // 25 XP per kudos, the same fixed amount the API grants (KUDOS_POINTS)
+  const kudosSeeds = [
+    { from: 'sneha', to: 'deepa', category: '5S_EXCELLENCE', daysAgo: 1, message: 'Packing & Dispatch looks great. Labels are now printed right at the table, which fixed the unlabelled boxes for good.' },
+    { from: 'ravi', to: 'deepa', category: 'TEAMWORK', daysAgo: 2, message: 'Thanks for helping us sort the old bracket stock on Line 1 after our shift.' },
+    { from: 'suresh', to: 'arun', category: 'RAPID_CAPA', daysAgo: 3, message: 'Absorbent pads under CNC 2 within an hour of the audit, and the seal already ordered. Quick work.' },
+    { from: 'deepa', to: 'ravi', category: 'SAFETY_FIRST', daysAgo: 4, message: 'Good catch reporting the blocked fire extinguisher at station 4. That is exactly what we need.' },
+    { from: 'amit', to: 'arun', category: 'CLEAN_STREAK', daysAgo: 9, message: 'Tool Crib shelves were spotless at the spot check today, three weeks running.' },
+    { from: 'rajesh', to: 'sneha', category: 'KAIZEN_INNOVATION', daysAgo: 14, message: 'The one-page floor marking standard made it easy for every area to repaint the same way.' },
+    { from: 'arun', to: 'amit', category: 'TEAMWORK', daysAgo: 18, message: 'Thanks for walking the team through the audit questions before the monthly audit.' },
+    { from: 'pooja', to: 'deepa', category: '5S_EXCELLENCE', daysAgo: 24, message: 'Congratulations on keeping the Plant Excellence Cup in Packing & Dispatch.' },
+    { from: 'sneha', to: 'arun', category: 'KAIZEN_INNOVATION', daysAgo: 33, message: 'The shadow board at the CNC cell is now the example we show other areas.' },
+    { from: 'kavita', to: 'rajesh', category: 'TEAMWORK', daysAgo: 41, message: 'Three months of rising audit scores across the plant. Well led.' },
+    { from: 'deepa', to: 'sneha', category: 'TEAMWORK', daysAgo: 52, message: 'Thanks for coaching the assembly team on red tags. Sorting is much faster now.' },
+    { from: 'suresh', to: 'arun', category: 'SAFETY_FIRST', daysAgo: 63, message: 'Machine guards checked every shift without being asked.' },
+  ];
+  await prisma.kudos.createMany({
+    data: kudosSeeds.map((k, i) => ({
+      tenantId,
+      fromUserId: uid(k.from),
+      toUserId: uid(k.to),
+      category: k.category,
+      message: k.message,
+      points: 25,
+      createdAt: daysFromNow(-k.daysAgo, 9 + (i % 7)),
+    })),
   });
 
-  // 4. Red Tag Register
-  await prisma.redTag.upsert({
-    where: { tenantId_tagNumber: { tenantId: tenant1.id, tagNumber: 'RT-BLR-2026-0001' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      tagNumber: 'RT-BLR-2026-0001',
-      locationId: loc1.id,
-      targetHoldingAreaId: loc2.id,
-      itemName: 'Defective Pneumatic Air Drill Motor (3000 RPM)',
-      itemDescription: 'Motor stator seized with broken trigger throttle valve. Unusable in production.',
-      category: 'BROKEN_EQUIPMENT',
-      quantity: 2,
-      unitOfMeasure: 'PCS',
-      estimatedValue: 450.0,
-      taggedById: leadAuditor,
-      taggedDate: new Date(now.getTime() - 8 * 86400000), // 8 Days Ago (In Holding Area)
-      reason: 'Motor failed electrical insulation and torque test. Replaced with new ergonomic tool.',
-      photoUrl: '/assets/5s/red_tag_holding_area.jpg',
-      status: 'IN_HOLDING_AREA',
-      dispositionAction: 'REPAIR_RESTORE',
-      dispositionJustification: 'Can be refurbished by vendor for 30% of replacement cost.',
-      targetDispositionDate: new Date(now.getTime() + 6 * 86400000),
-    },
-  });
+  // Storage used, as FilesService keeps it after each upload
+  const stored = await prisma.storedFile.aggregate({ where: { tenantId }, _sum: { sizeBytes: true } });
+  await prisma.tenant.update({ where: { id: tenantId }, data: { storageUsedMb: Math.ceil((stored._sum.sizeBytes ?? 0) / 1048576) } });
 
-  await prisma.redTag.upsert({
-    where: { tenantId_tagNumber: { tenantId: tenant1.id, tagNumber: 'RT-BLR-2026-0002' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      tagNumber: 'RT-BLR-2026-0002',
-      locationId: loc1.id,
-      targetHoldingAreaId: loc2.id,
-      itemName: 'Surplus Pre-Machined Stainless Billets (Grade 316L)',
-      itemDescription: '15 units of stainless cylindrical billets leftover from cancelled export batch.',
-      category: 'SURPLUS_INVENTORY',
-      quantity: 15,
-      unitOfMeasure: 'PCS',
-      estimatedValue: 3200.0,
-      taggedById: leadAuditor,
-      taggedDate: new Date(now.getTime() - 22 * 86400000), // 22 Days Ago (Ageing warning)
-      reason: 'No upcoming production order planned for this specific grade in Line 01.',
-      photoUrl: '/assets/5s/red_tag_holding_area.jpg',
-      status: 'PENDING_DISPOSITION',
-      dispositionAction: 'RELOCATE',
-      dispositionJustification: 'Transfer to Plant 2 Aerostructures line where Grade 316L is actively consumed.',
-      targetDispositionDate: new Date(now.getTime() + 2 * 86400000),
-    },
-  });
-
-  await prisma.redTag.upsert({
-    where: { tenantId_tagNumber: { tenantId: tenant1.id, tagNumber: 'RT-BLR-2026-0003' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      tagNumber: 'RT-BLR-2026-0003',
-      locationId: loc3.id,
-      targetHoldingAreaId: loc2.id,
-      itemName: 'Decommissioned Hydraulic Tube Bending Clamp Fixtures',
-      itemDescription: 'Cast iron manual clamp fixtures retired following robotic bending cell upgrade.',
-      category: 'SCRAP_WASTE',
-      quantity: 4,
-      unitOfMeasure: 'SETS',
-      estimatedValue: 1200.0,
-      taggedById: areaOwner,
-      taggedDate: new Date(now.getTime() - 35 * 86400000), // 35 Days Ago (Ageing Critical Alert)
-      reason: 'Obsolete tooling with no future applicability.',
-      photoUrl: '/assets/5s/cluttered_under_bench.jpg',
-      status: 'DISPOSITION_APPROVED',
-      dispositionAction: 'DISPOSE_SCRAP',
-      dispositionJustification: 'Approved for authorized metal recycler pickup.',
-      targetDispositionDate: new Date(now.getTime() + 1 * 86400000),
-      supervisorApprovedById: coordinator,
-    },
-  });
-
-  await prisma.redTag.upsert({
-    where: { tenantId_tagNumber: { tenantId: tenant1.id, tagNumber: 'RT-BLR-2026-0004' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      tagNumber: 'RT-BLR-2026-0004',
-      locationId: loc2.id,
-      targetHoldingAreaId: loc3.id,
-      itemName: 'Obsolete SMD 8mm Tape Reel Component Feeders (Batch of 8)',
-      itemDescription: 'Legacy mechanical feeder cassettes incompatible with high-speed Yamaha SMT pick & place head.',
-      category: 'UNNEEDED_TOOL',
-      quantity: 8,
-      unitOfMeasure: 'PCS',
-      estimatedValue: 18500.0,
-      taggedById: areaOwner,
-      taggedDate: new Date(now.getTime() - 12 * 86400000), // 12 Days Ago
-      reason: 'Replaced with electric intelligent feeders. Taking up prime rack space in feeder trolley bay.',
-      photoUrl: '/assets/5s/shadow_board_clutter.jpg',
-      status: 'IN_HOLDING_AREA',
-      dispositionAction: 'AUCTION_SELL',
-      dispositionJustification: 'Sell to secondary electronics refurbisher network.',
-      targetDispositionDate: new Date(now.getTime() + 5 * 86400000),
-    },
-  });
-
-  await prisma.redTag.upsert({
-    where: { tenantId_tagNumber: { tenantId: tenant1.id, tagNumber: 'RT-BLR-2026-0005' } },
-    update: {},
-    create: {
-      tenantId: tenant1.id,
-      tagNumber: 'RT-BLR-2026-0005',
-      locationId: loc1.id,
-      targetHoldingAreaId: loc3.id,
-      itemName: 'Cracked Carbide End-Mill Cutters & Dull Inserts Box',
-      itemDescription: 'Collection of 45 worn solid carbide end mills with chipped flutes.',
-      category: 'SCRAP_WASTE',
-      quantity: 45,
-      unitOfMeasure: 'PCS',
-      estimatedValue: 9500.0,
-      taggedById: leadAuditor,
-      taggedDate: new Date(now.getTime() - 19 * 86400000), // 19 Days Ago
-      reason: 'Accumulated in operator tool drawers instead of being sent to regrinding vendor.',
-      photoUrl: '/assets/5s/oil_leak_defect.jpg',
-      status: 'DISPOSED',
-      dispositionAction: 'DISPOSE_SCRAP',
-      dispositionJustification: 'Sold to specialized carbide scrap recycling partner.',
-      actualDispositionDate: new Date(now.getTime() - 2 * 86400000),
-      financialRecovered: 4200.0,
-    },
-  });
-
-  console.log('✅ Phase 1, 2 & 3 Enterprise Seed Completed with 100% Success!');
+  // ---------------------------------------------------------------- Summary
+  const counts = {
+    users: await prisma.user.count(),
+    orgNodes: await prisma.orgNode.count(),
+    locations: await prisma.location.count(),
+    standards: await prisma.standard.count(),
+    templateQuestions: await prisma.auditTemplateQuestion.count(),
+    scheduledAudits: await prisma.scheduledAuditInstance.count(),
+    completedAudits: executionCount,
+    auditAnswers: answerCount,
+    observations: await prisma.observation.count(),
+    correctiveActions: await prisma.correctiveAction.count(),
+    redTags: await prisma.redTag.count(),
+    routineItems: await prisma.routineItem.count(),
+    beforeAfterPairs: await prisma.locationEvidence.count(),
+    trophyAwards: await prisma.trophyAward.count(),
+    kudos: await prisma.kudos.count(),
+    photos: await prisma.storedFile.count(),
+  };
+  console.log(`Done: 1 organization (${tenant.name})${plan ? ` on the ${plan.name} plan` : ''}.`);
+  for (const [name, count] of Object.entries(counts)) console.log(`  ${name.padEnd(18)} ${count}`);
 }
 
 main()
   .catch((e) => {
-    console.error('❌ Seed Failed:', e);
+    console.error('Seed failed:', e);
     process.exit(1);
   })
   .finally(async () => {

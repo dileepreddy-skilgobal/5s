@@ -1,161 +1,293 @@
-import React, { useState, useEffect } from 'react';
-import { api } from '../../services/api';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { api, getApiErrorMessage } from '../../services/api';
+import { capaApi as capaCoreApi, FiveWhyInput, hasRootCauseAndSolution } from '../../services/capaApi';
+import { capaApi } from '../../services/api-capa';
+import { ACTION_SOURCE_LABELS, ActionSource, CapaRecord, CapaWorkflowStep } from '../../types/capa';
 import { useApp } from '../../context/AppContext';
+import { useTerminology } from '../../hooks/useTerminology';
+import { useI18n } from '../../i18n';
 import { Card } from '../../components/ui/Card';
+import { PageHeader } from '../../components/ui/PageHeader';
+import { SummaryCard, SummaryGrid, SummaryTone } from '../../components/ui/SummaryCard';
+import { FormField, SearchInput, FilterBar } from '../../components/ui/FormField';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { ImageWithFallback } from '../../components/ui/ImageWithFallback';
+import { LoadingState, ErrorState, EmptyState } from '../../components/ui/StateViews';
 import { AuditReportModal } from '../../components/common/AuditReportModal';
-import { FIVE_S_IMAGES } from '../../constants/images';
 import { PhotoAnnotationModal } from '../../components/common/PhotoAnnotationModal';
-import { CorrectiveAction, User, Location } from '../../types';
+import { PhotoEvidenceField } from './PhotoEvidenceField';
+import { ConfirmDialog } from '../../components/ui/ConfirmDialog';
+import { RaiseCapaModal, RaiseCapaOrigin } from './RaiseCapaModal';
+import { CapaTimelineModal } from './CapaTimelineModal';
+import { ReassignActionModal, ChangeDueDateModal } from './CapaManageModals';
+import { ACTION_STATUS_LABELS, actionStatusLabel, actionStatusVariant, humanize, BadgeVariant, SEVERITY_LABELS, severityLabel, severityVariant } from '../../constants/labels';
+import { CorrectiveAction } from '../../types';
 import {
   Layers,
   Clock,
   ShieldCheck,
   AlertOctagon,
   CheckCircle2,
-  HelpCircle,
   Camera,
   RefreshCw,
-  Search,
   Kanban,
   Table as TableIcon,
   UserCheck,
-  Sparkles,
   FileCheck,
   AlertTriangle,
   Lightbulb,
-  Target,
-  Wrench,
   RotateCcw,
   Lock,
   Plus,
   Trash2,
-  Upload,
+  Play,
+  ArrowRight,
+  History,
+  UserCog,
+  CalendarClock,
+  TrendingUp,
 } from 'lucide-react';
 
-export const CapaManagementPage: React.FC = () => {
-  const { addToast } = useApp();
+type ActionStatus = CorrectiveAction['status'];
 
+/** Kanban stages in workflow order (each backend status has its own column). */
+const KANBAN_STATUSES: ActionStatus[] = ['PENDING_ACKNOWLEDGEMENT', 'ASSIGNED', 'IN_PROGRESS', 'REOPENED', 'PENDING_VERIFICATION', 'VERIFIED', 'CLOSED'];
+
+const COLUMN_HINTS: Partial<Record<ActionStatus, string>> = {
+  PENDING_ACKNOWLEDGEMENT: 'Starts once the audit is acknowledged',
+  ASSIGNED: 'Waiting for the assignee to start',
+  IN_PROGRESS: 'Fix under way',
+  REOPENED: 'Rejected, or the fix did not hold',
+  PENDING_VERIFICATION: 'Evidence submitted, waiting for a verifier',
+  VERIFIED: 'Effectiveness review due',
+  CLOSED: 'Fix confirmed',
+};
+
+/** Statuses in which the assignee's SLA clock is running. */
+const ASSIGNEE_ACTIVE_STATUSES: ActionStatus[] = ['ASSIGNED', 'IN_PROGRESS', 'REOPENED'];
+
+const ROOT_CAUSE_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'METHOD', label: 'Method (procedures, work instructions, SOPs)' },
+  { value: 'MACHINE', label: 'Machine (tooling, maintenance, wear)' },
+  { value: 'MATERIAL', label: 'Material (supplies, part quality, storage)' },
+  { value: 'MANPOWER', label: 'Manpower (training, competency, handover)' },
+  { value: 'MEASUREMENT', label: 'Measurement (calibration, inspection limits)' },
+  { value: 'ENVIRONMENT', label: 'Environment (lighting, ergonomics, layout)' },
+];
+
+const EMPTY_FIVE_WHY: FiveWhyInput = {
+  why1: '',
+  why2: '',
+  why3: '',
+  why4: '',
+  why5: '',
+  rootCauseCategory: 'METHOD',
+  rootCauseConclusion: '',
+  solution: '',
+  preventiveAction: '',
+  verificationCriteria: '',
+};
+
+type WhyKey = 'why1' | 'why2' | 'why3' | 'why4' | 'why5';
+const whyKey = (level: number) => `why${level}` as WhyKey;
+
+/** Escalation tiers set by the escalation scheduler; NORMAL is not shown. */
+const ESCALATION_TIER_LABELS: Record<string, string> = {
+  DUE_SOON: 'Due soon',
+  ESCALATED_L1: 'Escalated: level 1',
+  ESCALATED_L2: 'Escalated: level 2',
+  ESCALATED_L3: 'Escalated: level 3',
+};
+const escalationLabel = (tier: string) => ESCALATION_TIER_LABELS[tier] ?? humanize(tier);
+
+/** Filters on the action list; each can be preset from the URL (?status=&severity=&locationId=&assigneeId=&overdue=1&source=). */
+interface CapaFilters {
+  status: string;
+  severity: string;
+  locationId: string;
+  assigneeId: string;
+  tier: string;
+  source: string;
+  overdue: boolean;
+}
+const NO_FILTERS: CapaFilters = { status: 'ALL', severity: 'ALL', locationId: 'ALL', assigneeId: 'ALL', tier: 'ALL', source: 'ALL', overdue: false };
+
+const filtersFromParams = (params: URLSearchParams): CapaFilters => {
+  const status = params.get('status');
+  return {
+    // status=OVERDUE is accepted as an alias of overdue=1
+    status: status && status !== 'OVERDUE' ? status : 'ALL',
+    severity: params.get('severity') || 'ALL',
+    locationId: params.get('locationId') || 'ALL',
+    assigneeId: params.get('assigneeId') || 'ALL',
+    tier: params.get('escalationTier') || 'ALL',
+    source: params.get('source') || 'ALL',
+    overdue: params.get('overdue') === '1' || params.get('overdue') === 'true' || status === 'OVERDUE',
+  };
+};
+
+const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'}`;
+const allows = (act: CapaRecord, step: CapaWorkflowStep) => act.allowedActions?.includes(step) ?? false;
+const executionIdOf = (act: CapaRecord): string | null => act.observation?.execution?.id ?? act.observation?.executionId ?? null;
+const sourceLabel = (source?: string | null) => (source && source in ACTION_SOURCE_LABELS ? ACTION_SOURCE_LABELS[source as ActionSource] : humanize(source));
+const assigneeName = (act: CapaRecord): string =>
+  act.assignee ? `${act.assignee.firstName ?? ''} ${act.assignee.lastName ?? ''}`.trim() || '—' : 'Unassigned';
+
+const ellipsis: React.CSSProperties = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
+const lineClamp = (lines: number): React.CSSProperties => ({
+  display: '-webkit-box',
+  WebkitLineClamp: lines,
+  WebkitBoxOrient: 'vertical',
+  overflow: 'hidden',
+});
+
+export const CapaManagementPage: React.FC = () => {
+  const { addToast, can, currentUser } = useApp();
+  const { relabel } = useTerminology();
+  const { formatDate, formatDateTime } = useI18n();
+
+  // Deep links: /capa?id=<actionId> highlights one action; status/severity/locationId/assigneeId/overdue/source preset the filters
+  const [searchParams] = useSearchParams();
+  const linkedActionId = searchParams.get('id');
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+
+  // Assigners manage every action; everyone else starts with the actions assigned to them, unless a link filters the list
+  const [scope, setScope] = useState<'mine' | 'all'>(() => {
+    const preset = filtersFromParams(searchParams);
+    const linkFiltered = (Object.keys(NO_FILTERS) as Array<keyof CapaFilters>).some((k) => preset[k] !== NO_FILTERS[k]);
+    return can('ACTION_ASSIGNERS') || linkFiltered ? 'all' : 'mine';
+  });
   const [loading, setLoading] = useState<boolean>(true);
-  const [actions, setActions] = useState<CorrectiveAction[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actions, setActions] = useState<CapaRecord[]>([]);
   const [viewMode, setViewMode] = useState<'kanban' | 'table'>('kanban');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [filters, setFilters] = useState<CapaFilters>(() => filtersFromParams(searchParams));
+  const setFilter = <K extends keyof CapaFilters>(key: K, value: CapaFilters[K]) => setFilters((prev) => ({ ...prev, [key]: value }));
 
-  // Active Selected Action for Investigation / Modals
-  const [selectedAction, setSelectedAction] = useState<CorrectiveAction | null>(null);
+  // Raise, reassign, reschedule, history, delete
+  const [raiseOrigin, setRaiseOrigin] = useState<RaiseCapaOrigin | null>(null);
+  const [reassignTarget, setReassignTarget] = useState<CapaRecord | null>(null);
+  const [rescheduleTarget, setRescheduleTarget] = useState<CapaRecord | null>(null);
+  const [timelineTarget, setTimelineTarget] = useState<CapaRecord | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<CapaRecord | null>(null);
+  const [deleting, setDeleting] = useState<boolean>(false);
+  const [allowNoPhoto, setAllowNoPhoto] = useState<boolean>(false);
 
-  // Audit Report Formal Acknowledgement Modal State
-  const [reportModalOpen, setReportModalOpen] = useState<boolean>(false);
+  const [selectedAction, setSelectedAction] = useState<CapaRecord | null>(null);
+
+  // Audit report (acknowledge, or view only)
   const [selectedAuditId, setSelectedAuditId] = useState<string | null>(null);
 
-  // 5-Why Investigation Drawer
-  const [fiveWhyDrawerOpen, setFiveWhyDrawerOpen] = useState<boolean>(false);
+  // 5-Why analysis
+  const [fiveWhyOpen, setFiveWhyOpen] = useState<boolean>(false);
+  const [fiveWhyReadOnly, setFiveWhyReadOnly] = useState<boolean>(false);
   const [activeWhyCount, setActiveWhyCount] = useState<number>(1);
-  const [fiveWhyData, setFiveWhyData] = useState({
-    why1: '',
-    why2: '',
-    why3: '',
-    why4: '',
-    why5: '',
-    rootCauseCategory: 'METHOD',
-    rootCauseConclusion: '',
-    solution: '',
-    preventiveAction: '',
-    verificationCriteria: '',
-  });
+  const [fiveWhyData, setFiveWhyData] = useState<FiveWhyInput>(EMPTY_FIVE_WHY);
+  const [fiveWhyErrors, setFiveWhyErrors] = useState<{ rootCause?: string; solution?: string }>({});
+  const [saving5Why, setSaving5Why] = useState<boolean>(false);
 
-  // Action Closure Proof Drawer
-  const [closureDrawerOpen, setClosureDrawerOpen] = useState<boolean>(false);
+  // Closure evidence
+  const [closureOpen, setClosureOpen] = useState<boolean>(false);
   const [closureNotes, setClosureNotes] = useState<string>('');
   const [afterPhotoUrl, setAfterPhotoUrl] = useState<string>('');
-  const [actorName, setActorName] = useState<string>('Arun Patel (Area Owner)');
-  const [annotationModalOpen, setAnnotationModalOpen] = useState<boolean>(false);
-  const [showUrlInput, setShowUrlInput] = useState<boolean>(false);
-  const [isDraggingPhoto, setIsDraggingPhoto] = useState<boolean>(false);
+  const [noPhotoJustification, setNoPhotoJustification] = useState<string>('');
+  const [closureErrors, setClosureErrors] = useState<{ photo?: string; notes?: string; justification?: string }>({});
+  const [submittingClosure, setSubmittingClosure] = useState<boolean>(false);
+  const [annotationOpen, setAnnotationOpen] = useState<boolean>(false);
 
-  // Independent Verification Modal
-  const [verificationModalOpen, setVerificationModalOpen] = useState<boolean>(false);
+  // Verification
+  const [verificationOpen, setVerificationOpen] = useState<boolean>(false);
   const [verificationNotes, setVerificationNotes] = useState<string>('');
-  const [verifierName, setVerifierName] = useState<string>('Sneha Reddy (5S Program Coordinator)');
+  const [verificationError, setVerificationError] = useState<string>('');
+  const [verifying, setVerifying] = useState<'approve' | 'reject' | null>(null);
 
-  const handlePhotoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      if (file.size > 10 * 1024 * 1024) {
-        addToast({
-          type: 'warning',
-          title: 'File Too Large',
-          message: 'Please choose an image under 10MB.',
-        });
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const dataUrl = event.target?.result as string;
-        setAfterPhotoUrl(dataUrl);
-        addToast({
-          type: 'success',
-          title: 'Photo Evidence Attached',
-          message: 'Captured image loaded into closure proof.',
-        });
-      };
-      reader.readAsDataURL(file);
-    }
-  };
+  // Effectiveness review (VERIFIED -> CLOSED, or REOPENED when the fix did not hold)
+  const [effectivenessOpen, setEffectivenessOpen] = useState<boolean>(false);
+  const [effectiveChoice, setEffectiveChoice] = useState<boolean | null>(null);
+  const [effectivenessReview, setEffectivenessReview] = useState<string>('');
+  const [reviewError, setReviewError] = useState<string>('');
+  const [submittingReview, setSubmittingReview] = useState<boolean>(false);
 
-  const handlePhotoDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDraggingPhoto(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file && file.type.startsWith('image/')) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const dataUrl = event.target?.result as string;
-        setAfterPhotoUrl(dataUrl);
-        addToast({
-          type: 'success',
-          title: 'Photo Dropped',
-          message: 'Image file loaded into closure proof.',
-        });
-      };
-      reader.readAsDataURL(file);
-    }
-  };
+  const [startingId, setStartingId] = useState<string | null>(null);
 
+  // Links from dashboards change the query string while the page stays mounted
+  const paramKey = searchParams.toString();
   useEffect(() => {
-    loadData();
+    setFilters(filtersFromParams(new URLSearchParams(paramKey)));
+  }, [paramKey]);
+
+  // Whether the organization lets an action be closed without an after photo (with a justification)
+  useEffect(() => {
+    capaApi
+      .closurePolicy()
+      .then((p) => setAllowNoPhoto(p.allowClosureWithoutPhoto))
+      .catch(() => setAllowNoPhoto(false));
   }, []);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
     try {
-      setLoading(true);
-      const res = await api.getCorrectiveActions();
-      setActions(res);
-    } catch (err: any) {
-      addToast({
-        type: 'error',
-        title: 'Error Loading CAPA',
-        message: err.message || 'Could not fetch corrective actions.',
-      });
+      setActions(await capaApi.list(scope === 'mine' ? { assigneeId: 'me' } : undefined));
+    } catch (err) {
+      setLoadError(getApiErrorMessage(err, 'Could not load corrective actions.'));
     } finally {
       setLoading(false);
     }
-  };
+  }, [scope]);
 
-  const open5WhyDrawer = (action: CorrectiveAction) => {
-    setSelectedAction(action);
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
+
+  // Handled once per linked id (reloads after workflow actions must not re-scroll or re-warn)
+  const handledLinkRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!linkedActionId) {
+      handledLinkRef.current = null;
+      setHighlightId(null);
+      return;
+    }
+    if (loading || loadError || handledLinkRef.current === linkedActionId) return;
+    const target = actions.find((a) => a.id === linkedActionId);
+    if (!target && scope === 'mine') {
+      // The linked action may be assigned to someone else: look in all actions before giving up
+      setScope('all');
+      return;
+    }
+    handledLinkRef.current = linkedActionId;
+    if (!target) {
+      setHighlightId(null);
+      addToast({ type: 'warning', title: 'Action not found', message: 'The linked corrective action is no longer available to you.' });
+      return;
+    }
+    // Make sure no filter hides it, then bring it into view once rendered
+    setFilters(NO_FILTERS);
+    setSearchQuery('');
+    setHighlightId(target.id);
+    window.setTimeout(() => {
+      document.getElementById(`capa-action-${target.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    }, 80);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkedActionId, loading, loadError, scope]);
+
+  const highlightStyle = (id: string): React.CSSProperties =>
+    id === highlightId ? { outline: '2px solid var(--color-primary)', outlineOffset: '2px', boxShadow: '0 0 0 6px var(--color-primary-light)' } : {};
+
+  const replaceAction = (updated: CapaRecord) => setActions((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+
+  // ---------- 5-Why ----------
+  const open5Why = (action: CapaRecord) => {
     const existing = action.fiveWhyAnalysis;
-    let initialCount = 1;
-    if (existing?.why5) initialCount = 5;
-    else if (existing?.why4) initialCount = 4;
-    else if (existing?.why3) initialCount = 3;
-    else if (existing?.why2) initialCount = 2;
-    else if (existing?.why1) initialCount = 1;
-
-    setActiveWhyCount(initialCount);
+    const deepest = [5, 4, 3, 2].find((n) => existing?.[whyKey(n)]) ?? 1;
+    setSelectedAction(action);
+    setFiveWhyReadOnly(!allows(action, 'ANALYSE'));
+    setActiveWhyCount(deepest);
+    setFiveWhyErrors({});
     setFiveWhyData({
       why1: existing?.why1 || '',
       why2: existing?.why2 || '',
@@ -168,783 +300,823 @@ export const CapaManagementPage: React.FC = () => {
       preventiveAction: existing?.preventiveAction || '',
       verificationCriteria: existing?.verificationCriteria || '',
     });
-    setFiveWhyDrawerOpen(true);
-  };
-
-  const handleAddWhy = () => {
-    if (activeWhyCount < 5) {
-      setActiveWhyCount((prev) => prev + 1);
-    }
+    setFiveWhyOpen(true);
   };
 
   const handleRemoveWhy = (levelToRemove: number) => {
     if (activeWhyCount <= 1) return;
-
-    if (levelToRemove === activeWhyCount) {
-      const fieldKey = `why${levelToRemove}` as keyof typeof fiveWhyData;
-      setFiveWhyData((prev) => ({ ...prev, [fieldKey]: '' }));
-      setActiveWhyCount((prev) => prev - 1);
-    } else {
-      const newFiveWhyData = { ...fiveWhyData };
-      for (let i = levelToRemove; i < activeWhyCount; i++) {
-        const currKey = `why${i}` as keyof typeof fiveWhyData;
-        const nextKey = `why${i + 1}` as keyof typeof fiveWhyData;
-        newFiveWhyData[currKey] = newFiveWhyData[nextKey];
-      }
-      const lastKey = `why${activeWhyCount}` as keyof typeof fiveWhyData;
-      newFiveWhyData[lastKey] = '';
-      setFiveWhyData(newFiveWhyData);
-      setActiveWhyCount((prev) => prev - 1);
-    }
+    setFiveWhyData((prev) => {
+      const next = { ...prev };
+      // Shift deeper answers up so the chain stays contiguous
+      for (let i = levelToRemove; i < activeWhyCount; i++) next[whyKey(i)] = next[whyKey(i + 1)];
+      next[whyKey(activeWhyCount)] = '';
+      return next;
+    });
+    setActiveWhyCount((prev) => prev - 1);
   };
 
   const handleSave5Why = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedAction) return;
+    if (!selectedAction || saving5Why) return;
+    const errors: { rootCause?: string; solution?: string } = {};
+    const whys = [1, 2, 3, 4, 5].map((n) => fiveWhyData[whyKey(n)].trim());
+    if (!fiveWhyData.rootCauseConclusion.trim() && !whys.some(Boolean)) errors.rootCause = 'Answer at least Why #1 or state the root cause.';
+    if (!fiveWhyData.solution.trim()) errors.solution = 'Describe the solution.';
+    setFiveWhyErrors(errors);
+    if (errors.rootCause || errors.solution) return;
 
+    setSaving5Why(true);
     try {
-      const updated = await api.update5WhyAnalysis(selectedAction.id, fiveWhyData);
-      setActions((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
-      setFiveWhyDrawerOpen(false);
-      addToast({
-        type: 'success',
-        title: '5-Why Root Cause Saved',
-        message: `Updated root cause investigation for ${updated.actionCode}.`,
-      });
-    } catch (err: any) {
-      addToast({
-        type: 'error',
-        title: 'Save Failed',
-        message: err.message || 'Could not save 5-Why analysis.',
-      });
+      const updated = await capaCoreApi.update5Why(selectedAction.id, fiveWhyData);
+      replaceAction(updated);
+      setFiveWhyOpen(false);
+      addToast({ type: 'success', title: 'Root cause saved', message: `Root cause and solution saved for ${updated.actionCode}.` });
+    } catch (err) {
+      addToast({ type: 'error', title: 'Save failed', message: getApiErrorMessage(err, 'Could not save the root cause analysis.') });
+    } finally {
+      setSaving5Why(false);
     }
   };
 
-  const openClosureDrawer = (action: CorrectiveAction) => {
+  // ---------- Start work ----------
+  const handleStart = async (action: CapaRecord) => {
+    if (startingId) return;
+    setStartingId(action.id);
+    try {
+      await api.updateCorrectiveAction(action.id, { status: 'IN_PROGRESS' });
+      // Reload the row so it carries the allowed steps for its new status
+      replaceAction(await capaApi.get(action.id));
+    } catch (err) {
+      addToast({ type: 'error', title: 'Could not start', message: getApiErrorMessage(err, 'Could not mark the action as in progress.') });
+    } finally {
+      setStartingId(null);
+    }
+  };
+
+  // ---------- Closure evidence ----------
+  const openClosure = (action: CapaRecord) => {
     setSelectedAction(action);
     setClosureNotes(action.closureNotes || '');
     setAfterPhotoUrl(action.afterPhotoUrl || '');
-    setClosureDrawerOpen(true);
+    setNoPhotoJustification('');
+    setClosureErrors({});
+    setClosureOpen(true);
   };
+
+  const closureReady = !!selectedAction && hasRootCauseAndSolution(selectedAction.fiveWhyAnalysis);
 
   const handleSubmitClosure = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedAction || !closureNotes || !afterPhotoUrl) {
-      addToast({
-        type: 'warning',
-        title: 'Missing Closure Proof',
-        message: 'Please provide after-photo and detailed closure notes.',
-      });
-      return;
-    }
+    if (!selectedAction || submittingClosure || !closureReady) return;
+    const errors: { photo?: string; notes?: string; justification?: string } = {};
+    // Without a photo only when the organization allows it, and then with a justification
+    if (!afterPhotoUrl && !allowNoPhoto) errors.photo = 'Add a photo of the fixed area.';
+    if (!afterPhotoUrl && allowNoPhoto && !noPhotoJustification.trim()) errors.justification = 'Explain why there is no after photo, or add one.';
+    if (!closureNotes.trim()) errors.notes = 'Describe what was done.';
+    setClosureErrors(errors);
+    if (errors.photo || errors.notes || errors.justification) return;
 
+    setSubmittingClosure(true);
     try {
-      const updated = await api.submitActionClosure(selectedAction.id, {
-        closureNotes,
-        afterPhotoUrl,
-        actorName,
-      });
-
-      setActions((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
-      setClosureDrawerOpen(false);
-      addToast({
-        type: 'success',
-        title: 'Closure Evidence Submitted',
-        message: `${updated.actionCode} is now pending independent verification sign-off.`,
-      });
-    } catch (err: any) {
-      addToast({
-        type: 'error',
-        title: 'Submission Failed',
-        message: err.message || 'Could not submit closure evidence.',
-      });
+      const updated = await capaApi.submitClosure(
+        selectedAction.id,
+        afterPhotoUrl
+          ? { closureNotes: closureNotes.trim(), afterPhotoUrl }
+          : { closureNotes: closureNotes.trim(), noPhotoJustification: noPhotoJustification.trim() },
+      );
+      replaceAction(updated);
+      setClosureOpen(false);
+      addToast({ type: 'success', title: 'Sent for verification', message: `${updated.actionCode} is waiting for an independent verifier.` });
+    } catch (err) {
+      addToast({ type: 'error', title: 'Submission failed', message: getApiErrorMessage(err, 'Could not submit the closure evidence.') });
+    } finally {
+      setSubmittingClosure(false);
     }
   };
 
-  const openVerificationModal = (action: CorrectiveAction) => {
+  // ---------- Verification ----------
+  const openVerification = (action: CapaRecord) => {
     setSelectedAction(action);
     setVerificationNotes('');
-    setVerificationModalOpen(true);
+    setVerificationError('');
+    setVerificationOpen(true);
   };
 
-  const handleVerifyAction = async (approved: boolean) => {
-    if (!selectedAction) return;
-
+  const handleVerify = async (approved: boolean) => {
+    if (!selectedAction || verifying) return;
+    // The assignee must be told what to fix: a rejection needs the reason
+    if (!approved && !verificationNotes.trim()) {
+      setVerificationError('Give the reason for rejecting the evidence. The assignee will see it.');
+      return;
+    }
+    setVerificationError('');
+    setVerifying(approved ? 'approve' : 'reject');
     try {
-      const updated = await api.verifyCorrectiveAction(selectedAction.id, {
-        approved,
-        verificationNotes,
-        verifierName,
-      });
-
-      setActions((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
-      setVerificationModalOpen(false);
-
-      if (approved) {
-        addToast({
-          type: 'success',
-          title: 'Action Verified & Closed',
-          message: `${updated.actionCode} has been verified and permanently closed.`,
-        });
-      } else {
-        addToast({
-          type: 'warning',
-          title: 'Action Reopened',
-          message: `${updated.actionCode} was rejected and reopened for remediation.`,
-        });
-      }
-    } catch (err: any) {
-      addToast({
-        type: 'error',
-        title: 'Verification Failed',
-        message: err.message || 'Error processing verification.',
-      });
+      const updated = await capaApi.verify(selectedAction.id, { approved, verificationNotes: verificationNotes.trim() || undefined });
+      replaceAction(updated);
+      setVerificationOpen(false);
+      addToast(
+        approved
+          ? { type: 'success', title: 'Action verified', message: `${updated.actionCode} is verified. An effectiveness review will close it.` }
+          : { type: 'warning', title: 'Action reopened', message: `${updated.actionCode} was sent back to the assignee.` },
+      );
+    } catch (err) {
+      addToast({ type: 'error', title: 'Verification failed', message: getApiErrorMessage(err, 'Could not record the verification.') });
+    } finally {
+      setVerifying(null);
     }
   };
 
-  // KPI Metrics
-  const totalActions = actions.length;
-  const pendingAckCount = actions.filter((a) => a.status === 'PENDING_ACKNOWLEDGEMENT').length;
-  const overdueCount = actions.filter((a) => a.isOverdue).length;
-  const pendingVerificationCount = actions.filter((a) => a.status === 'PENDING_VERIFICATION').length;
-  const closedCount = actions.filter((a) => a.status === 'VERIFIED' || a.status === 'CLOSED').length;
+  // ---------- Effectiveness review ----------
+  const openEffectiveness = (action: CapaRecord) => {
+    setSelectedAction(action);
+    setEffectiveChoice(null);
+    setEffectivenessReview('');
+    setReviewError('');
+    setEffectivenessOpen(true);
+  };
 
-  const filteredActions = actions.filter((a) => {
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      const matchCode = a.actionCode.toLowerCase().includes(q);
-      const matchTitle = a.title.toLowerCase().includes(q);
-      const matchDesc = a.description.toLowerCase().includes(q);
-      const matchAssignee = a.assignee?.firstName?.toLowerCase().includes(q) || false;
-      if (!matchCode && !matchTitle && !matchDesc && !matchAssignee) return false;
+  const handleEffectivenessReview = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedAction || submittingReview) return;
+    const review = effectivenessReview.trim();
+    if (effectiveChoice === null) {
+      setReviewError('Choose whether the fix was effective.');
+      return;
     }
-    return true;
-  });
+    if (!review) {
+      setReviewError('Describe how the effectiveness of the fix was checked.');
+      return;
+    }
+    setReviewError('');
+    setSubmittingReview(true);
+    try {
+      const updated = await capaCoreApi.close(selectedAction.id, { effective: effectiveChoice, effectivenessReview: review });
+      setEffectivenessOpen(false);
+      addToast(
+        effectiveChoice
+          ? { type: 'success', title: 'Action closed', message: `${updated.actionCode} passed its effectiveness review and is closed.` }
+          : { type: 'warning', title: 'Action reopened', message: `${updated.actionCode} was reopened because the fix did not hold.` },
+      );
+      await loadData();
+    } catch (err) {
+      addToast({ type: 'error', title: 'Review failed', message: getApiErrorMessage(err, 'Could not record the effectiveness review.') });
+    } finally {
+      setSubmittingReview(false);
+    }
+  };
 
-  const kanbanColumns = [
-    {
-      key: 'PENDING_ACKNOWLEDGEMENT',
-      title: '0. Awaiting Audit Sign-off',
-      badge: 'danger',
-      items: filteredActions.filter((a) => a.status === 'PENDING_ACKNOWLEDGEMENT'),
-      description: 'Findings pending formal Area Owner acceptance',
-    },
-    {
-      key: 'ASSIGNED',
-      title: '1. Assigned',
-      badge: 'info',
-      items: filteredActions.filter((a) => a.status === 'ASSIGNED' || a.status === 'REOPENED'),
-      description: 'Remediation active & assigned',
-    },
-    {
-      key: 'IN_PROGRESS',
-      title: '2. In Progress',
-      badge: 'warning',
-      items: filteredActions.filter((a) => a.status === 'IN_PROGRESS'),
-      description: '5-Why investigation underway',
-    },
-    {
-      key: 'PENDING_VERIFICATION',
-      title: '3. Pending Verification',
-      badge: 'purple',
-      items: filteredActions.filter((a) => a.status === 'PENDING_VERIFICATION'),
-      description: 'Evidence submitted for sign-off',
-    },
-    {
-      key: 'VERIFIED',
-      title: '4. Verified & Closed',
-      badge: 'success',
-      items: filteredActions.filter((a) => a.status === 'VERIFIED' || a.status === 'CLOSED'),
-      description: 'Closed by 5S Coordinator',
-    },
-  ];
+  // ---------- Delete (programme managers) ----------
+  const handleDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    try {
+      await capaApi.remove(deleteTarget.id);
+      setActions((prev) => prev.filter((a) => a.id !== deleteTarget.id));
+      addToast({ type: 'success', title: 'Action deleted', message: `${deleteTarget.actionCode} was deleted.` });
+      setDeleteTarget(null);
+    } catch (err) {
+      addToast({ type: 'error', title: 'Not deleted', message: getApiErrorMessage(err, 'The corrective action could not be deleted.') });
+    } finally {
+      setDeleting(false);
+    }
+  };
 
-  const formatSla = (targetDate: string, isOverdue: boolean, status?: string) => {
-    if (status === 'PENDING_ACKNOWLEDGEMENT') {
+  // ---------- Rendering helpers ----------
+  const renderStatusBadge = (act: CapaRecord) => {
+    if (act.status === 'CLOSED') {
       return (
-        <span style={{ color: '#D97706', fontWeight: 700, fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <Clock size={12} /> PENDING AUDIT SIGN-OFF
-        </span>
+        <Badge variant="neutral" icon={<Lock size={11} />}>
+          {actionStatusLabel(act.status)}
+        </Badge>
       );
     }
+    const variant: BadgeVariant = act.isOverdue ? 'danger' : actionStatusVariant(act.status);
+    return <Badge variant={variant}>{actionStatusLabel(act.status)}</Badge>;
+  };
 
-    const diff = new Date(targetDate).getTime() - Date.now();
-    const hours = Math.round(diff / 3600000);
-
-    if (isOverdue) {
-      const overHours = Math.abs(hours);
-      const overDays = Math.floor(overHours / 24);
-      return (
-        <span style={{ color: '#EF4444', fontWeight: 700, fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <AlertOctagon size={12} /> OVERDUE ({overDays > 0 ? `${overDays}d` : `${overHours}h`})
-        </span>
-      );
-    }
-
-    if (hours <= 24) {
-      return (
-        <span style={{ color: '#F59E0B', fontWeight: 700, fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-          <Clock size={12} /> Due in {hours}h
-        </span>
-      );
-    }
-
-    const days = Math.floor(hours / 24);
+  /** Severity of the finding, source of the action and escalation tier (when escalated). */
+  const renderTags = (act: CapaRecord) => {
+    const severity = act.observation?.severity;
+    const tier = act.escalationTier;
     return (
-      <span style={{ color: 'var(--text-secondary)', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}>
-        <Clock size={12} /> {days} days remaining
+      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+        {severity && <Badge variant={severityVariant(severity)}>{severityLabel(severity)}</Badge>}
+        {act.source && <Badge variant="neutral">{sourceLabel(act.source)}</Badge>}
+        {act.redTagId && (
+          <Link to={`/red-tags?id=${act.redTagId}`} style={{ fontSize: '12.5px', fontWeight: 600, color: 'var(--color-primary)' }}>
+            View red tag
+          </Link>
+        )}
+        {tier && tier !== 'NORMAL' && (
+          <Badge variant={tier === 'DUE_SOON' ? 'warning' : 'danger'} icon={<TrendingUp size={10} />}>
+            {escalationLabel(tier)}
+          </Badge>
+        )}
+      </div>
+    );
+  };
+
+  /** Why the verifier sent the evidence back; shown to the assignee while the action is reopened. */
+  const renderRejection = (act: CapaRecord) =>
+    act.status === 'REOPENED' && act.verificationNotes && !act.effectivenessReview ? (
+      <div role="note" style={{ padding: '6px 8px', borderRadius: 'var(--radius-sm)', background: 'var(--color-danger-bg)', border: '1px solid var(--color-danger-border)', fontSize: '12.5px' }}>
+        <div style={{ fontWeight: 600, color: 'var(--color-danger)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+          <RotateCcw size={12} aria-hidden="true" /> Sent back by the verifier
+        </div>
+        <div style={{ color: 'var(--text-secondary)', lineHeight: 1.35, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{act.verificationNotes}</div>
+      </div>
+    ) : null;
+
+  /** Countdown for the assignee while the action is with them; a plain state label otherwise. */
+  const renderSla = (act: CapaRecord) => {
+    const base: React.CSSProperties = { fontSize: '12.5px', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' };
+    const due = `Due ${formatDateTime(act.targetDate)}`;
+    if (act.status === 'PENDING_ACKNOWLEDGEMENT') {
+      return (
+        <span style={{ ...base, color: 'var(--color-warning)' }}>
+          <Lock size={12} aria-hidden="true" /> Starts after audit sign-off
+        </span>
+      );
+    }
+    if (act.status === 'PENDING_VERIFICATION') {
+      return (
+        <span style={{ ...base, color: 'var(--color-purple)' }}>
+          <UserCheck size={12} aria-hidden="true" /> Awaiting verification
+        </span>
+      );
+    }
+    if (!ASSIGNEE_ACTIVE_STATUSES.includes(act.status)) return null;
+
+    const hoursLeft = (new Date(act.targetDate).getTime() - Date.now()) / 3600000;
+    if (act.isOverdue) {
+      const over = Math.max(1, Math.round(-hoursLeft));
+      return (
+        <span title={due} style={{ ...base, color: 'var(--color-danger)' }}>
+          <AlertOctagon size={12} aria-hidden="true" /> Overdue by {over >= 24 ? plural(Math.floor(over / 24), 'day') : plural(over, 'hour')}
+        </span>
+      );
+    }
+    if (hoursLeft <= 24) {
+      return (
+        <span title={due} style={{ ...base, color: 'var(--color-warning)' }}>
+          <Clock size={12} aria-hidden="true" /> Due in {plural(Math.max(1, Math.round(hoursLeft)), 'hour')}
+        </span>
+      );
+    }
+    return (
+      <span title={due} style={{ ...base, color: 'var(--text-secondary)' }}>
+        <Clock size={12} aria-hidden="true" /> {plural(Math.floor(hoursLeft / 24), 'day')} left
       </span>
     );
   };
 
+  /** Closure details from the effectiveness review (also kept when the action was reopened). */
+  const renderEffectivenessDetails = (act: CapaRecord, compact = false) => {
+    if (!act.effectivenessReview && !act.closedAt) return null;
+    const closed = act.status === 'CLOSED';
+    return (
+      <div
+        style={{
+          padding: compact ? '6px 8px' : '8px 10px',
+          borderRadius: 'var(--radius-sm)',
+          background: closed ? 'var(--bg-surface-subtle)' : 'var(--color-danger-bg)',
+          border: `1px solid ${closed ? 'var(--border-subtle)' : 'var(--color-danger-border)'}`,
+          fontSize: '12.5px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '4px',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600, color: closed ? 'var(--text-primary)' : 'var(--color-danger)', flexWrap: 'wrap' }}>
+          {closed ? <Lock size={12} aria-hidden="true" /> : <RotateCcw size={12} aria-hidden="true" />}
+          <span>{closed ? 'Effectiveness confirmed' : 'Last review: not effective'}</span>
+          {closed && act.closedAt && <span style={{ fontWeight: 500, color: 'var(--text-secondary)' }}>· Closed {formatDate(act.closedAt)}</span>}
+        </div>
+        {act.effectivenessReview && (
+          <div style={{ color: 'var(--text-secondary)', lineHeight: 1.35, whiteSpace: 'pre-wrap', ...(compact ? lineClamp(3) : {}) }}>{act.effectivenessReview}</div>
+        )}
+      </div>
+    );
+  };
+
+  const openAudit = (act: CapaRecord) => {
+    const execId = executionIdOf(act);
+    if (execId) setSelectedAuditId(execId);
+  };
+
+  /** Workflow buttons for one action: only the steps the server will accept for this user. */
+  const renderActionButtons = (act: CapaRecord) => {
+    const analysis = act.fiveWhyAnalysis;
+    const hasAnalysis = !!analysis && Object.values(analysis).some((v) => typeof v === 'string' && v.trim());
+    const execId = executionIdOf(act);
+    return (
+      <>
+        {act.status === 'PENDING_ACKNOWLEDGEMENT' && (
+          <Button type="button" size="sm" variant="secondary" icon={<FileCheck size={13} />} onClick={() => openAudit(act)} disabled={!execId} title={execId ? undefined : 'No audit is linked to this action'}>
+            {can('AUDITEES') ? 'Review audit findings' : 'View audit report'}
+          </Button>
+        )}
+        {allows(act, 'START') && (
+          <Button type="button" size="sm" variant="secondary" icon={<Play size={13} />} onClick={() => handleStart(act)} loading={startingId === act.id} disabled={!!startingId && startingId !== act.id}>
+            Start work
+          </Button>
+        )}
+        {allows(act, 'ANALYSE') ? (
+          <Button type="button" size="sm" variant="secondary" icon={<Lightbulb size={13} />} onClick={() => open5Why(act)}>
+            {hasAnalysis ? 'Edit root cause' : '5-Why & solution'}
+          </Button>
+        ) : (
+          hasAnalysis && (
+            <Button type="button" size="sm" variant="ghost" icon={<Lightbulb size={13} />} onClick={() => open5Why(act)}>
+              View root cause
+            </Button>
+          )
+        )}
+        {allows(act, 'SUBMIT_CLOSURE') && (
+          <Button type="button" size="sm" variant="primary" icon={<Camera size={13} />} onClick={() => openClosure(act)}>
+            Submit proof
+          </Button>
+        )}
+        {allows(act, 'VERIFY') && (
+          <Button type="button" size="sm" variant="primary" icon={<ShieldCheck size={13} />} onClick={() => openVerification(act)}>
+            Verify
+          </Button>
+        )}
+        {allows(act, 'CLOSE') && (
+          <Button type="button" size="sm" variant="primary" icon={<CheckCircle2 size={13} />} onClick={() => openEffectiveness(act)}>
+            Effectiveness review
+          </Button>
+        )}
+        {allows(act, 'REASSIGN') && (
+          <Button type="button" size="sm" variant="ghost" icon={<UserCog size={13} />} onClick={() => setReassignTarget(act)}>
+            Reassign
+          </Button>
+        )}
+        {allows(act, 'RESCHEDULE') && (
+          <Button type="button" size="sm" variant="ghost" icon={<CalendarClock size={13} />} onClick={() => setRescheduleTarget(act)}>
+            Change due date
+          </Button>
+        )}
+        <Button type="button" size="sm" variant="ghost" icon={<History size={13} />} onClick={() => setTimelineTarget(act)} aria-label={`History of ${act.actionCode}`}>
+          History
+        </Button>
+        {allows(act, 'DELETE') && (
+          <Button type="button" size="sm" variant="ghost" icon={<Trash2 size={13} />} onClick={() => setDeleteTarget(act)} aria-label={`Delete ${act.actionCode}`}>
+            Delete
+          </Button>
+        )}
+      </>
+    );
+  };
+
+  // ---------- Derived data ----------
+  const pendingAckCount = actions.filter((a) => a.status === 'PENDING_ACKNOWLEDGEMENT').length;
+  const overdueCount = actions.filter((a) => a.isOverdue).length;
+  const pendingVerificationCount = actions.filter((a) => a.status === 'PENDING_VERIFICATION').length;
+  const verifiedCount = actions.filter((a) => a.status === 'VERIFIED').length;
+  const closedCount = actions.filter((a) => a.status === 'CLOSED').length;
+
+  /** Audits whose acknowledgement is holding actions back (one entry per audit). */
+  const pendingAudits = useMemo(() => {
+    const byAudit = new Map<string, { id: string; code: string; count: number }>();
+    for (const a of actions) {
+      if (a.status !== 'PENDING_ACKNOWLEDGEMENT') continue;
+      const id = executionIdOf(a);
+      if (!id) continue;
+      const entry = byAudit.get(id) ?? { id, code: a.observation?.execution?.auditCode ?? 'Audit', count: 0 };
+      entry.count++;
+      byAudit.set(id, entry);
+    }
+    return Array.from(byAudit.values());
+  }, [actions]);
+
+  /** Locations and assignees present in the loaded actions (filter options). */
+  const locationOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of actions) if (a.location) map.set(a.locationId, `${a.location.areaCode} — ${a.location.name}`);
+    return Array.from(map.entries()).sort((x, y) => x[1].localeCompare(y[1]));
+  }, [actions]);
+  const assigneeOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const a of actions) if (a.assigneeId) map.set(a.assigneeId, assigneeName(a));
+    return Array.from(map.entries()).sort((x, y) => x[1].localeCompare(y[1]));
+  }, [actions]);
+
+  const filteredActions = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const f = filters;
+    return actions.filter((a) => {
+      if (f.status !== 'ALL' && a.status !== f.status) return false;
+      if (f.severity !== 'ALL' && a.observation?.severity !== f.severity) return false;
+      if (f.locationId !== 'ALL' && a.locationId !== f.locationId) return false;
+      if (f.assigneeId !== 'ALL' && (f.assigneeId === 'me' ? a.assigneeId !== currentUser?.id : a.assigneeId !== f.assigneeId)) return false;
+      if (f.tier !== 'ALL' && (a.escalationTier ?? 'NORMAL') !== f.tier) return false;
+      if (f.source !== 'ALL' && (a.source ?? 'AUDIT') !== f.source) return false;
+      if (f.overdue && !a.isOverdue) return false;
+      if (!q) return true;
+      const haystack = [
+        a.actionCode,
+        a.title,
+        a.description,
+        a.location?.name,
+        a.location?.areaCode,
+        assigneeName(a),
+        a.rootCauseCategory,
+        humanize(a.rootCauseCategory),
+        a.fiveWhyAnalysis?.rootCauseConclusion,
+        a.fiveWhyAnalysis?.solution,
+      ];
+      return haystack.some((v) => typeof v === 'string' && v.toLowerCase().includes(q));
+    });
+  }, [actions, searchQuery, filters, currentUser?.id]);
+
+  const kanbanColumns = KANBAN_STATUSES.map((status) => ({
+    status,
+    items: filteredActions.filter((a) => a.status === status),
+  }));
+
+  const filtersActive = (Object.keys(NO_FILTERS) as Array<keyof CapaFilters>).some((k) => filters[k] !== NO_FILTERS[k]);
+  // Each KPI tile filters the list to the actions it counts (clicking the active tile clears it)
+  const statusTile = (status: string) => ({
+    selected: !filters.overdue && filters.status === status,
+    onClick: () => setFilters(filters.status === status && !filters.overdue ? NO_FILTERS : { ...NO_FILTERS, status }),
+  });
+  const kpis: Array<{ label: string; value: number; icon: React.ReactNode; tone: SummaryTone; selected: boolean; onClick: () => void }> = [
+    { label: scope === 'mine' ? 'Assigned to me' : 'All actions', value: actions.length, icon: <Layers size={18} />, tone: 'primary', selected: !filtersActive, onClick: () => setFilters(NO_FILTERS) },
+    { label: 'Awaiting audit sign-off', value: pendingAckCount, icon: <Lock size={18} />, tone: 'warning', ...statusTile('PENDING_ACKNOWLEDGEMENT') },
+    {
+      label: 'Overdue',
+      value: overdueCount,
+      icon: <AlertOctagon size={18} />,
+      tone: 'danger',
+      selected: filters.overdue,
+      onClick: () => setFilters(filters.overdue ? NO_FILTERS : { ...NO_FILTERS, overdue: true }),
+    },
+    { label: 'Awaiting verification', value: pendingVerificationCount, icon: <UserCheck size={18} />, tone: 'purple', ...statusTile('PENDING_VERIFICATION') },
+    { label: 'Verified, review due', value: verifiedCount, icon: <ShieldCheck size={18} />, tone: 'success', ...statusTile('VERIFIED') },
+    { label: 'Closed', value: closedCount, icon: <CheckCircle2 size={18} />, tone: 'neutral', ...statusTile('CLOSED') },
+  ];
+
+  const emptyDescription =
+    actions.length === 0
+      ? scope === 'mine'
+        ? 'No corrective actions are assigned to you.'
+        : 'Corrective actions appear here when audit findings are assigned or actions are raised.'
+      : 'No actions match your search or filters.';
+
+  const selectedAnalysis = selectedAction?.fiveWhyAnalysis;
+
   return (
     <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      {/* Top Header */}
-      <div className="page-header">
-        <div className="page-header-content">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-            <Badge variant="purple" icon={<Layers size={12} />}>
-              CAPA Governance
-            </Badge>
-            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              Corrective & Preventive Action Workflow
-            </span>
-          </div>
-          <h1 style={{ fontSize: '24px', fontWeight: 800, color: 'var(--text-primary)', margin: 0, letterSpacing: '-0.02em' }}>
-            CAPA Kanban & SLA Escalation Dashboard
-          </h1>
-        </div>
+      <PageHeader
+        title={relabel('Corrective actions')}
+        description="Corrective and preventive actions from audit findings: find the root cause, fix it, then verify the fix held."
+        actions={
+          <>
+            <div role="group" aria-label="Which actions" style={{ display: 'flex', gap: '4px' }}>
+              <button type="button" className="pillar-tab-pill" aria-pressed={scope === 'mine'} onClick={() => setScope('mine')}>
+                Assigned to me
+              </button>
+              <button type="button" className="pillar-tab-pill" aria-pressed={scope === 'all'} onClick={() => setScope('all')}>
+                All actions
+              </button>
+            </div>
+            <div role="group" aria-label="Layout" style={{ display: 'flex', gap: '4px' }}>
+              <button type="button" className="pillar-tab-pill" aria-pressed={viewMode === 'kanban'} onClick={() => setViewMode('kanban')}>
+                <Kanban size={14} aria-hidden="true" /> Board
+              </button>
+              <button type="button" className="pillar-tab-pill" aria-pressed={viewMode === 'table'} onClick={() => setViewMode('table')}>
+                <TableIcon size={14} aria-hidden="true" /> Table
+              </button>
+            </div>
+            <Button type="button" variant="secondary" size="sm" icon={<RefreshCw size={14} />} onClick={() => loadData()} loading={loading}>
+              Refresh
+            </Button>
+            {can('ACTION_ASSIGNERS') && (
+              <Button type="button" variant="primary" size="sm" icon={<Plus size={14} />} onClick={() => setRaiseOrigin({ kind: 'standalone', locationId: filters.locationId !== 'ALL' ? filters.locationId : undefined })}>
+                New corrective action
+              </Button>
+            )}
+          </>
+        }
+      />
 
-        <div className="page-header-actions">
-          <div style={{ display: 'flex', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)', background: 'var(--bg-surface)', padding: '2px' }}>
-            <button
-              type="button"
-              onClick={() => setViewMode('kanban')}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '6px 12px',
-                borderRadius: 'var(--radius-sm)',
-                border: 'none',
-                background: viewMode === 'kanban' ? 'var(--color-primary)' : 'transparent',
-                color: viewMode === 'kanban' ? '#FFFFFF' : 'var(--text-secondary)',
-                fontWeight: 600,
-                fontSize: '12px',
-                cursor: 'pointer',
-              }}
-            >
-              <Kanban size={14} /> Kanban
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('table')}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '6px 12px',
-                borderRadius: 'var(--radius-sm)',
-                border: 'none',
-                background: viewMode === 'table' ? 'var(--color-primary)' : 'transparent',
-                color: viewMode === 'table' ? '#FFFFFF' : 'var(--text-secondary)',
-                fontWeight: 600,
-                fontSize: '12px',
-                cursor: 'pointer',
-              }}
-            >
-              <TableIcon size={14} /> Table
-            </button>
-          </div>
-
-          <Button variant="secondary" icon={<RefreshCw size={15} />} onClick={() => loadData()}>
-            Refresh
-          </Button>
-        </div>
-      </div>
-
-      {/* Global Alert Banner: Audit Acknowledgement Missing */}
-      {pendingAckCount > 0 && (
+      {/* Audits waiting for the auditee's acknowledgement */}
+      {can('AUDITEES') && pendingAckCount > 0 && (
         <div
+          role="status"
           style={{
-            background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.12) 0%, rgba(239, 68, 68, 0.08) 100%)',
-            border: '1px solid rgba(245, 158, 11, 0.4)',
+            background: 'var(--color-warning-bg)',
+            border: '1px solid var(--color-warning-border)',
             borderRadius: 'var(--radius-lg)',
             padding: '16px 20px',
             display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '16px',
-            flexWrap: 'wrap',
-            boxShadow: '0 2px 8px rgba(245, 158, 11, 0.1)',
+            flexDirection: 'column',
+            gap: '12px',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div
-              style={{
-                width: '40px',
-                height: '40px',
-                borderRadius: '50%',
-                background: 'rgba(245, 158, 11, 0.2)',
-                color: '#D97706',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-              }}
-            >
-              <AlertTriangle size={20} />
-            </div>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
+            <AlertTriangle size={20} color="var(--color-warning)" style={{ flexShrink: 0, marginTop: '2px' }} aria-hidden="true" />
             <div>
               <div style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)' }}>
-                {pendingAckCount} CAPA Remediation Action{pendingAckCount > 1 ? 's' : ''} Awaiting Area Owner Audit Acknowledgement
+                {plural(pendingAckCount, 'action')} {pendingAckCount === 1 ? 'is' : 'are'} waiting for audit sign-off
               </div>
-              <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                Area Owner must formally review and accept or dispute the non-conformance findings before corrective actions and SLA countdowns begin.
+              <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                Work and the SLA clock start once the audit findings are accepted or disputed.
               </div>
             </div>
           </div>
-
-          <Button
-            variant="primary"
-            size="sm"
-            icon={<FileCheck size={14} />}
-            onClick={() => {
-              const pendingAct = actions.find((a) => a.status === 'PENDING_ACKNOWLEDGEMENT');
-              const execId = (pendingAct as any)?.observation?.execution?.id || 'exec-cnc01-sample';
-              setSelectedAuditId(execId);
-              setReportModalOpen(true);
-            }}
-          >
-            Review & Acknowledge Audits →
-          </Button>
+          {pendingAudits.length > 0 && (
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {pendingAudits.map((audit) => (
+                <Button key={audit.id} type="button" size="sm" variant="secondary" icon={<FileCheck size={13} />} onClick={() => setSelectedAuditId(audit.id)}>
+                  Review {audit.code} ({plural(audit.count, 'action')})
+                </Button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {/* KPI Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
-        <Card noPadding>
-          <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div style={{ width: '44px', height: '44px', borderRadius: 'var(--radius-md)', background: 'var(--color-primary-subtle)', color: 'var(--color-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Layers size={22} />
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Total Actions</div>
-              <div style={{ fontSize: '22px', fontWeight: 800, color: 'var(--text-primary)' }}>{totalActions}</div>
-            </div>
-          </div>
-        </Card>
+      {/* KPI summary */}
+      <SummaryGrid min={170}>
+        {kpis.map((k) => (
+          <SummaryCard key={k.label} label={k.label} value={loading ? '—' : k.value} icon={k.icon} tone={k.tone} selected={k.selected} onClick={k.onClick} />
+        ))}
+      </SummaryGrid>
 
-        <Card noPadding>
-          <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div style={{ width: '44px', height: '44px', borderRadius: 'var(--radius-md)', background: 'rgba(245, 158, 11, 0.12)', color: '#D97706', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Lock size={22} />
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Awaiting Sign-Off</div>
-              <div style={{ fontSize: '22px', fontWeight: 800, color: '#D97706' }}>{pendingAckCount}</div>
-            </div>
-          </div>
-        </Card>
+      {/* Search & filter */}
+      <FilterBar label="Filter corrective actions">
+        <SearchInput
+          label="Search corrective actions"
+          placeholder="Search by code, title, location, assignee or root cause"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
+        <select className="form-select" aria-label="Status" value={filters.status} onChange={(e) => setFilter('status', e.target.value)}>
+          <option value="ALL">All statuses</option>
+          {Object.keys(ACTION_STATUS_LABELS).map((s) => (
+            <option key={s} value={s}>
+              {actionStatusLabel(s)}
+            </option>
+          ))}
+        </select>
+        <select className="form-select" aria-label="Severity" value={filters.severity} onChange={(e) => setFilter('severity', e.target.value)}>
+          <option value="ALL">All severities</option>
+          {Object.entries(SEVERITY_LABELS).map(([code, label]) => (
+            <option key={code} value={code}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <select className="form-select" aria-label="Location" value={filters.locationId} onChange={(e) => setFilter('locationId', e.target.value)}>
+          <option value="ALL">All locations</option>
+          {filters.locationId !== 'ALL' && !locationOptions.some(([id]) => id === filters.locationId) && <option value={filters.locationId}>Linked location</option>}
+          {locationOptions.map(([id, label]) => (
+            <option key={id} value={id}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <select className="form-select" aria-label="Assignee" value={filters.assigneeId} onChange={(e) => setFilter('assigneeId', e.target.value)}>
+          <option value="ALL">All assignees</option>
+          <option value="me">Assigned to me</option>
+          {filters.assigneeId !== 'ALL' && filters.assigneeId !== 'me' && !assigneeOptions.some(([id]) => id === filters.assigneeId) && (
+            <option value={filters.assigneeId}>Linked assignee</option>
+          )}
+          {assigneeOptions.map(([id, label]) => (
+            <option key={id} value={id}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <select className="form-select" aria-label="Escalation" value={filters.tier} onChange={(e) => setFilter('tier', e.target.value)}>
+          <option value="ALL">Any escalation</option>
+          <option value="NORMAL">Not escalated</option>
+          {Object.entries(ESCALATION_TIER_LABELS).map(([code, label]) => (
+            <option key={code} value={code}>
+              {label}
+            </option>
+          ))}
+        </select>
+        <select className="form-select" aria-label="Source" value={filters.source} onChange={(e) => setFilter('source', e.target.value)}>
+          <option value="ALL">All sources</option>
+          {(Object.keys(ACTION_SOURCE_LABELS) as ActionSource[]).map((code) => (
+            <option key={code} value={code}>
+              {ACTION_SOURCE_LABELS[code]}
+            </option>
+          ))}
+        </select>
+        <label htmlFor="capa-overdue-only" style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '13.5px', minHeight: '40px', cursor: 'pointer' }}>
+          <input id="capa-overdue-only" type="checkbox" checked={filters.overdue} onChange={(e) => setFilter('overdue', e.target.checked)} />
+          Overdue only
+        </label>
+        {filtersActive && (
+          <Button type="button" size="sm" variant="ghost" onClick={() => setFilters(NO_FILTERS)}>
+            Clear filters
+          </Button>
+        )}
+      </FilterBar>
 
-        <Card noPadding>
-          <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div style={{ width: '44px', height: '44px', borderRadius: 'var(--radius-md)', background: 'rgba(239, 68, 68, 0.12)', color: '#EF4444', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <AlertOctagon size={22} />
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Overdue SLAs</div>
-              <div style={{ fontSize: '22px', fontWeight: 800, color: '#EF4444' }}>{overdueCount}</div>
-            </div>
-          </div>
+      {loading && actions.length === 0 ? (
+        <Card>
+          <LoadingState label="Loading corrective actions…" />
         </Card>
-
-        <Card noPadding>
-          <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div style={{ width: '44px', height: '44px', borderRadius: 'var(--radius-md)', background: 'rgba(168, 85, 247, 0.12)', color: '#A855F7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <UserCheck size={22} />
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Pending Verification</div>
-              <div style={{ fontSize: '22px', fontWeight: 800, color: '#A855F7' }}>{pendingVerificationCount}</div>
-            </div>
-          </div>
+      ) : loadError ? (
+        <Card>
+          <ErrorState message={loadError} onRetry={() => loadData()} />
         </Card>
-
-        <Card noPadding>
-          <div style={{ padding: '18px 20px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-            <div style={{ width: '44px', height: '44px', borderRadius: 'var(--radius-md)', background: 'rgba(16, 185, 129, 0.12)', color: '#10B981', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <CheckCircle2 size={22} />
-            </div>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' }}>Closed & Verified</div>
-              <div style={{ fontSize: '22px', fontWeight: 800, color: '#10B981' }}>{closedCount}</div>
-            </div>
-          </div>
-        </Card>
-      </div>
-
-      {/* Search Input Bar */}
-      <Card noPadding>
-        <div style={{ padding: '14px 20px', position: 'relative' }}>
-          <Search size={16} style={{ position: 'absolute', left: '32px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-tertiary)' }} />
-          <input
-            type="text"
-            className="form-control"
-            style={{ paddingLeft: '36px' }}
-            placeholder="Search CAPA by code, root cause, assignee, title, description..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+      ) : filteredActions.length === 0 ? (
+        <Card>
+          <EmptyState
+            title="No corrective actions"
+            description={emptyDescription}
+            action={
+              scope === 'mine' && actions.length === 0 ? (
+                <Button type="button" size="sm" variant="secondary" onClick={() => setScope('all')}>
+                  Show all actions
+                </Button>
+              ) : undefined
+            }
           />
-        </div>
-      </Card>
-
-      {/* Kanban Board View */}
-      {viewMode === 'kanban' && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(5, minmax(260px, 1fr))',
-            gap: '16px',
-            overflowX: 'auto',
-            alignItems: 'flex-start',
-            paddingBottom: '16px',
-          }}
-        >
-          {kanbanColumns.map((col) => (
-            <div
-              key={col.key}
-              style={{
-                borderRadius: 'var(--radius-lg)',
-                background: 'var(--bg-surface-subtle)',
-                border: '1px solid var(--border-subtle)',
-                display: 'flex',
-                flexDirection: 'column',
-                minHeight: '480px',
-                minWidth: '260px',
-              }}
-            >
-              {/* Column Header */}
-              <div
-                style={{
-                  padding: '14px 16px',
-                  borderBottom: '1px solid var(--border-subtle)',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                }}
-              >
-                <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)' }}>
-                  {col.title}
-                </span>
-                <Badge variant={col.badge as any}>{col.items.length}</Badge>
-              </div>
-
-              {/* Column Cards */}
-              <div style={{ padding: '12px', display: 'flex', flexDirection: 'column', gap: '12px', flex: 1 }}>
-                {col.items.length === 0 ? (
-                  <div style={{ textAlign: 'center', padding: '30px 10px', color: 'var(--text-tertiary)', fontSize: '12px' }}>
-                    No actions in this status.
+        </Card>
+      ) : viewMode === 'kanban' ? (
+        /* Board: one column per status; empty columns are narrow, the board scrolls sideways */
+        <div>
+          <div className="form-hint" style={{ marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            Scroll sideways to see every stage <ArrowRight size={12} aria-hidden="true" />
+          </div>
+          <div
+            role="list"
+            aria-label="Corrective actions by status"
+            style={{ display: 'flex', gap: '12px', overflowX: 'auto', alignItems: 'flex-start', paddingBottom: '12px', scrollSnapType: 'x proximity' }}
+          >
+            {kanbanColumns.map((col) => {
+              const empty = col.items.length === 0;
+              return (
+                <section
+                  key={col.status}
+                  role="listitem"
+                  aria-label={`${actionStatusLabel(col.status)}: ${plural(col.items.length, 'action')}`}
+                  style={{
+                    flex: empty ? '0 0 168px' : '0 0 min(300px, 85vw)',
+                    scrollSnapAlign: 'start',
+                    borderRadius: 'var(--radius-lg)',
+                    background: 'var(--bg-surface-subtle)',
+                    border: '1px solid var(--border-subtle)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    minWidth: 0,
+                  }}
+                >
+                  <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border-subtle)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                      <h2 style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', margin: 0 }}>{actionStatusLabel(col.status)}</h2>
+                      <Badge variant="neutral">{col.items.length}</Badge>
+                    </div>
+                    {!empty && <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)', marginTop: '2px' }}>{COLUMN_HINTS[col.status]}</div>}
                   </div>
-                ) : (
-                  col.items.map((act) => (
-                    <div
-                      key={act.id}
-                      style={{
-                        padding: '14px',
-                        borderRadius: 'var(--radius-md)',
-                        background: 'var(--bg-surface)',
-                        border: '1px solid var(--border-subtle)',
-                        boxShadow: 'var(--shadow-xs)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '10px',
-                      }}
-                    >
-                      {/* Card Header */}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--color-primary)' }}>
-                          {act.actionCode}
-                        </span>
-                        {formatSla(act.targetDate, act.isOverdue, act.status)}
-                      </div>
 
-                      {/* Title & Desc */}
-                      <div>
-                        <h4 style={{ fontSize: '13px', fontWeight: 700, margin: '0 0 4px 0', color: 'var(--text-primary)', lineHeight: '1.3' }}>
-                          {act.title}
-                        </h4>
-                        <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.4' }}>
-                          {act.description}
-                        </p>
-                      </div>
-
-                      {/* If PENDING_ACKNOWLEDGEMENT, show lock alert */}
-                      {act.status === 'PENDING_ACKNOWLEDGEMENT' && (
-                        <div
+                  <div style={{ padding: '10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    {empty ? (
+                      <div style={{ textAlign: 'center', padding: '12px 4px', color: 'var(--text-tertiary)', fontSize: '13px' }}>None</div>
+                    ) : (
+                      col.items.map((act) => (
+                        <article
+                          key={act.id}
+                          id={`capa-action-${act.id}`}
                           style={{
-                            padding: '8px 10px',
-                            borderRadius: 'var(--radius-sm)',
-                            background: 'rgba(245, 158, 11, 0.08)',
-                            border: '1px solid rgba(245, 158, 11, 0.25)',
-                            fontSize: '11.5px',
-                            color: '#b45309',
+                            ...highlightStyle(act.id),
+                            padding: '12px',
+                            borderRadius: 'var(--radius-md)',
+                            background: 'var(--bg-surface)',
+                            border: '1px solid var(--border-subtle)',
                             display: 'flex',
-                            alignItems: 'center',
-                            gap: '6px',
+                            flexDirection: 'column',
+                            gap: '10px',
+                            minWidth: 0,
                           }}
                         >
-                          <Lock size={13} style={{ flexShrink: 0 }} />
-                          <span>Locked: Remediation starts after Area Owner accepts audit report.</span>
-                        </div>
-                      )}
-
-                      {/* Root cause & Solution badge */}
-                      {act.status !== 'PENDING_ACKNOWLEDGEMENT' && (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-                            <span className="code-tag" style={{ fontSize: '10px' }}>
-                              5-Why: {act.rootCauseCategory}
-                            </span>
-                            {act.reopenCount > 0 && (
-                              <Badge variant="danger" icon={<RotateCcw size={10} />}>
-                                Reopened #{act.reopenCount}
-                              </Badge>
-                            )}
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            <span className="code-tag">{act.actionCode}</span>
+                            {act.status === 'CLOSED' || act.status === 'VERIFIED' ? renderStatusBadge(act) : renderSla(act)}
                           </div>
 
-                          {act.fiveWhyAnalysis?.solution ? (
-                            <div
-                              style={{
-                                padding: '8px 10px',
-                                borderRadius: 'var(--radius-sm)',
-                                background: 'var(--color-success-bg)',
-                                border: '1px solid var(--color-success-border)',
-                                fontSize: '11.5px',
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: '3px',
-                              }}
-                            >
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 700, color: 'var(--color-success)' }}>
-                                <Lightbulb size={12} />
-                                <span>Action Solution:</span>
+                          <div style={{ minWidth: 0 }}>
+                            <h3 style={{ fontSize: '14px', fontWeight: 600, margin: '0 0 4px 0', color: 'var(--text-primary)', lineHeight: 1.35, ...lineClamp(2) }}>{act.title}</h3>
+                            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45, ...lineClamp(3) }}>{act.description}</p>
+                          </div>
+
+                          {renderTags(act)}
+                          {renderRejection(act)}
+
+                          {act.status !== 'PENDING_ACKNOWLEDGEMENT' && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                <Badge variant="neutral">Cause: {humanize(act.rootCauseCategory)}</Badge>
+                                {act.reopenCount > 0 && (
+                                  <Badge variant="danger" icon={<RotateCcw size={10} />}>
+                                    Reopened {act.reopenCount === 1 ? 'once' : `${act.reopenCount} times`}
+                                  </Badge>
+                                )}
                               </div>
-                              <div style={{ color: 'var(--text-primary)', lineHeight: 1.35 }}>
-                                {act.fiveWhyAnalysis.solution}
-                              </div>
-                            </div>
-                          ) : (
-                            <div
-                              style={{
-                                fontSize: '11px',
-                                color: 'var(--text-tertiary)',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px',
-                                fontStyle: 'italic',
-                              }}
-                            >
-                              <AlertTriangle size={11} color="var(--color-warning)" />
-                              <span>Root cause & solution pending</span>
+                              {act.fiveWhyAnalysis?.solution ? (
+                                <div style={{ padding: '8px 10px', borderRadius: 'var(--radius-sm)', background: 'var(--bg-surface-subtle)', border: '1px solid var(--border-subtle)', fontSize: '12.5px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600, color: 'var(--color-success)' }}>
+                                    <Lightbulb size={12} aria-hidden="true" /> Solution
+                                  </div>
+                                  <div style={{ color: 'var(--text-primary)', lineHeight: 1.35, ...lineClamp(3) }}>{act.fiveWhyAnalysis.solution}</div>
+                                </div>
+                              ) : (
+                                <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  <AlertTriangle size={12} color="var(--color-warning)" aria-hidden="true" /> Root cause and solution not recorded yet
+                                </div>
+                              )}
                             </div>
                           )}
-                        </div>
-                      )}
 
-                      {/* Location & Assignee */}
-                      <div style={{ paddingTop: '8px', borderTop: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '11px', color: 'var(--text-secondary)' }}>
-                        <span>{act.location?.name?.slice(0, 18)}</span>
-                        <span>{act.assignee?.firstName || 'Assigned'}</span>
-                      </div>
+                          {renderEffectivenessDetails(act, true)}
 
-                      {/* Action Triggers */}
-                      <div style={{ display: 'flex', gap: '6px', paddingTop: '4px' }}>
-                        {act.status === 'PENDING_ACKNOWLEDGEMENT' ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const execId = (act as any)?.observation?.execution?.id || 'exec-cnc01-sample';
-                              setSelectedAuditId(execId);
-                              setReportModalOpen(true);
-                            }}
-                            style={{
-                              width: '100%',
-                              padding: '7px 10px',
-                              borderRadius: 'var(--radius-sm)',
-                              border: '1px solid rgba(245, 158, 11, 0.4)',
-                              background: 'rgba(245, 158, 11, 0.12)',
-                              color: '#b45309',
-                              fontSize: '11.5px',
-                              fontWeight: 700,
-                              cursor: 'pointer',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              gap: '6px',
-                            }}
-                          >
-                            <FileCheck size={13} />
-                            <span>Acknowledge Audit Findings</span>
-                          </button>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => open5WhyDrawer(act)}
-                              style={{
-                                flex: 1,
-                                padding: '6px 8px',
-                                borderRadius: 'var(--radius-xs)',
-                                border: '1px solid var(--border-subtle)',
-                                background: 'var(--bg-surface-subtle)',
-                                color: 'var(--text-primary)',
-                                fontSize: '11.5px',
-                                fontWeight: 600,
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                gap: '4px',
-                              }}
-                            >
-                              <Lightbulb size={12} color="var(--color-primary)" />
-                              <span>5-Why & Solution</span>
-                            </button>
+                          <div style={{ paddingTop: '8px', borderTop: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', gap: '8px', fontSize: '12.5px', color: 'var(--text-secondary)', minWidth: 0 }}>
+                            <span style={ellipsis} title={act.location?.name}>
+                              {act.location?.name ?? '—'}
+                            </span>
+                            <span style={{ ...ellipsis, flexShrink: 0, maxWidth: '50%' }} title={assigneeName(act)}>
+                              {assigneeName(act)}
+                            </span>
+                          </div>
 
-                            {act.status !== 'PENDING_VERIFICATION' && act.status !== 'VERIFIED' && act.status !== 'CLOSED' && (
-                              <button
-                                type="button"
-                                onClick={() => openClosureDrawer(act)}
-                                style={{
-                                  flex: 1,
-                                  padding: '6px 8px',
-                                  borderRadius: 'var(--radius-xs)',
-                                  border: '1px solid var(--color-primary)',
-                                  background: 'var(--color-primary-light)',
-                                  color: 'var(--color-primary)',
-                                  fontSize: '11.5px',
-                                  fontWeight: 700,
-                                  cursor: 'pointer',
-                                }}
-                              >
-                                Submit Proof
-                              </button>
-                            )}
-
-                            {act.status === 'PENDING_VERIFICATION' && (
-                              <button
-                                type="button"
-                                onClick={() => openVerificationModal(act)}
-                                style={{
-                                  flex: 1,
-                                  padding: '6px 8px',
-                                  borderRadius: 'var(--radius-xs)',
-                                  border: '1px solid #A855F7',
-                                  background: 'rgba(168, 85, 247, 0.12)',
-                                  color: '#A855F7',
-                                  fontSize: '11.5px',
-                                  fontWeight: 700,
-                                  cursor: 'pointer',
-                                }}
-                              >
-                                Verify & Sign
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          ))}
+                          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>{renderActionButtons(act)}</div>
+                        </article>
+                      ))
+                    )}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
         </div>
-      )}
-
-      {/* Table View */}
-      {viewMode === 'table' && (
+      ) : (
         <Card noPadding>
           <div className="enterprise-table-container">
             <table className="enterprise-table">
               <thead>
                 <tr>
-                  <th>Action Ref</th>
-                  <th>Observation Finding</th>
-                  <th>Root Cause & Solution</th>
-                  <th>Assignee</th>
-                  <th>Target SLA Date</th>
-                  <th>Status</th>
-                  <th>Actions</th>
+                  <th scope="col">Action</th>
+                  <th scope="col">Finding</th>
+                  <th scope="col">Root cause &amp; solution</th>
+                  <th scope="col">Assignee</th>
+                  <th scope="col">Target date</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredActions.map((act) => (
-                  <tr key={act.id}>
+                  <tr key={act.id} id={`capa-action-${act.id}`} style={highlightStyle(act.id)}>
                     <td>
-                      <strong>{act.actionCode}</strong>
+                      <span className="code-tag">{act.actionCode}</span>
                     </td>
-                    <td>
-                      <div style={{ fontWeight: 600 }}>{act.title}</div>
-                      <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{act.location?.name}</div>
+                    <td style={{ maxWidth: '280px' }}>
+                      <div style={{ fontWeight: 600, ...lineClamp(2) }}>{act.title}</div>
+                      <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)', marginBottom: '4px', ...ellipsis }} title={act.location?.name}>
+                        {act.location?.name ?? '—'}
+                      </div>
+                      {renderTags(act)}
                     </td>
-                    <td>
+                    <td style={{ maxWidth: '260px' }}>
                       {act.status === 'PENDING_ACKNOWLEDGEMENT' ? (
-                        <div style={{ fontSize: '11px', color: '#b45309', fontWeight: 600 }}>
-                          Locked awaiting audit sign-off
-                        </div>
+                        <span style={{ fontSize: '12.5px', color: 'var(--color-warning)', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          <Lock size={12} aria-hidden="true" /> Waiting for audit sign-off
+                        </span>
                       ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                          <Badge variant="info">{act.rootCauseCategory}</Badge>
-                          {act.fiveWhyAnalysis?.solution && (
-                            <div style={{ fontSize: '11px', color: 'var(--color-success)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                              <Lightbulb size={11} />
-                              <span>{act.fiveWhyAnalysis.solution.slice(0, 40)}...</span>
-                            </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-start' }}>
+                          <Badge variant="neutral">{humanize(act.rootCauseCategory)}</Badge>
+                          {act.fiveWhyAnalysis?.solution ? (
+                            <span style={{ fontSize: '12.5px', color: 'var(--text-primary)', ...lineClamp(2) }} title={act.fiveWhyAnalysis.solution}>
+                              {act.fiveWhyAnalysis.solution}
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: '12.5px', color: 'var(--text-tertiary)' }}>Not recorded yet</span>
                           )}
                         </div>
                       )}
                     </td>
-                    <td>{act.assignee?.firstName} {act.assignee?.lastName}</td>
-                    <td>{formatSla(act.targetDate, act.isOverdue, act.status)}</td>
+                    <td>{assigneeName(act)}</td>
                     <td>
-                      <Badge variant={act.status === 'VERIFIED' ? 'success' : act.status === 'PENDING_VERIFICATION' ? 'purple' : act.status === 'PENDING_ACKNOWLEDGEMENT' ? 'warning' : act.isOverdue ? 'danger' : 'warning'}>
-                        {act.status === 'PENDING_ACKNOWLEDGEMENT' ? 'Awaiting Sign-off' : act.status}
-                      </Badge>
+                      <div style={{ whiteSpace: 'nowrap' }}>{formatDate(act.targetDate)}</div>
+                      {renderSla(act)}
                     </td>
                     <td>
-                      <div style={{ display: 'flex', gap: '6px' }}>
-                        {act.status === 'PENDING_ACKNOWLEDGEMENT' ? (
-                          <Button
-                            variant="primary"
-                            size="sm"
-                            icon={<FileCheck size={13} />}
-                            onClick={() => {
-                              const execId = (act as any)?.observation?.execution?.id || 'exec-cnc01-sample';
-                              setSelectedAuditId(execId);
-                              setReportModalOpen(true);
-                            }}
-                          >
-                            Acknowledge
-                          </Button>
-                        ) : (
-                          <>
-                            <Button variant="secondary" size="sm" onClick={() => open5WhyDrawer(act)}>
-                              5-Why
-                            </Button>
-                            {act.status === 'PENDING_VERIFICATION' ? (
-                              <Button variant="primary" size="sm" onClick={() => openVerificationModal(act)}>
-                                Verify
-                              </Button>
-                            ) : (
-                              <Button variant="secondary" size="sm" onClick={() => openClosureDrawer(act)}>
-                                Proof
-                              </Button>
-                            )}
-                          </>
-                        )}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxWidth: '260px' }}>
+                        <div>{renderStatusBadge(act)}</div>
+                        {renderRejection(act)}
+                        {renderEffectivenessDetails(act, true)}
                       </div>
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', minWidth: '180px' }}>{renderActionButtons(act)}</div>
                     </td>
                   </tr>
                 ))}
@@ -954,696 +1126,514 @@ export const CapaManagementPage: React.FC = () => {
         </Card>
       )}
 
-      {/* Modal: 5-Why Root Cause Investigation & Problem Solution */}
+      {/* Modal: 5-Why root cause analysis & solution */}
       <Modal
-        isOpen={fiveWhyDrawerOpen}
-        onClose={() => setFiveWhyDrawerOpen(false)}
-        title={`Root Cause Analysis & Solution: ${selectedAction?.actionCode}`}
-        subtitle="Structured 5-Why investigation with corrective and preventive actions"
+        isOpen={fiveWhyOpen}
+        onClose={() => {
+          if (!saving5Why) setFiveWhyOpen(false);
+        }}
+        title={`Root cause & solution: ${selectedAction?.actionCode ?? ''}`}
+        subtitle={fiveWhyReadOnly ? 'Read only: this action can no longer be analysed.' : 'Ask "why" until the underlying cause is clear, then record the fix.'}
         maxWidth="680px"
+        footer={
+          fiveWhyReadOnly ? (
+            <Button type="button" variant="secondary" onClick={() => setFiveWhyOpen(false)}>
+              Close
+            </Button>
+          ) : (
+            <>
+              <Button type="button" variant="secondary" onClick={() => setFiveWhyOpen(false)} disabled={saving5Why}>
+                Cancel
+              </Button>
+              <Button type="submit" form="capa-five-why-form" variant="primary" icon={<CheckCircle2 size={16} />} loading={saving5Why}>
+                Save root cause &amp; solution
+              </Button>
+            </>
+          )
+        }
       >
-        <form onSubmit={handleSave5Why} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {/* Header Summary */}
-          <div
-            style={{
-              padding: '14px 16px',
-              borderRadius: 'var(--radius-md)',
-              background: 'var(--bg-surface-subtle)',
-              border: '1px solid var(--border-subtle)',
-              fontSize: '13px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '4px',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <span style={{ fontWeight: 700, color: 'var(--text-primary)' }}>Problem / Non-Conformance:</span>
-              <Badge variant="warning">{selectedAction?.actionCode}</Badge>
-            </div>
-            <div style={{ color: 'var(--text-secondary)', lineHeight: 1.4 }}>{selectedAction?.title}</div>
-            {selectedAction?.description && (
-              <div style={{ fontSize: '11.5px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                {selectedAction.description}
-              </div>
-            )}
-          </div>
-
-          {/* Section 1: Ishikawa & 5-Why Drilldown */}
-          <div style={{ padding: '16px', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-subtle)', background: 'var(--bg-surface)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
-              <Search size={16} color="var(--color-primary)" />
-              <h3 style={{ fontSize: '14px', fontWeight: 700, margin: 0, color: 'var(--text-primary)' }}>
-                Step 1: 5-Why Root Cause Investigation
-              </h3>
+        <form id="capa-five-why-form" onSubmit={handleSave5Why} noValidate style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          <fieldset disabled={fiveWhyReadOnly} style={{ border: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '20px', minWidth: 0 }}>
+            <div style={{ padding: '12px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-pale)', border: '1px solid var(--color-info-border)', fontSize: '13px' }}>
+              <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{selectedAction?.title}</div>
+              {selectedAction?.description && <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)', marginTop: '2px' }}>{selectedAction.description}</div>}
+              {selectedAction && (selectedAction.effectivenessReview || selectedAction.closedAt) && <div style={{ marginTop: '8px' }}>{renderEffectivenessDetails(selectedAction)}</div>}
             </div>
 
-            <div className="form-group" style={{ marginBottom: '16px' }}>
-              <label className="form-label">Ishikawa (Fishbone) Cause Category *</label>
-              <select
-                className="form-control"
-                value={fiveWhyData.rootCauseCategory}
-                onChange={(e) => setFiveWhyData({ ...fiveWhyData, rootCauseCategory: e.target.value })}
-              >
-                <option value="METHOD">Method (Procedures, Work Instructions, SOPs)</option>
-                <option value="MACHINE">Machine (Tooling, Maintenance, Wear & Tear)</option>
-                <option value="MATERIAL">Material (Supplies, Parts Quality, Storage)</option>
-                <option value="MANPOWER">Manpower (Training, Competency, Handover)</option>
-                <option value="MEASUREMENT">Measurement (Calibration, Inspection Limits)</option>
-                <option value="ENVIRONMENT">Environment (Lighting, Ergonomics, Layout)</option>
-              </select>
-            </div>
+            {/* Step 1: 5-Why */}
+            <section>
+              <h3 className="form-section-title" style={{ marginTop: 0 }}>Step 1: Find the root cause</h3>
 
-            {/* 5-Why Dynamic Stepper */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              {Array.from({ length: activeWhyCount }, (_, i) => i + 1).map((level) => {
-                const fieldKey = `why${level}` as keyof typeof fiveWhyData;
-                const isDeepest = level === activeWhyCount;
-                return (
-                  <div
-                    key={level}
-                    className="form-group animate-fade-in"
-                    style={{
-                      margin: 0,
-                      padding: '12px 14px',
-                      borderRadius: 'var(--radius-md)',
-                      background: 'var(--bg-surface-subtle)',
-                      border: '1px solid var(--border-subtle)',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                      <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', margin: 0, fontWeight: 700 }}>
-                        <span
-                          style={{
-                            width: '22px',
-                            height: '22px',
-                            borderRadius: '50%',
-                            background: isDeepest && level > 1 ? 'var(--color-danger)' : 'var(--color-primary)',
-                            color: '#FFF',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: '11px',
-                            fontWeight: 700,
-                          }}
-                        >
-                          {level}
-                        </span>
-                        <span>Why #{level}:</span>
-                        {isDeepest && level > 1 && (
-                          <Badge variant="warning" style={{ fontSize: '10.5px' }}>
-                            Root Cause Level
-                          </Badge>
+              <FormField label="Cause category" required>
+                {(p) => (
+                  <select {...p} className="form-select" value={fiveWhyData.rootCauseCategory} onChange={(e) => setFiveWhyData({ ...fiveWhyData, rootCauseCategory: e.target.value })}>
+                    {ROOT_CAUSE_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </FormField>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {Array.from({ length: activeWhyCount }, (_, i) => i + 1).map((level) => {
+                  const key = whyKey(level);
+                  const fieldId = `capa-why-${level}`;
+                  return (
+                    <div key={level} className="form-group" style={{ margin: 0 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', gap: '8px' }}>
+                        <label className="form-label" htmlFor={fieldId} style={{ margin: 0 }}>
+                          Why #{level}
+                        </label>
+                        {level > 1 && !fiveWhyReadOnly && (
+                          <Button type="button" size="sm" variant="ghost" icon={<Trash2 size={13} />} onClick={() => handleRemoveWhy(level)} aria-label={`Remove why #${level}`}>
+                            Remove
+                          </Button>
                         )}
-                      </label>
-
-                      {level > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveWhy(level)}
-                          title={`Remove Why #${level}`}
-                          style={{
-                            background: 'transparent',
-                            border: 'none',
-                            color: 'var(--text-tertiary)',
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '4px',
-                            fontSize: '11.5px',
-                            padding: '2px 6px',
-                            borderRadius: 'var(--radius-xs)',
-                          }}
-                          onMouseEnter={(e) => (e.currentTarget.style.color = '#EF4444')}
-                          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-tertiary)')}
-                        >
-                          <Trash2 size={13} />
-                          <span>Remove</span>
-                        </button>
-                      )}
+                      </div>
+                      <textarea
+                        id={fieldId}
+                        rows={2}
+                        className="form-textarea"
+                        placeholder={level === 1 ? 'Why did the problem happen?' : `Why did the answer to #${level - 1} happen?`}
+                        value={fiveWhyData[key]}
+                        onChange={(e) => setFiveWhyData({ ...fiveWhyData, [key]: e.target.value })}
+                      />
                     </div>
+                  );
+                })}
 
-                    <textarea
-                      rows={2}
-                      className="form-control"
-                      placeholder={
-                        level === 1
-                          ? 'Why did the immediate non-conformance occur?'
-                          : level === 5 || isDeepest
-                          ? 'Root Cause: What systemic policy, maintenance, or process gap caused this?'
-                          : `Why did Why #${level - 1} occur?`
-                      }
-                      value={fiveWhyData[fieldKey]}
-                      onChange={(e) => setFiveWhyData({ ...fiveWhyData, [fieldKey]: e.target.value })}
-                    />
-                  </div>
-                );
-              })}
-
-              {/* Add Why Button */}
-              {activeWhyCount < 5 && (
-                <div style={{ marginTop: '2px' }}>
-                  <button
-                    type="button"
-                    onClick={handleAddWhy}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '8px',
-                      padding: '10px 16px',
-                      borderRadius: 'var(--radius-md)',
-                      background: 'rgba(37, 99, 235, 0.05)',
-                      border: '1px dashed var(--color-primary)',
-                      color: 'var(--color-primary)',
-                      fontWeight: 700,
-                      fontSize: '13px',
-                      cursor: 'pointer',
-                      width: '100%',
-                      transition: 'all 0.15s ease',
-                    }}
-                  >
-                    <Plus size={16} />
-                    <span>+ Add Why #{activeWhyCount + 1} Level</span>
-                  </button>
-                  <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '6px', textAlign: 'center' }}>
-                    Drill down progressively until the systemic root cause is uncovered (supports up to 5 levels).
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Section 2: Permanent Solution & Action Plan */}
-          <div
-            style={{
-              padding: '18px',
-              borderRadius: 'var(--radius-lg)',
-              border: '1px solid rgba(5, 150, 105, 0.3)',
-              background: 'rgba(5, 150, 105, 0.03)',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Lightbulb size={18} color="var(--color-success)" />
-                <h3 style={{ fontSize: '15px', fontWeight: 700, margin: 0, color: 'var(--text-primary)' }}>
-                  Step 2: Permanent Solution & Action Plan
-                </h3>
-              </div>
-              <Badge variant="success">Countermeasure</Badge>
-            </div>
-
-            {/* Quick Solution Presets */}
-            <div style={{ marginBottom: '16px' }}>
-              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
-                Quick Solution Presets (Click to Auto-populate):
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setFiveWhyData({
-                      ...fiveWhyData,
-                      solution: 'Install heavy-duty visual shadow board with color-coded tool silhouettes and tethering brackets.',
-                      preventiveAction: 'Update workstation SOP-5S-01 and incorporate visual tool audit check at end of each production shift.',
-                      verificationCriteria: '100% tool return compliance verified over 3 consecutive weekly audits.',
-                    })
-                  }
-                  style={{
-                    padding: '4px 8px',
-                    borderRadius: 'var(--radius-xs)',
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-subtle)',
-                    fontSize: '11px',
-                    cursor: 'pointer',
-                    color: 'var(--text-primary)',
-                  }}
-                >
-                  + Shadow Board & SOP Update
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setFiveWhyData({
-                      ...fiveWhyData,
-                      solution: 'Replace damaged component with high-durability specification part, torque to OEM spec, and install drip tray.',
-                      preventiveAction: 'Update CMMS preventative maintenance bill-of-materials and inspection interval.',
-                      verificationCriteria: 'Zero fluid leaks or physical defects observed during 100 hours of continuous operation.',
-                    })
-                  }
-                  style={{
-                    padding: '4px 8px',
-                    borderRadius: 'var(--radius-xs)',
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-subtle)',
-                    fontSize: '11px',
-                    cursor: 'pointer',
-                    color: 'var(--text-primary)',
-                  }}
-                >
-                  + Component Fix & PM Update
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setFiveWhyData({
-                      ...fiveWhyData,
-                      solution: 'Conduct Standard Work training with visual One-Point Lesson (OPL) on proper material segregation.',
-                      preventiveAction: 'Incorporate 5S sorting standard into new operator onboarding handbook and certification matrix.',
-                      verificationCriteria: 'Zero repeated non-conformances by operators in this cell across 30 days.',
-                    })
-                  }
-                  style={{
-                    padding: '4px 8px',
-                    borderRadius: 'var(--radius-xs)',
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-subtle)',
-                    fontSize: '11px',
-                    cursor: 'pointer',
-                    color: 'var(--text-primary)',
-                  }}
-                >
-                  + Operator Training & OPL
-                </button>
-              </div>
-            </div>
-
-            {/* Permanent Corrective Solution */}
-            <div className="form-group" style={{ marginBottom: '14px' }}>
-              <label className="form-label" style={{ fontWeight: 700 }}>
-                Permanent Corrective Solution / Countermeasure *
-              </label>
-              <textarea
-                rows={3}
-                className="form-control"
-                placeholder="What specific engineering, mechanical, or operational solution will permanently solve this problem?"
-                value={fiveWhyData.solution}
-                onChange={(e) => setFiveWhyData({ ...fiveWhyData, solution: e.target.value })}
-                required
-              />
-              <span className="form-hint">
-                Describe the direct fix (e.g. replace seal with Viton high-temp grade, install shadow board, construct holding rack).
-              </span>
-            </div>
-
-            {/* Preventive Action / Standardization */}
-            <div className="form-group" style={{ marginBottom: '14px' }}>
-              <label className="form-label" style={{ fontWeight: 700 }}>
-                Preventive Action & Process Standardization (Yokoten / SOP)
-              </label>
-              <textarea
-                rows={2}
-                className="form-control"
-                placeholder="How will this solution be standardized across stations or shifts (e.g. SOP update, training, poka-yoke)?"
-                value={fiveWhyData.preventiveAction}
-                onChange={(e) => setFiveWhyData({ ...fiveWhyData, preventiveAction: e.target.value })}
-              />
-            </div>
-
-            {/* Verification / Success Criteria */}
-            <div className="form-group" style={{ marginBottom: '6px' }}>
-              <label className="form-label" style={{ fontWeight: 700 }}>
-                Audit Verification & Success Metric
-              </label>
-              <input
-                type="text"
-                className="form-control"
-                placeholder="e.g. 0 defects or missing tools recorded across 3 consecutive weekly audits."
-                value={fiveWhyData.verificationCriteria}
-                onChange={(e) => setFiveWhyData({ ...fiveWhyData, verificationCriteria: e.target.value })}
-              />
-            </div>
-          </div>
-
-          {/* Drawer Actions */}
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '8px' }}>
-            <Button type="button" variant="secondary" onClick={() => setFiveWhyDrawerOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" icon={<CheckCircle2 size={16} />}>
-              Save Root Cause & Solution
-            </Button>
-          </div>
-        </form>
-      </Modal>
-
-      {/* Modal: Action Closure Proof Submission */}
-      <Modal
-        isOpen={closureDrawerOpen}
-        onClose={() => setClosureDrawerOpen(false)}
-        title={`Submit Closure Proof: ${selectedAction?.actionCode}`}
-        subtitle="Provide after-photo evidence and remediation notes for verification"
-        maxWidth="640px"
-      >
-        <form onSubmit={handleSubmitClosure} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-          <div style={{ padding: '12px', borderRadius: 'var(--radius-md)', background: 'var(--bg-surface-subtle)', border: '1px solid var(--border-subtle)', fontSize: '13px' }}>
-            <strong>Action Target:</strong> {selectedAction?.title}
-            {selectedAction?.fiveWhyAnalysis?.solution && (
-              <div style={{ marginTop: '6px', paddingTop: '6px', borderTop: '1px solid var(--border-subtle)', color: 'var(--color-success)', fontSize: '12px' }}>
-                <strong>Planned Solution:</strong> {selectedAction.fiveWhyAnalysis.solution}
-              </div>
-            )}
-          </div>
-
-          {/* Photo Evidence Section: Camera, Upload, Drag & Drop, or Presets */}
-          <div className="form-group">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-              <label className="form-label" style={{ margin: 0, fontWeight: 700 }}>
-                Mandatory "After" Photo Evidence *
-              </label>
-              <button
-                type="button"
-                onClick={() => setShowUrlInput(!showUrlInput)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: 'var(--color-primary)',
-                  fontSize: '11.5px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  textDecoration: 'underline',
-                }}
-              >
-                {showUrlInput ? 'Switch to Camera / File Upload' : 'Or paste cloud image URL'}
-              </button>
-            </div>
-
-            {/* Mode A: Optional Cloud URL Input */}
-            {showUrlInput ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                <input
-                  type="text"
-                  className="form-control"
-                  placeholder="https://... or /assets/..."
-                  value={afterPhotoUrl}
-                  onChange={(e) => setAfterPhotoUrl(e.target.value)}
-                />
-                <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                  Enter external or hosted image URL (e.g. AWS S3, SharePoint, or cloud CDN).
-                </span>
-              </div>
-            ) : (
-              /* Mode B: Direct Camera Capture & File Upload */
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                  {/* Camera Capture */}
-                  <label
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '8px',
-                      padding: '10px 14px',
-                      borderRadius: 'var(--radius-md)',
-                      background: 'var(--color-primary-light)',
-                      border: '1px solid var(--color-primary)',
-                      color: 'var(--color-primary)',
-                      fontWeight: 600,
-                      fontSize: '12.5px',
-                      cursor: 'pointer',
-                      transition: 'all var(--transition-fast)',
-                    }}
-                  >
-                    <Camera size={16} />
-                    <span>Take Photo / Camera</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      capture="environment"
-                      style={{ display: 'none' }}
-                      onChange={handlePhotoFileUpload}
-                    />
-                  </label>
-
-                  {/* Device File Upload */}
-                  <label
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '8px',
-                      padding: '10px 14px',
-                      borderRadius: 'var(--radius-md)',
-                      background: 'var(--bg-surface-subtle)',
-                      border: '1px solid var(--border-subtle)',
-                      color: 'var(--text-primary)',
-                      fontWeight: 600,
-                      fontSize: '12.5px',
-                      cursor: 'pointer',
-                      transition: 'all var(--transition-fast)',
-                    }}
-                  >
-                    <Upload size={16} />
-                    <span>Upload Image File</span>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      style={{ display: 'none' }}
-                      onChange={handlePhotoFileUpload}
-                    />
-                  </label>
-                </div>
-
-                {/* Drag and Drop Zone when empty */}
-                {!afterPhotoUrl && (
-                  <div
-                    onDragOver={(e) => { e.preventDefault(); setIsDraggingPhoto(true); }}
-                    onDragLeave={() => setIsDraggingPhoto(false)}
-                    onDrop={handlePhotoDrop}
-                    style={{
-                      padding: '24px 16px',
-                      textAlign: 'center',
-                      border: isDraggingPhoto ? '2px dashed var(--color-primary)' : '2px dashed var(--border-subtle)',
-                      borderRadius: 'var(--radius-md)',
-                      background: isDraggingPhoto ? 'var(--color-primary-light)' : 'var(--bg-surface-subtle)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <Upload size={22} style={{ color: 'var(--text-tertiary)', marginBottom: '4px' }} />
-                    <div style={{ fontSize: '12.5px', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                      Drag &amp; drop physical proof image here
-                    </div>
-                    <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
-                      PNG, JPG, or WEBP up to 10MB
-                    </div>
+                {activeWhyCount < 5 && !fiveWhyReadOnly && (
+                  <div>
+                    <Button type="button" variant="outline" size="sm" icon={<Plus size={14} />} onClick={() => setActiveWhyCount((n) => Math.min(5, n + 1))}>
+                      Add why #{activeWhyCount + 1}
+                    </Button>
                   </div>
                 )}
+
+                <FormField label="Root cause" error={fiveWhyErrors.rootCause} hint="Required: answer at least one why, or state the root cause here." style={{ margin: 0 }}>
+                  {(p) => (
+                    <textarea
+                      {...p}
+                      rows={2}
+                      className="form-textarea"
+                      placeholder="The underlying cause the answers lead to (e.g. no fixed place for the tool)"
+                      value={fiveWhyData.rootCauseConclusion}
+                      onChange={(e) => setFiveWhyData({ ...fiveWhyData, rootCauseConclusion: e.target.value })}
+                    />
+                  )}
+                </FormField>
               </div>
-            )}
+            </section>
 
+            {/* Step 2: Solution */}
+            <section>
+              <h3 className="form-section-title" style={{ marginTop: 0 }}>Step 2: Fix it for good</h3>
 
-            {/* Attached Photo Preview with Annotate & Remove Controls */}
-            {afterPhotoUrl && (
-              <div style={{ marginTop: '12px', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-md)', overflow: 'hidden', background: '#0F172A' }}>
-                <div style={{ padding: '8px 12px', background: 'var(--bg-surface)', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Badge variant="success" icon={<CheckCircle2 size={12} />}>Physical Evidence Attached</Badge>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="secondary"
-                      icon={<Camera size={13} />}
-                      onClick={() => setAnnotationModalOpen(true)}
-                    >
-                      Annotate Proof
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      style={{ color: 'var(--color-danger)' }}
-                      onClick={() => setAfterPhotoUrl('')}
-                    >
-                      Remove
-                    </Button>
-                  </div>
-                </div>
+              <FormField label="Solution" required error={fiveWhyErrors.solution}>
+                {(p) => (
+                  <textarea
+                    {...p}
+                    rows={3}
+                    className="form-textarea"
+                    placeholder="What will be changed so the problem cannot come back?"
+                    value={fiveWhyData.solution}
+                    onChange={(e) => setFiveWhyData({ ...fiveWhyData, solution: e.target.value })}
+                  />
+                )}
+              </FormField>
 
-                <div style={{ width: '100%', height: '180px', position: 'relative' }}>
-                  <ImageWithFallback src={afterPhotoUrl} height="180px" alt="After Evidence" allowZoom={true} />
-                </div>
-              </div>
-            )}
-          </div>
+              <FormField label="Preventive action">
+                {(p) => (
+                  <textarea
+                    {...p}
+                    rows={2}
+                    className="form-textarea"
+                    placeholder="How the fix is standardised on other stations or shifts (SOP update, training, mistake-proofing)"
+                    value={fiveWhyData.preventiveAction}
+                    onChange={(e) => setFiveWhyData({ ...fiveWhyData, preventiveAction: e.target.value })}
+                  />
+                )}
+              </FormField>
 
-          <div className="form-group">
-            <label className="form-label">Remediation Closure Notes *</label>
-            <textarea
-              rows={3}
-              className="form-control"
-              placeholder="Detail exact physical changes implemented, parts replaced, shadow boards marked, operator trained..."
-              value={closureNotes}
-              onChange={(e) => setClosureNotes(e.target.value)}
-              required
-            />
-          </div>
+              <FormField label="How success will be checked" style={{ marginBottom: 0 }}>
+                {(p) => (
+                  <input
+                    {...p}
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. No repeat finding in the next 3 weekly audits"
+                    value={fiveWhyData.verificationCriteria}
+                    onChange={(e) => setFiveWhyData({ ...fiveWhyData, verificationCriteria: e.target.value })}
+                  />
+                )}
+              </FormField>
+            </section>
+          </fieldset>
+        </form>
+      </Modal>
 
-          <div className="form-group">
-            <label className="form-label">Remediation Performed By *</label>
-            <input
-              type="text"
-              className="form-control"
-              value={actorName}
-              onChange={(e) => setActorName(e.target.value)}
-              required
-            />
-          </div>
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '16px' }}>
-            <Button type="button" variant="secondary" onClick={() => setClosureDrawerOpen(false)}>
+      {/* Modal: closure evidence */}
+      <Modal
+        isOpen={closureOpen}
+        onClose={() => {
+          if (!submittingClosure) setClosureOpen(false);
+        }}
+        title={`Submit proof: ${selectedAction?.actionCode ?? ''}`}
+        subtitle="Show the fixed area and describe what was done. Someone else will verify it."
+        maxWidth="640px"
+        footer={
+          <>
+            <Button type="button" variant="secondary" onClick={() => setClosureOpen(false)} disabled={submittingClosure}>
               Cancel
             </Button>
-            <Button type="submit" variant="primary" icon={<CheckCircle2 size={16} />}>
-              Submit for Verification
+            <Button type="submit" form="capa-closure-form" variant="primary" icon={<CheckCircle2 size={16} />} loading={submittingClosure} disabled={!closureReady}>
+              Submit for verification
             </Button>
+          </>
+        }
+      >
+        <form id="capa-closure-form" onSubmit={handleSubmitClosure} noValidate style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div style={{ padding: '12px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-pale)', border: '1px solid var(--color-info-border)', fontSize: '13px' }}>
+            <div style={{ fontWeight: 600 }}>{selectedAction?.title}</div>
+            {selectedAnalysis?.solution && (
+              <div style={{ marginTop: '6px', color: 'var(--text-secondary)', fontSize: '12.5px' }}>
+                <strong>Planned solution:</strong> {selectedAnalysis.solution}
+              </div>
+            )}
+          </div>
+
+          {!closureReady && selectedAction && (
+            <div role="alert" style={{ padding: '12px', borderRadius: 'var(--radius-md)', background: 'var(--color-warning-bg)', border: '1px solid var(--color-warning-border)', fontSize: '13px', display: 'flex', flexDirection: 'column', gap: '8px', alignItems: 'flex-start' }}>
+              <span>Record the root cause and the solution before submitting this action for verification.</span>
+              {allows(selectedAction, 'ANALYSE') && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  icon={<Lightbulb size={13} />}
+                  onClick={() => {
+                    setClosureOpen(false);
+                    open5Why(selectedAction);
+                  }}
+                >
+                  Open 5-Why &amp; solution
+                </Button>
+              )}
+            </div>
+          )}
+
+          <PhotoEvidenceField
+            id="capa-after-photo"
+            label="After photo"
+            required={!allowNoPhoto}
+            hint={allowNoPhoto ? 'Your organization allows closure without a photo, with a justification.' : undefined}
+            value={afterPhotoUrl}
+            onChange={(url) => {
+              setAfterPhotoUrl(url);
+              if (url) setClosureErrors((prev) => ({ ...prev, photo: undefined }));
+            }}
+            onError={(message) => addToast({ type: 'warning', title: 'Photo not attached', message })}
+            error={closureErrors.photo}
+            previewAlt={`After photo for ${selectedAction?.actionCode ?? 'this action'}`}
+            previewActions={
+              <Button type="button" size="sm" variant="secondary" icon={<Camera size={13} />} onClick={() => setAnnotationOpen(true)}>
+                Mark up photo
+              </Button>
+            }
+          />
+
+          {allowNoPhoto && !afterPhotoUrl && (
+            <FormField label="Why there is no after photo" required error={closureErrors.justification} style={{ marginBottom: 0 }}>
+              {(p) => (
+                <textarea
+                  {...p}
+                  rows={2}
+                  className="form-textarea"
+                  maxLength={1000}
+                  placeholder="e.g. Photography is not permitted in this clean room."
+                  value={noPhotoJustification}
+                  onChange={(e) => setNoPhotoJustification(e.target.value)}
+                />
+              )}
+            </FormField>
+          )}
+
+          <FormField label="What was done" required error={closureErrors.notes} style={{ marginBottom: 0 }}>
+            {(p) => (
+              <textarea
+                {...p}
+                rows={3}
+                className="form-textarea"
+                placeholder="Changes made, parts replaced, places marked, people trained…"
+                value={closureNotes}
+                onChange={(e) => setClosureNotes(e.target.value)}
+              />
+            )}
+          </FormField>
+
+          <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)' }}>
+            Submitted by <strong style={{ color: 'var(--text-primary)' }}>{currentUser?.fullName ?? '—'}</strong>
           </div>
         </form>
       </Modal>
 
-      {/* Modal: Independent 2-Person Verification Sign-Off */}
+      {/* Modal: verification */}
       <Modal
-        isOpen={verificationModalOpen}
-        onClose={() => setVerificationModalOpen(false)}
-        title={`Independent 2-Person Verification: ${selectedAction?.actionCode}`}
+        isOpen={verificationOpen}
+        onClose={() => {
+          if (!verifying) setVerificationOpen(false);
+        }}
+        title={`Verify action ${selectedAction?.actionCode ?? ''}`}
+        subtitle="Compare the evidence with the finding, then approve the fix or send it back."
         maxWidth="740px"
+        footer={
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap', width: '100%' }}>
+            <Button type="button" variant="danger" icon={<RotateCcw size={16} />} onClick={() => handleVerify(false)} loading={verifying === 'reject'} disabled={!!verifying}>
+              Reject and reopen
+            </Button>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <Button type="button" variant="secondary" onClick={() => setVerificationOpen(false)} disabled={!!verifying}>
+                Cancel
+              </Button>
+              <Button type="button" variant="primary" icon={<ShieldCheck size={16} />} onClick={() => handleVerify(true)} loading={verifying === 'approve'} disabled={!!verifying}>
+                Approve
+              </Button>
+            </div>
+          </div>
+        }
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
-          {/* Solution & 5-Why Reference */}
-          {selectedAction?.fiveWhyAnalysis?.solution && (
-            <div
-              style={{
-                padding: '12px 14px',
-                borderRadius: 'var(--radius-md)',
-                background: 'rgba(5, 150, 105, 0.08)',
-                border: '1px solid rgba(5, 150, 105, 0.25)',
-                fontSize: '12.5px',
-              }}
-            >
-              <div style={{ fontWeight: 700, color: 'var(--color-success)', marginBottom: '2px', display: 'flex', alignItems: 'center', gap: '5px' }}>
-                <Lightbulb size={13} />
-                <span>Verified Solution Plan:</span>
-              </div>
-              <div style={{ color: 'var(--text-primary)' }}>{selectedAction.fiveWhyAnalysis.solution}</div>
-              {selectedAction.fiveWhyAnalysis.verificationCriteria && (
-                <div style={{ fontSize: '11.5px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                  <strong>Success Criteria:</strong> {selectedAction.fiveWhyAnalysis.verificationCriteria}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {selectedAnalysis?.solution && (
+            <div style={{ padding: '12px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-pale)', border: '1px solid var(--color-info-border)', fontSize: '13px' }}>
+              <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>Planned solution</div>
+              <div style={{ color: 'var(--text-primary)' }}>{selectedAnalysis.solution}</div>
+              {selectedAnalysis.verificationCriteria && (
+                <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                  <strong>Success check:</strong> {selectedAnalysis.verificationCriteria}
                 </div>
               )}
             </div>
           )}
 
-          {/* Side-by-Side Photo Comparison */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: '#EF4444', marginBottom: '4px' }}>
-                BEFORE (Non-Conformance Finding)
-              </div>
-              <div style={{ width: '100%', height: '180px', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border-subtle)' }}>
-                <ImageWithFallback
-                  src={selectedAction?.observation?.beforePhotoUrl || FIVE_S_IMAGES.capa.toolingBefore}
-                  category={selectedAction?.observation?.category}
-                  alt="Before"
-                  height="180px"
-                  allowZoom={true}
-                />
+          <div className="keep-cols" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+            <div style={{ minWidth: 0 }}>
+              <div className="form-label" style={{ marginBottom: '6px' }}>Before (finding)</div>
+              <div style={{ borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border-subtle)' }}>
+                <ImageWithFallback src={selectedAction?.observation?.beforePhotoUrl} emptyText="No photo recorded" alt="Before: the finding" height="180px" allowZoom />
               </div>
             </div>
-
-            <div>
-              <div style={{ fontSize: '12px', fontWeight: 700, color: '#10B981', marginBottom: '4px' }}>
-                AFTER (Remediation Evidence)
-              </div>
-              <div style={{ width: '100%', height: '180px', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border-subtle)' }}>
-                <ImageWithFallback
-                  src={selectedAction?.afterPhotoUrl || FIVE_S_IMAGES.capa.toolingAfter}
-                  alt="After"
-                  height="180px"
-                  allowZoom={true}
-                />
+            <div style={{ minWidth: 0 }}>
+              <div className="form-label" style={{ marginBottom: '6px' }}>After (evidence)</div>
+              <div style={{ borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid var(--border-subtle)' }}>
+                <ImageWithFallback src={selectedAction?.afterPhotoUrl} emptyText="No photo recorded" alt="After: the fixed area" height="180px" allowZoom />
               </div>
             </div>
           </div>
 
-          {/* Closure Notes Review */}
-          <div style={{ padding: '12px 16px', borderRadius: 'var(--radius-md)', background: 'var(--bg-surface-subtle)', border: '1px solid var(--border-subtle)', fontSize: '13px' }}>
-            <strong>Assignee Remediation Notes:</strong>
-            <p style={{ margin: '4px 0 0 0', color: 'var(--text-secondary)' }}>
-              {selectedAction?.closureNotes || 'No closure notes recorded.'}
-            </p>
+          <div style={{ padding: '12px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-surface-subtle)', border: '1px solid var(--border-subtle)', fontSize: '13px' }}>
+            <strong>What was done</strong>
+            <p style={{ margin: '4px 0 0 0', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}>{selectedAction?.closureNotes || 'No notes recorded.'}</p>
+            {selectedAction?.closureSubmittedAt && (
+              <div style={{ fontSize: '12.5px', color: 'var(--text-tertiary)', marginTop: '4px' }}>Submitted {formatDateTime(selectedAction.closureSubmittedAt)}</div>
+            )}
           </div>
 
-          {/* Verifier Feedback */}
-          <div className="form-group">
-            <label className="form-label">Verifier Sign-Off Comments</label>
-            <input
-              type="text"
-              className="form-control"
-              placeholder="e.g. Physical audit on shift confirmed 100% compliant shadow board."
-              value={verificationNotes}
-              onChange={(e) => setVerificationNotes(e.target.value)}
-            />
-          </div>
+          <FormField label="Verifier comments" error={verificationError || undefined} hint="Required when you reject: the assignee sees the reason." style={{ marginBottom: 0 }}>
+            {(p) => (
+              <textarea
+                {...p}
+                rows={2}
+                className="form-textarea"
+                maxLength={2000}
+                placeholder="e.g. Checked on the floor: tool board complete on all shifts."
+                value={verificationNotes}
+                onChange={(e) => {
+                  setVerificationNotes(e.target.value);
+                  if (e.target.value.trim()) setVerificationError('');
+                }}
+              />
+            )}
+          </FormField>
 
-          {/* Buttons */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '12px' }}>
-            <Button
-              variant="danger"
-              icon={<RotateCcw size={16} />}
-              onClick={() => handleVerifyAction(false)}
-            >
-              Reject & Reopen
-            </Button>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <Button variant="secondary" onClick={() => setVerificationModalOpen(false)}>
-                Cancel
-              </Button>
-              <Button
-                variant="primary"
-                icon={<ShieldCheck size={16} />}
-                onClick={() => handleVerifyAction(true)}
-              >
-                Approve & Close Action
-              </Button>
-            </div>
+          <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)' }}>
+            Verifier <strong style={{ color: 'var(--text-primary)' }}>{currentUser?.fullName ?? '—'}</strong>
           </div>
         </div>
       </Modal>
 
-      {/* Photo Annotation Modal */}
-      {annotationModalOpen && (
+      {/* Modal: effectiveness review (VERIFIED -> CLOSED / REOPENED) */}
+      <Modal
+        isOpen={effectivenessOpen}
+        onClose={() => {
+          if (!submittingReview) setEffectivenessOpen(false);
+        }}
+        title={`Effectiveness review: ${selectedAction?.actionCode ?? ''}`}
+        subtitle="Confirm the verified fix has held before the action is closed for good."
+        maxWidth="560px"
+        footer={
+          <>
+            <Button type="button" variant="secondary" onClick={() => setEffectivenessOpen(false)} disabled={submittingReview}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              form="capa-effectiveness-form"
+              variant={effectiveChoice === false ? 'danger' : 'primary'}
+              icon={effectiveChoice === false ? <RotateCcw size={16} /> : <Lock size={16} />}
+              loading={submittingReview}
+            >
+              {effectiveChoice === false ? 'Reopen action' : 'Close action'}
+            </Button>
+          </>
+        }
+      >
+        <form id="capa-effectiveness-form" onSubmit={handleEffectivenessReview} noValidate style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div style={{ padding: '12px 14px', borderRadius: 'var(--radius-md)', background: 'var(--bg-pale)', border: '1px solid var(--color-info-border)', fontSize: '13px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{selectedAction?.title}</div>
+            {selectedAnalysis?.solution && (
+              <div style={{ color: 'var(--text-secondary)' }}>
+                <strong>Solution:</strong> {selectedAnalysis.solution}
+              </div>
+            )}
+            {selectedAction?.verificationNotes && (
+              <div style={{ color: 'var(--text-secondary)' }}>
+                <strong>Verification notes:</strong> {selectedAction.verificationNotes}
+              </div>
+            )}
+          </div>
+
+          <fieldset style={{ border: 'none', padding: 0, margin: 0 }}>
+            <legend className="form-label">
+              Was the fix effective?<span className="required">*</span>
+            </legend>
+            <div className="keep-cols" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              {[
+                { value: true, label: 'Yes, close', hint: 'The problem has not come back. The action is closed for good.', color: 'var(--color-primary)', bg: 'var(--bg-pale)' },
+                { value: false, label: 'No, reopen', hint: 'The fix did not hold. The action goes back to the assignee.', color: 'var(--color-danger)', bg: 'var(--color-danger-bg)' },
+              ].map((opt) => {
+                const selected = effectiveChoice === opt.value;
+                return (
+                  <label
+                    key={String(opt.value)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: '8px',
+                      padding: '12px',
+                      borderRadius: 'var(--radius-md)',
+                      border: `1px solid ${selected ? opt.color : 'var(--border-subtle)'}`,
+                      background: selected ? opt.bg : 'var(--bg-surface)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <input type="radio" name="capa-effective" checked={selected} onChange={() => setEffectiveChoice(opt.value)} style={{ marginTop: '3px' }} />
+                    <span>
+                      <span style={{ display: 'block', fontWeight: 600, fontSize: '13.5px', color: 'var(--text-primary)' }}>{opt.label}</span>
+                      <span style={{ display: 'block', fontSize: '12.5px', color: 'var(--text-secondary)', marginTop: '2px' }}>{opt.hint}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+
+          <div className="form-group" style={{ marginBottom: 0 }}>
+            <label className="form-label" htmlFor="capa-effectiveness-review">
+              Effectiveness review<span className="required">*</span>
+            </label>
+            <textarea
+              id="capa-effectiveness-review"
+              className="form-textarea"
+              rows={4}
+              maxLength={2000}
+              placeholder="e.g. Re-inspected after 30 days: tool board complete on all shifts, no repeat findings."
+              value={effectivenessReview}
+              onChange={(e) => setEffectivenessReview(e.target.value)}
+              aria-describedby="capa-effectiveness-msg"
+            />
+            <div id="capa-effectiveness-msg" style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginTop: '4px', fontSize: '12.5px' }}>
+              <span role={reviewError ? 'alert' : undefined} style={{ color: 'var(--color-danger)' }}>
+                {reviewError}
+              </span>
+              <span className="form-hint">{effectivenessReview.length} / 2000</span>
+            </div>
+          </div>
+        </form>
+      </Modal>
+
+      {annotationOpen && (
         <PhotoAnnotationModal
-          isOpen={annotationModalOpen}
-          onClose={() => setAnnotationModalOpen(false)}
+          isOpen={annotationOpen}
+          onClose={() => setAnnotationOpen(false)}
           initialPhotoUrl={afterPhotoUrl}
-          title="Physical Remediation Photo Evidence Annotation"
+          title="Mark up the after photo"
           onSave={(annotatedUrl) => {
             setAfterPhotoUrl(annotatedUrl);
-            setAnnotationModalOpen(false);
-            addToast({
-              type: 'success',
-              title: 'Annotations Saved',
-              message: 'Defect remediation markings applied to photo.',
-            });
+            setAnnotationOpen(false);
           }}
         />
       )}
 
-      {/* Official Audit Report & Area Owner Sign-Off Modal */}
-      <AuditReportModal
-        isOpen={reportModalOpen}
-        onClose={() => {
-          setReportModalOpen(false);
-          setSelectedAuditId(null);
+      {/* Raise a standalone action (management review) */}
+      <RaiseCapaModal
+        isOpen={!!raiseOrigin}
+        origin={raiseOrigin}
+        onClose={() => setRaiseOrigin(null)}
+        onCreated={(created) => {
+          setRaiseOrigin(null);
+          setActions((prev) => [created, ...prev.filter((a) => a.id !== created.id)]);
         }}
+      />
+
+      <ReassignActionModal
+        action={reassignTarget}
+        onClose={() => setReassignTarget(null)}
+        onSaved={(updated) => {
+          setReassignTarget(null);
+          // Someone else's action leaves the "assigned to me" list
+          if (scope === 'mine' && updated.assigneeId !== currentUser?.id) setActions((prev) => prev.filter((a) => a.id !== updated.id));
+          else replaceAction(updated);
+        }}
+      />
+
+      <ChangeDueDateModal
+        action={rescheduleTarget}
+        onClose={() => setRescheduleTarget(null)}
+        onSaved={(updated) => {
+          setRescheduleTarget(null);
+          replaceAction(updated);
+        }}
+      />
+
+      <CapaTimelineModal action={timelineTarget} onClose={() => setTimelineTarget(null)} />
+
+      <ConfirmDialog
+        isOpen={!!deleteTarget}
+        title={`Delete ${deleteTarget?.actionCode ?? 'corrective action'}?`}
+        message={
+          deleteTarget?.source === 'RED_TAG' || deleteTarget?.source === 'MANAGEMENT_REVIEW'
+            ? 'The action is removed from the register together with the finding raised for it.'
+            : 'The action is removed from the register and its finding is open again.'
+        }
+        confirmLabel="Delete"
+        tone="danger"
+        busy={deleting}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
+      />
+
+      {/* Audit report: acknowledge (auditees) or view */}
+      <AuditReportModal
+        isOpen={!!selectedAuditId}
+        onClose={() => setSelectedAuditId(null)}
         executionId={selectedAuditId}
-        onAcknowledged={(updatedExec) => {
-          addToast({
-            type: 'success',
-            title: 'Audit Findings Formally Acknowledged',
-            message: `Findings for ${updatedExec.auditCode} accepted. CAPA remediation window is now active.`,
-          });
-          loadData();
+        onAcknowledged={() => {
+          // The modal confirms the acknowledgement itself; reload so the unlocked actions move on
+          void loadData();
         }}
       />
     </div>

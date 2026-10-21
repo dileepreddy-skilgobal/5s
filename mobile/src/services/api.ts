@@ -1,496 +1,425 @@
 import {
   AuditExecution,
-  FiveSQuestion,
+  AuditStatus,
+  AuditSubmissionPayload,
+  AuditTemplateSnapshot,
+  FiveSCategory,
+  AnnotationShape,
   LocationMaster,
+  MediaKind,
+  ObservationSeverity,
+  QuestionAnswer,
   RedTagRecord,
-  TenantProfile,
-  UserProfile,
+  TemplateSection,
+  TimelineStep,
 } from '../types';
-import { OfflineStorage } from './offlineStorage';
-import { ENV } from '../config/env';
-import { MOCK_ACTIVE_AUDITS, MOCK_LOCATIONS, MOCK_RED_TAGS, MOCK_QUESTIONS } from '../constants/mockData';
+import { isPillar } from '../constants/pillars';
+import { MAX_RATING } from './auditScoring';
+import { apiRequest, uploadFile, UploadedFile } from './http';
+
+// ---------------------------------------------------------------------------
+// Server response shapes (only the fields the app reads)
+// ---------------------------------------------------------------------------
+
+interface ServerLocation {
+  id: string;
+  areaCode: string;
+  name: string;
+  building?: string | null;
+  floor?: string | null;
+  riskLevel: string;
+  status: string;
+  qrCodeData?: string | null;
+  ownerId?: string | null;
+  orgNode?: { name: string } | null;
+  owner?: { firstName: string; lastName: string } | null;
+}
+
+interface ServerExecution {
+  id: string;
+  auditCode: string;
+  status: string;
+  overallScore?: number | null;
+  pillarScores?: Record<string, number>;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  acknowledgedAt?: string | null;
+  locationId: string;
+  templateId: string;
+  templateVersionId: string;
+  auditInstanceId?: string | null;
+  auditorId?: string | null;
+  auditorName?: string | null;
+  auditor?: { firstName: string; lastName: string } | null;
+  location?: { name: string; areaCode: string; building?: string | null } | null;
+  template?: { name: string; auditType?: string } | null;
+  _count?: { observations?: number };
+}
+
+interface ServerInstance {
+  id: string;
+  auditCode: string;
+  status: string;
+  plannedDate: string;
+  dueDate: string;
+  locationId: string;
+  auditorId?: string | null;
+  templateVersionId: string;
+  location?: { name: string; areaCode: string; orgNode?: { name: string } | null } | null;
+  auditor?: { firstName: string; lastName: string } | null;
+  templateVersion?: { id: string; versionNumber: string; template?: { id: string; name: string; code: string } } | null;
+}
+
+interface ServerQuestion {
+  id: string;
+  sectionId: string;
+  questionCode: string;
+  questionText: string;
+  guidance?: string | null;
+  description?: string | null;
+  weightage: number;
+  isCritical: boolean;
+  scoreCapOnFail?: number | null;
+  mandatoryEvidence: boolean;
+  referencePhotoUrl?: string | null;
+  questionType?: string | null;
+}
+
+interface ServerTemplateVersion {
+  id: string;
+  versionNumber: string;
+  sections: Array<{ id: string; title: string; category: string; questions: ServerQuestion[] }>;
+}
+
+interface ServerTemplate {
+  id: string;
+  code: string;
+  name: string;
+  status: string;
+  currentVersion?: ServerTemplateVersion | null;
+}
+
+interface ServerExecutionDetail extends ServerExecution {
+  templateVersion: ServerTemplateVersion;
+  template: { id: string; code: string; name: string };
+  answers: Array<{ questionId: string; sectionId: string; score: number; maxScore: number; status: string; notes?: string | null }>;
+}
+
+// ---------------------------------------------------------------------------
+// Mapping helpers
+// ---------------------------------------------------------------------------
+
+const formatDate = (iso?: string | null) => (iso ? new Date(iso).toLocaleDateString('en-GB') : '');
+const formatTime = (iso?: string | null) =>
+  iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : undefined;
+
+const STATUS_MAP: Record<string, { status: AuditStatus; badge: string }> = {
+  IN_PROGRESS: { status: 'IN_PROGRESS', badge: 'In progress' },
+  SUBMITTED: { status: 'PENDING_REVIEW', badge: 'Awaiting sign-off' },
+  DISPUTED: { status: 'PENDING_REVIEW', badge: 'Disputed' },
+  ACKNOWLEDGED: { status: 'COMPLETED', badge: 'Completed' },
+};
+
+const pillarScoresFrom = (raw?: Record<string, number>): Partial<Record<FiveSCategory, number>> => {
+  const out: Partial<Record<FiveSCategory, number>> = {};
+  Object.entries(raw || {}).forEach(([k, v]) => {
+    if (isPillar(k) && typeof v === 'number') out[k] = Math.round(v);
+  });
+  return out;
+};
+
+const executionTimeline = (e: ServerExecution): TimelineStep[] => [
+  { label: 'Started', timestamp: formatTime(e.startedAt), isCompleted: !!e.startedAt, isActive: e.status === 'IN_PROGRESS' },
+  {
+    label: 'Submitted',
+    timestamp: e.completedAt ? formatDate(e.completedAt) : 'Pending',
+    isCompleted: !!e.completedAt,
+    isActive: e.status === 'SUBMITTED',
+  },
+  {
+    label: e.status === 'DISPUTED' ? 'Disputed' : 'Signed off',
+    timestamp: e.acknowledgedAt ? formatDate(e.acknowledgedAt) : 'Pending',
+    isCompleted: e.status === 'ACKNOWLEDGED',
+    isActive: e.status === 'DISPUTED' || e.status === 'ACKNOWLEDGED',
+  },
+];
+
+const personName = (p?: { firstName: string; lastName: string } | null) => (p ? `${p.firstName} ${p.lastName}`.trim() : '');
+
+export const mapExecution = (e: ServerExecution): AuditExecution => {
+  const mapped = STATUS_MAP[e.status] ?? { status: 'IN_PROGRESS' as AuditStatus, badge: e.status };
+  return {
+    id: e.id,
+    kind: 'EXECUTION',
+    serverExecutionId: e.id,
+    scheduledInstanceId: e.auditInstanceId ?? undefined,
+    trackingNumber: e.auditCode,
+    templateId: e.templateId,
+    templateVersionId: e.templateVersionId,
+    templateTitle: e.template?.name ?? '',
+    locationId: e.locationId,
+    locationName: e.location?.name ?? '',
+    plantName: e.location?.building ?? '',
+    auditorId: e.auditorId ?? null,
+    auditorName: personName(e.auditor) || e.auditorName || '',
+    category: e.location?.areaCode ?? '',
+    status: mapped.status,
+    statusBadge: mapped.badge,
+    overallScore: e.status === 'IN_PROGRESS' ? null : e.overallScore ?? null,
+    pillarScores: pillarScoresFrom(e.pillarScores),
+    timeline: executionTimeline(e),
+    answers: {},
+    findingsCount: e._count?.observations ?? 0,
+    scheduledDate: formatDate(e.startedAt),
+    startedAt: formatTime(e.startedAt),
+    completedAt: e.completedAt ?? undefined,
+  };
+};
+
+const mapInstance = (i: ServerInstance): AuditExecution => ({
+  id: `sched:${i.id}`,
+  kind: 'SCHEDULED',
+  scheduledInstanceId: i.id,
+  trackingNumber: i.auditCode,
+  templateId: i.templateVersion?.template?.id ?? '',
+  templateVersionId: i.templateVersionId,
+  templateTitle: i.templateVersion?.template?.name ?? '',
+  locationId: i.locationId,
+  locationName: i.location?.name ?? '',
+  plantName: i.location?.orgNode?.name ?? '',
+  auditorId: i.auditorId ?? null,
+  auditorName: personName(i.auditor),
+  category: i.location?.areaCode ?? '',
+  status: 'SCHEDULED',
+  statusBadge: 'Scheduled',
+  overallScore: null,
+  pillarScores: {},
+  timeline: [
+    { label: 'Planned', timestamp: formatDate(i.plannedDate), isCompleted: true, isActive: false },
+    { label: 'Due', timestamp: formatDate(i.dueDate), isCompleted: false, isActive: true },
+  ],
+  answers: {},
+  findingsCount: 0,
+  scheduledDate: formatDate(i.plannedDate),
+});
+
+const toSnapshot = (template: { id: string; code: string; name: string }, version: ServerTemplateVersion): AuditTemplateSnapshot => ({
+  templateId: template.id,
+  templateVersionId: version.id,
+  code: template.code,
+  name: template.name,
+  versionNumber: version.versionNumber,
+  sections: version.sections
+    .filter((s) => isPillar(s.category))
+    .map(
+      (s): TemplateSection => ({
+        id: s.id,
+        title: s.title,
+        category: s.category as FiveSCategory,
+        questions: s.questions.map((q) => ({
+          id: q.id,
+          sectionId: s.id,
+          category: s.category as FiveSCategory,
+          code: q.questionCode,
+          text: q.questionText,
+          guidance: q.guidance || q.description || null,
+          weightage: q.weightage,
+          isCritical: q.isCritical,
+          scoreCapOnFail: q.scoreCapOnFail ?? null,
+          mandatoryEvidence: q.mandatoryEvidence,
+          referencePhotoUrl: q.referencePhotoUrl ?? null,
+          questionType: q.questionType ?? null,
+        })),
+      }),
+    ),
+});
+
+const SUBMITTED_STATUSES = new Set(['SUBMITTED', 'DISPUTED', 'ACKNOWLEDGED']);
+
+/** Location health is derived from its latest submitted audit only; never estimated. */
+const mapLocation = (l: ServerLocation, executions: ServerExecution[], tenantSlug: string): LocationMaster => {
+  const latest = executions
+    .filter((e) => e.locationId === l.id && SUBMITTED_STATUSES.has(e.status) && e.completedAt)
+    .sort((a, b) => (b.completedAt ?? '').localeCompare(a.completedAt ?? ''))[0];
+  const score = latest?.overallScore ?? null;
+  const status: LocationMaster['status'] =
+    score === null ? 'NOT_AUDITED' : score >= 85 ? 'OPTIMAL' : score >= 70 ? 'ATTENTION' : 'CRITICAL';
+
+  return {
+    id: l.id,
+    code: l.areaCode,
+    name: l.name,
+    plant: l.building || '',
+    department: l.orgNode?.name || '',
+    workstation: l.floor || '',
+    qrCode: l.qrCodeData?.startsWith('5s://') ? l.qrCodeData : `5s://${tenantSlug}/locations/${l.areaCode}`,
+    current5SScore: score === null ? null : Math.round(score),
+    champion: personName(l.owner) || 'Unassigned',
+    ownerId: l.ownerId ?? null,
+    lastAuditDate: latest?.completedAt ? formatDate(latest.completedAt) : null,
+    status,
+    riskLevel: l.riskLevel,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Observations & notifications
+// ---------------------------------------------------------------------------
+
+/** Body of POST /observations. */
+export interface CreateObservationBody {
+  locationId: string;
+  category: FiveSCategory;
+  severity: ObservationSeverity;
+  title: string;
+  description: string;
+  beforePhotoUrl?: string;
+  annotationData?: AnnotationShape[];
+  mediaUrls?: Array<{ url: string; kind: MediaKind; capturedAt?: string; latitude?: number; longitude?: number }>;
+  voiceNoteUrl?: string;
+  gpsLatitude?: number;
+  gpsLongitude?: number;
+  gpsAccuracyM?: number;
+  clientRequestId?: string;
+}
+
+export interface CreatedObservation {
+  id: string;
+  observationCode: string;
+  status: string;
+}
+
+/** Open observation at the same location that looks like the one being reported (advisory). */
+export interface DuplicateCandidate {
+  id: string;
+  observationCode: string;
+  title: string;
+  status: string;
+  similarity: number;
+}
+
+export interface AppNotification {
+  id: string;
+  type: string;
+  title: string;
+  body?: string | null;
+  entityType?: string | null;
+  entityId?: string | null;
+  link?: string | null;
+  readAt?: string | null;
+  createdAt: string;
+}
+
+export interface NotificationPage {
+  items: AppNotification[];
+  total: number;
+  unread: number;
+  page: number;
+  pageSize: number;
+}
+
+// ---------------------------------------------------------------------------
+// API
+// ---------------------------------------------------------------------------
 
 export const ApiService = {
-  /**
-   * Fetch current active tenant profile dynamically
-   */
-  async getTenant(): Promise<TenantProfile> {
-    try {
-      const res = await fetch(`${ENV.API_BASE_URL}/tenants`, {
-        headers: {
-          'x-tenant-id': ENV.TENANT_ID,
-          'x-user-role': 'SUPER_ADMIN',
-          'x-super-admin': 'true',
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (res.ok) {
-        const json = await res.json();
-        const list = Array.isArray(json) ? json : json.data || [];
-        const match = list.find((t: any) => t.slug === ENV.TENANT_ID) || list[0];
-        if (match) {
-          return {
-            id: match.id,
-            name: match.name,
-            slug: match.slug,
-            industry: match.industry || 'Precision Manufacturing',
-            status: match.status || 'ACTIVE',
-            plantName: 'Bangalore Automotive Plant Alpha',
-            defaultAuditFrequency: 'WEEKLY',
-          };
-        }
-      }
-    } catch (e) {
-      console.info('API getTenant offline fallback:', (e as any)?.message || e);
-    }
-
-    return {
-      id: 'tenant-default',
-      name: 'SkilGlobal Precision Manufacturing Ltd',
-      slug: ENV.TENANT_ID,
-      industry: 'Automotive & Heavy Engineering',
-      status: 'ACTIVE',
-      plantName: 'Bangalore Automotive Plant Alpha',
-      defaultAuditFrequency: 'WEEKLY',
-    };
+  /** Locations with health derived from real audit results. */
+  async getLocations(tenantSlug: string, executions: ServerExecution[]): Promise<LocationMaster[]> {
+    const list = await apiRequest<ServerLocation[]>('/locations?status=ACTIVE');
+    return list.map((l) => mapLocation(l, executions, tenantSlug));
   },
 
-  /**
-   * Fetch available tenant team members dynamically
-   */
-  async getUsers(): Promise<UserProfile[]> {
-    try {
-      const res = await fetch(`${ENV.API_BASE_URL}/users`, {
-        headers: {
-          'x-tenant-id': ENV.TENANT_ID,
-          'x-user-role': 'SUPER_ADMIN',
-          'x-super-admin': 'true',
-          'Content-Type': 'application/json',
-        },
-      });
+  getRawExecutions: () => apiRequest<ServerExecution[]>('/audit-executions'),
 
-      if (res.ok) {
-        const json = await res.json();
-        const rawList = Array.isArray(json) ? json : json.data || [];
-        if (rawList.length > 0) {
-          return rawList.map((u: any) => ({
-            id: u.id,
-            firstName: u.firstName || 'Auditor',
-            lastName: u.lastName || '',
-            email: u.email,
-            jobTitle: u.jobTitle || 'Quality Specialist',
-            department: u.department || 'Quality Assurance',
-            roleName: u.assignments?.[0]?.role?.name || 'Auditor',
-            tenantId: u.tenantId || ENV.TENANT_ID,
-            tenantName: 'SkilGlobal Precision Mfg',
-            plantName: 'Bangalore Plant Alpha',
-            auditsCompletedCount: 48,
-            averageScore: 88.4,
-            capasClosedCount: 32,
-          }));
-        }
-      }
-    } catch (e) {
-      console.info('API getUsers offline fallback:', (e as any)?.message || e);
+  getScheduledInstances: () => apiRequest<ServerInstance[]>('/audit-schedules/instances?status=SCHEDULED'),
+
+  mapScheduledInstances: (list: ServerInstance[]) => list.map(mapInstance),
+
+  /** Snapshots of all active templates (current published version with sections and questions). */
+  async getTemplateSnapshots(): Promise<AuditTemplateSnapshot[]> {
+    const list = await apiRequest<ServerTemplate[]>('/audit-templates?status=ACTIVE');
+    const details = await Promise.all(list.map((t) => apiRequest<ServerTemplate>(`/audit-templates/${t.id}`)));
+    return details
+      .filter((t) => t.currentVersion && t.currentVersion.sections.some((s) => s.questions.length > 0))
+      .map((t) => toSnapshot(t, t.currentVersion as ServerTemplateVersion));
+  },
+
+  /** Full execution with its exact template version and saved answers (for resuming an audit). */
+  async getExecutionForResume(executionId: string): Promise<{ template: AuditTemplateSnapshot; answers: Record<string, QuestionAnswer> }> {
+    const d = await apiRequest<ServerExecutionDetail>(`/audit-executions/${executionId}`);
+    const template = toSnapshot(d.template, d.templateVersion);
+    const categoryByQuestion = new Map(template.sections.flatMap((s) => s.questions.map((q) => [q.id, q] as const)));
+    const answers: Record<string, QuestionAnswer> = {};
+    for (const a of d.answers) {
+      const q = categoryByQuestion.get(a.questionId);
+      if (!q) continue;
+      const isNa = a.status === 'NOT_APPLICABLE';
+      answers[q.id] = {
+        questionId: q.id,
+        sectionId: q.sectionId,
+        category: q.category,
+        score: isNa || !q.weightage ? 0 : Math.round(Math.min(MAX_RATING, a.score / q.weightage)),
+        isNa,
+        comment: a.notes ?? '',
+        evidence: [],
+      };
     }
+    return { template, answers };
+  },
 
-    // Default fallback list
-    return [
-      {
-        id: 'usr-thomas',
-        firstName: 'Thomas',
-        lastName: 'Wright',
-        email: 'auditor.lead@skilglobal.com',
-        jobTitle: 'Senior Quality Auditor',
-        department: 'Quality Assurance & CI',
-        roleName: 'Lead 5S Auditor',
-        tenantId: ENV.TENANT_ID,
-        tenantName: 'SkilGlobal Precision Mfg',
-        plantName: 'Bangalore Plant Alpha',
-        auditsCompletedCount: 48,
-        averageScore: 88.4,
-        capasClosedCount: 32,
+  startExecution: (body: { locationId: string; templateId: string; templateVersionId: string; auditInstanceId?: string; auditorName?: string }) =>
+    apiRequest<ServerExecution>('/audit-executions/start', { method: 'POST', body }),
+
+  submitExecution: (executionId: string, payload: AuditSubmissionPayload) =>
+    apiRequest<ServerExecution>(`/audit-executions/${executionId}/submit`, { method: 'POST', body: payload }),
+
+  createRedTag: (tag: RedTagRecord) =>
+    apiRequest<{ id: string; tagNumber: string; status: string }>('/red-tags', {
+      method: 'POST',
+      body: {
+        locationId: tag.areaId,
+        itemName: tag.itemName,
+        itemDescription: tag.itemDescription || undefined,
+        category: tag.category,
+        quantity: tag.quantity,
+        unitOfMeasure: 'PCS',
+        estimatedValue: tag.estimatedValue,
+        reason: tag.reason,
+        photoUrl: tag.photoDataUrl,
       },
-      {
-        id: 'usr-sarah',
-        firstName: 'Sarah',
-        lastName: 'Jenkins',
-        email: 'coordinator.5s@skilglobal.com',
-        jobTitle: 'Lead 5S Champion',
-        department: 'Continuous Improvement',
-        roleName: 'Area Champion',
-        tenantId: ENV.TENANT_ID,
-        tenantName: 'SkilGlobal Precision Mfg',
-        plantName: 'Bangalore Plant Alpha',
-        auditsCompletedCount: 36,
-        averageScore: 84.2,
-        capasClosedCount: 19,
+    }),
+
+  /** Uploads a media file (video, audio, extra photos) before it is referenced in a record. */
+  uploadMedia: (file: { uri: string; name: string; type: string }): Promise<UploadedFile> => uploadFile(file),
+
+  /** Creates an observation; a retry with the same clientRequestId returns the original. */
+  createObservation: (body: CreateObservationBody) =>
+    apiRequest<CreatedObservation>('/observations', { method: 'POST', body, timeoutMs: 60000 }),
+
+  findDuplicateObservations: (q: { locationId: string; title: string; category?: string }) => {
+    const params = new URLSearchParams({ locationId: q.locationId, title: q.title });
+    if (q.category) params.set('category', q.category);
+    return apiRequest<DuplicateCandidate[]>(`/duplicates/observations?${params.toString()}`, { timeoutMs: 8000 });
+  },
+
+  getNotifications: (page = 1, pageSize = 30, unreadOnly = false) =>
+    apiRequest<NotificationPage>(`/notifications?page=${page}&pageSize=${pageSize}${unreadOnly ? '&unreadOnly=true' : ''}`),
+
+  getUnreadNotificationCount: () => apiRequest<{ unread: number }>('/notifications/unread-count', { timeoutMs: 8000 }),
+
+  markNotificationRead: (id: string) => apiRequest(`/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' }),
+
+  markAllNotificationsRead: () => apiRequest<{ marked: number }>('/notifications/read-all', { method: 'POST' }),
+
+  submitRedTagDisposition: (redTagId: string, tag: RedTagRecord) =>
+    apiRequest(`/red-tags/${redTagId}/disposition`, {
+      method: 'POST',
+      body: {
+        dispositionAction: tag.disposition,
+        dispositionJustification: tag.dispositionJustification || tag.reason,
+        supervisorApproved: tag.approveDisposition === true,
       },
-      {
-        id: 'usr-david',
-        firstName: 'David',
-        lastName: 'Chen',
-        email: 'owner.cnc01@skilglobal.com',
-        jobTitle: 'CNC Line Team Leader',
-        department: 'Machining Operations',
-        roleName: 'Line Leader',
-        tenantId: ENV.TENANT_ID,
-        tenantName: 'SkilGlobal Precision Mfg',
-        plantName: 'Bangalore Plant Alpha',
-        auditsCompletedCount: 22,
-        averageScore: 91.0,
-        capasClosedCount: 14,
-      },
-    ];
-  },
-
-  /**
-   * Fetch locations from live backend or fall back to local AsyncStorage cache
-   */
-  async getLocations(): Promise<LocationMaster[]> {
-    const isOffline = await OfflineStorage.isOfflineMode();
-    if (isOffline) {
-      return OfflineStorage.getLocations();
-    }
-
-    try {
-      const res = await fetch(`${ENV.API_BASE_URL}/locations`, {
-        headers: {
-          'x-tenant-id': ENV.TENANT_ID,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      const rawList = Array.isArray(json) ? json : json.data || [];
-
-      if (rawList.length > 0) {
-        const mapped: LocationMaster[] = rawList.map((l: any, idx: number) => {
-          // Dynamic supervisor or owner name
-          const champion = l.owner
-            ? `${l.owner.firstName} ${l.owner.lastName} (${l.owner.jobTitle || 'Champion'})`
-            : l.supervisorName || 'Area Team Leader';
-
-          // Dynamic hierarchy & department
-          const department = l.orgNode?.name || l.floor || 'Production & Assembly';
-          const plant = l.building ? `${l.building} • ${l.floor || 'Ground'}` : 'Bangalore Alpha Plant';
-
-          // Dynamic inventory manifest items based on area type
-          let expectedItems = [
-            { name: 'Standard Shadow Board Fixtures', standardQty: 10, currentQty: 10 },
-            { name: 'Calibrated Measurement Tools', standardQty: 4, currentQty: 4 },
-            { name: 'Aisle Safety Floor Markings', standardQty: 1, currentQty: 1 },
-          ];
-
-          if (l.areaCode?.includes('REDTAG') || l.locationType === 'RED_TAG_ZONE') {
-            expectedItems = [
-              { name: 'Red Tag Quarantine Demarcation Boundary', standardQty: 1, currentQty: 1 },
-              { name: 'Physical Red Tag Storage Station & Clipboard', standardQty: 1, currentQty: 1 },
-              { name: 'Segregation Disposition Hold Bins', standardQty: 4, currentQty: 4 },
-            ];
-          } else if (l.areaCode?.includes('MACH') || l.areaCode?.includes('CNC')) {
-            expectedItems = [
-              { name: 'BT40 CNC Tool Holders & Silhouette Board', standardQty: 12, currentQty: 12 },
-              { name: 'Digital Vernier Caliper & Micrometer Set', standardQty: 2, currentQty: 2 },
-              { name: 'Automated Swarf Chip Vacuum Tray', standardQty: 1, currentQty: 1 },
-              { name: 'Coolant Refractometer Test Kit', standardQty: 1, currentQty: 1 },
-            ];
-          } else if (l.areaCode?.includes('ASM')) {
-            expectedItems = [
-              { name: 'Pneumatic Torque Guns & Balancer Lines', standardQty: 4, currentQty: 4 },
-              { name: 'Part Bins with Visual Kanban Labeling', standardQty: 8, currentQty: 8 },
-              { name: 'Anti-Static ESD Grounding Mats & Straps', standardQty: 2, currentQty: 2 },
-            ];
-          }
-
-          return {
-            id: l.id,
-            code: l.areaCode || `LOC-${idx + 1}`,
-            name: l.name,
-            plant,
-            department,
-            workstation: l.description || l.areaCode || 'Workstation Bay',
-            qrCode: l.qrCodeData || `5S-${l.areaCode || l.id}-SECURED`,
-            current5SScore: l.lastAuditScore || (82 + ((idx * 7) % 14)),
-            champion,
-            lastAuditDate: l.updatedAt
-              ? new Date(l.updatedAt).toLocaleDateString('en-GB')
-              : new Date().toLocaleDateString('en-GB'),
-            status: l.riskLevel === 'HIGH' ? 'ATTENTION' : 'OPTIMAL',
-            expectedItems,
-          };
-        });
-
-        await OfflineStorage.saveLocations(mapped);
-        return mapped;
-      }
-
-      return OfflineStorage.getLocations();
-    } catch {
-      return OfflineStorage.getLocations();
-    }
-  },
-
-  /**
-   * Fetch active audit executions dynamically from live backend or cache
-   */
-  async getAuditExecutions(): Promise<AuditExecution[]> {
-    const isOffline = await OfflineStorage.isOfflineMode();
-    if (isOffline) {
-      return OfflineStorage.getAudits();
-    }
-
-    try {
-      const res = await fetch(`${ENV.API_BASE_URL}/audit-executions`, {
-        headers: {
-          'x-tenant-id': ENV.TENANT_ID,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      const rawList = Array.isArray(json) ? json : json.data || [];
-
-      if (rawList.length > 0) {
-        const mapped: AuditExecution[] = rawList.map((item: any) => ({
-          id: item.id,
-          trackingNumber: item.auditCode || `#AUD-${item.id.substring(0, 8).toUpperCase()}`,
-          templateId: item.templateId || 'tmpl-auto-std',
-          templateTitle: item.template?.name || 'Automotive Precision 5S Shopfloor Standard',
-          locationId: item.locationId || item.location?.id,
-          locationName: item.location?.name || 'Heavy CNC Milling Cell 01',
-          plantName: item.location?.building || 'Bangalore Automotive Plant Alpha',
-          auditorId: item.auditorId || 'usr-thomas',
-          auditorName: item.auditorName || 'Thomas Wright (Senior Quality Auditor)',
-          category: `${item.location?.areaCode || 'Bay Area'} • 5S Audit`,
-          status: item.status === 'SUBMITTED' || item.status === 'ACKNOWLEDGED' ? 'COMPLETED' : 'IN_PROGRESS',
-          statusBadge:
-            item.status === 'SUBMITTED' ? 'Completed' : item.status === 'IN_PROGRESS' ? 'In Progress' : 'Scheduled',
-          overallScore: Math.round(item.overallScore || 84),
-          pillarScores:
-            item.pillarScores && Object.keys(item.pillarScores).length > 0
-              ? item.pillarScores
-              : { S1: 85, S2: 80, S3: 85, S4: 80, S5: 80 },
-          timeline: [
-            { label: 'Area Verified', timestamp: '09:15 AM', isCompleted: true, isActive: false },
-            {
-              label: 'Inspection',
-              timestamp: item.status === 'SUBMITTED' ? 'Completed' : 'S1–S5 Active',
-              isCompleted: true,
-              isActive: item.status !== 'SUBMITTED',
-            },
-            {
-              label: 'CAPA Review',
-              timestamp: item.status === 'SUBMITTED' ? 'Reviewed' : 'Pending',
-              isCompleted: item.status === 'SUBMITTED',
-              isActive: false,
-            },
-            {
-              label: 'Signed Off',
-              timestamp: item.status === 'SUBMITTED' ? 'Signed' : 'Target Today',
-              isCompleted: item.status === 'SUBMITTED',
-              isActive: item.status === 'SUBMITTED',
-            },
-          ],
-          answers: {},
-          observations: [],
-          scheduledDate: item.createdAt
-            ? new Date(item.createdAt).toLocaleDateString('en-GB')
-            : new Date().toLocaleDateString('en-GB'),
-          startedAt: item.startedAt
-            ? new Date(item.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            : '09:15 AM',
-        }));
-
-        await OfflineStorage.saveAudits(mapped);
-        return mapped;
-      }
-
-      return OfflineStorage.getAudits();
-    } catch {
-      return OfflineStorage.getAudits();
-    }
-  },
-
-  /**
-   * Submit completed audit session to backend API or queue locally
-   */
-  async submitAuditExecution(
-    audit: AuditExecution,
-    currentUser?: UserProfile
-  ): Promise<{ success: boolean; data?: any; synced: boolean }> {
-    const isOffline = await OfflineStorage.isOfflineMode();
-    if (isOffline) {
-      await OfflineStorage.enqueueOfflineSync(audit);
-      await OfflineStorage.saveAuditDraft({ ...audit, isOfflineSyncPending: true });
-      return { success: true, synced: false };
-    }
-
-    try {
-      const formattedAnswers = Object.values(audit.answers || {}).map((ans) => ({
-        questionId: ans.questionId,
-        score: ans.score,
-        maxScore: ans.maxScore || 5,
-        status: ans.score >= 4 ? 'CONFORMING' : ans.score >= 2 ? 'MINOR_NC' : 'MAJOR_NC',
-        notes: ans.comment || 'Evaluated during mobile inspection.',
-        evidenceUrls: ans.evidence?.map((e) => e.uri) || [],
-      }));
-
-      const auditorSign =
-        audit.auditorSignature ||
-        `Signed by ${currentUser ? `${currentUser.firstName} ${currentUser.lastName} (${currentUser.jobTitle})` : audit.auditorName}`;
-
-      const response = await fetch(`${ENV.API_BASE_URL}/audit-executions/${audit.id}/submit`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': ENV.TENANT_ID,
-        },
-        body: JSON.stringify({
-          answers:
-            formattedAnswers.length > 0
-              ? formattedAnswers
-              : [{ questionId: 'q-s1-1', score: 5, maxScore: 5, status: 'CONFORMING', notes: 'Verified conformant.' }],
-          summaryNotes: `Mobile audit completed for ${audit.locationName}. Score: ${audit.overallScore}%`,
-          auditorSignature: auditorSign,
-          auditorName: currentUser ? `${currentUser.firstName} ${currentUser.lastName}` : audit.auditorName,
-          completedAt: new Date().toISOString(),
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`);
-      }
-
-      const json = await response.json();
-      await OfflineStorage.saveAuditDraft({ ...audit, isOfflineSyncPending: false });
-      return { success: true, data: json, synced: true };
-    } catch {
-      await OfflineStorage.enqueueOfflineSync(audit);
-      await OfflineStorage.saveAuditDraft({ ...audit, isOfflineSyncPending: true });
-      return { success: true, synced: false };
-    }
-  },
-
-  /**
-   * Fetch red tags from live backend or local cache
-   */
-  async getRedTags(): Promise<RedTagRecord[]> {
-    const isOffline = await OfflineStorage.isOfflineMode();
-    if (isOffline) return OfflineStorage.getRedTags();
-
-    try {
-      const res = await fetch(`${ENV.API_BASE_URL}/red-tags`, {
-        headers: {
-          'x-tenant-id': ENV.TENANT_ID,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      const rawList = Array.isArray(json) ? json : json.data || [];
-
-      if (rawList.length > 0) {
-        const mapped: RedTagRecord[] = rawList.map((tag: any) => ({
-          id: tag.id,
-          tagNumber: tag.tagNumber,
-          areaId: tag.locationId,
-          areaName: tag.location?.name || 'Central Holding & Red Tag Zone',
-          itemName: tag.itemName,
-          quantity: tag.quantity || 1,
-          reason: tag.reason || 'Unneeded item identified during Sort',
-          taggedBy: tag.taggedByName || 'Quality Auditor',
-          tagDate: tag.taggedDate
-            ? new Date(tag.taggedDate).toLocaleDateString('en-GB')
-            : new Date().toLocaleDateString('en-GB'),
-          disposition: (tag.dispositionAction as any) || 'SCRAP',
-          estimatedValue: tag.estimatedValue || 150,
-          targetDate: tag.targetDispositionDate
-            ? new Date(tag.targetDispositionDate).toLocaleDateString('en-GB')
-            : new Date(Date.now() + 14 * 86400000).toLocaleDateString('en-GB'),
-          status: tag.status === 'DISPOSED' ? 'DISPOSED' : 'ACTIVE',
-          photoUri: tag.photoUrl,
-        }));
-
-        await OfflineStorage.saveRedTags(mapped);
-        return mapped;
-      }
-
-      return OfflineStorage.getRedTags();
-    } catch {
-      return OfflineStorage.getRedTags();
-    }
-  },
-
-  /**
-   * Register a new red tag with live backend or queue locally
-   */
-  async createRedTag(tag: RedTagRecord): Promise<{ success: boolean; data?: any }> {
-    const isOffline = await OfflineStorage.isOfflineMode();
-    await OfflineStorage.addRedTag(tag);
-
-    if (isOffline) return { success: true };
-
-    try {
-      const res = await fetch(`${ENV.API_BASE_URL}/red-tags`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-tenant-id': ENV.TENANT_ID,
-        },
-        body: JSON.stringify({
-          locationId: tag.areaId,
-          itemName: tag.itemName,
-          category: 'UNNEEDED_TOOL',
-          quantity: tag.quantity,
-          unitOfMeasure: 'PCS',
-          estimatedValue: tag.estimatedValue || 100,
-          reason: tag.reason,
-          photoUrl: tag.photoUri || 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?w=800',
-        }),
-      });
-
-      if (res.ok) {
-        const json = await res.json();
-        return { success: true, data: json };
-      }
-      return { success: true };
-    } catch {
-      return { success: true };
-    }
-  },
-
-  /**
-   * Sync pending offline audit queue
-   */
-  async syncPendingQueue(): Promise<{ syncedCount: number; errors: number }> {
-    const queue = await OfflineStorage.getOfflineQueue();
-    if (queue.length === 0) return { syncedCount: 0, errors: 0 };
-
-    let syncedCount = 0;
-    let errors = 0;
-
-    for (const item of queue) {
-      try {
-        const res = await this.submitAuditExecution(item);
-        if (res.synced) {
-          syncedCount++;
-        } else {
-          errors++;
-        }
-      } catch {
-        errors++;
-      }
-    }
-
-    if (syncedCount > 0 && errors === 0) {
-      await OfflineStorage.clearOfflineQueue();
-    }
-
-    return { syncedCount, errors };
-  },
+    }),
 };
+
+export type { ServerExecution };

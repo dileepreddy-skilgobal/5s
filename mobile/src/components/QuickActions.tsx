@@ -1,70 +1,40 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, SHADOWS } from '../constants/theme';
+import { COLORS, RADIUS, SHADOWS, SPACING, TYPE } from '../constants/theme';
 
-interface QuickActionsProps {
-  onStartAudit: () => void;
-  onTrackOrder: () => void;
-  onSchedule: () => void;
-  onMore: () => void;
+export interface QuickAction {
+  key: string;
+  label: string;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  onPress: () => void;
+  /** Spoken description when the short label is not enough. */
+  accessibilityLabel?: string;
+  /** The main action for this role (filled blue tile). */
+  primary?: boolean;
 }
 
-export const QuickActions: React.FC<QuickActionsProps> = ({
-  onStartAudit,
-  onTrackOrder,
-  onSchedule,
-  onMore,
-}) => {
+/** Row of large shortcut tiles on the home screen (up to four per row; more wrap). */
+export const QuickActions: React.FC<{ actions: QuickAction[] }> = ({ actions }) => {
+  if (actions.length === 0) return null;
   return (
     <View style={styles.container}>
-      {/* 1. Execute Audit (Primary Orange Squircle) */}
-      <TouchableOpacity
-        style={styles.actionItem}
-        onPress={onStartAudit}
-        activeOpacity={0.85}
-      >
-        <View style={[styles.iconBoxPrimary, SHADOWS.floating]}>
-          <Ionicons name="clipboard" size={24} color="#FFFFFF" />
-        </View>
-        <Text style={styles.actionLabelBold}>Start Audit</Text>
-      </TouchableOpacity>
-
-      {/* 2. My Audits */}
-      <TouchableOpacity
-        style={styles.actionItem}
-        onPress={onTrackOrder}
-        activeOpacity={0.8}
-      >
-        <View style={styles.iconBoxSecondary}>
-          <Ionicons name="layers-outline" size={24} color={COLORS.textDark} />
-        </View>
-        <Text style={styles.actionLabel}>My Audits</Text>
-      </TouchableOpacity>
-
-      {/* 3. Audit Schedule */}
-      <TouchableOpacity
-        style={styles.actionItem}
-        onPress={onSchedule}
-        activeOpacity={0.8}
-      >
-        <View style={styles.iconBoxSecondary}>
-          <Ionicons name="calendar-outline" size={24} color={COLORS.textDark} />
-        </View>
-        <Text style={styles.actionLabel}>Schedule</Text>
-      </TouchableOpacity>
-
-      {/* 4. Red Tag & Abnormality */}
-      <TouchableOpacity
-        style={styles.actionItem}
-        onPress={onMore}
-        activeOpacity={0.8}
-      >
-        <View style={styles.iconBoxSecondary}>
-          <Ionicons name="pricetag-outline" size={24} color={COLORS.textDark} />
-        </View>
-        <Text style={styles.actionLabel}>Red Tag</Text>
-      </TouchableOpacity>
+      {actions.map((a) => (
+        <Pressable
+          key={a.key}
+          onPress={a.onPress}
+          accessibilityRole="button"
+          accessibilityLabel={a.accessibilityLabel ?? a.label}
+          style={({ pressed }) => [styles.item, pressed && styles.pressed]}
+        >
+          <View style={[styles.iconBox, a.primary ? styles.iconBoxPrimary : styles.iconBoxDefault]}>
+            <Ionicons name={a.icon} size={24} color={a.primary ? COLORS.textInverse : COLORS.primary} />
+          </View>
+          <Text style={[styles.label, a.primary && styles.labelPrimary]} numberOfLines={2}>
+            {a.label}
+          </Text>
+        </Pressable>
+      ))}
     </View>
   );
 };
@@ -72,42 +42,28 @@ export const QuickActions: React.FC<QuickActionsProps> = ({
 const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    marginBottom: 24,
+    flexWrap: 'wrap',
+    paddingHorizontal: SPACING.screen - SPACING.xs,
+    marginBottom: SPACING.sm,
   },
-  actionItem: {
+  item: {
+    width: '25%',
     alignItems: 'center',
-    width: '23%',
+    paddingHorizontal: SPACING.xs,
+    paddingVertical: SPACING.xs,
+    marginBottom: SPACING.sm,
   },
-  iconBoxPrimary: {
-    width: 60,
-    height: 60,
-    borderRadius: 20,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  iconBoxSecondary: {
-    width: 60,
-    height: 60,
-    borderRadius: 20,
-    backgroundColor: '#F1F3F6',
+  pressed: { opacity: 0.75 },
+  iconBox: {
+    width: 56,
+    height: 56,
+    borderRadius: RADIUS.xl,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 8,
+    marginBottom: SPACING.sm,
   },
-  actionLabelBold: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.textDark,
-    textAlign: 'center',
-  },
-  actionLabel: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: COLORS.textMedium,
-    textAlign: 'center',
-  },
+  iconBoxPrimary: { backgroundColor: COLORS.primary, ...SHADOWS.floating },
+  iconBoxDefault: { backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.border, ...SHADOWS.soft },
+  label: { ...TYPE.captionStrong, fontSize: 13, lineHeight: 17, color: COLORS.textDark, textAlign: 'center' },
+  labelPrimary: { color: COLORS.primary },
 });

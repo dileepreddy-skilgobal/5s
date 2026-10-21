@@ -1,4 +1,4 @@
-import { useWindowDimensions, Platform } from 'react-native';
+import { DimensionValue, useWindowDimensions, Platform } from 'react-native';
 
 export interface ResponsiveLayout {
   width: number;
@@ -13,11 +13,11 @@ export interface ResponsiveLayout {
   contentMaxWidth: number | undefined;
   containerPadding: number;
   gutter: number;
-  cardWidth: (customCols?: number) => any;
+  cardWidth: (customCols?: number) => DimensionValue;
 }
 
 /**
- * Universal responsive hook for SkilGlobal 5S Enterprise
+ * Responsive layout values for the SkilGlobal 5S app.
  * Supports Mobile Phones (iOS / Android), Tablets (iPad, Galaxy Tab, Foldables) and Web
  */
 export function useResponsive(): ResponsiveLayout {
@@ -26,7 +26,7 @@ export function useResponsive(): ResponsiveLayout {
   const isLandscape = width > height;
   const isPortrait = !isLandscape;
 
-  // Industrial Breakpoints:
+  // Breakpoints:
   // Phones: < 768px (e.g., iPhone 13-16, Samsung Galaxy S21-S24)
   // Standard Tablets: 768px - 1023px (e.g., iPad Mini, iPad 10.2", iPad Air, Galaxy Tab S9)
   // Large Tablets & Desktop: >= 1024px (e.g., iPad Pro 11"/12.9", Landscape Tablets, Web)
@@ -50,7 +50,7 @@ export function useResponsive(): ResponsiveLayout {
   const containerPadding = isLargeTablet ? 24 : isTablet ? 20 : 16;
   const gutter = isTablet ? 16 : 12;
 
-  const cardWidth = (customCols?: number) => {
+  const cardWidth = (customCols?: number): DimensionValue => {
     const cols = customCols ?? numColumns;
     if (cols === 1) return '100%';
     if (cols === 2) return '48.5%';

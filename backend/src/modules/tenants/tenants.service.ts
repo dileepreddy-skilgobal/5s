@@ -1,24 +1,40 @@
 import { Injectable, NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../core/database/prisma.service';
+import { SubscriptionService } from '../../core/subscription/subscription.service';
+import { FilesService } from '../../core/storage/files.service';
 import { CreateTenantDto, UpdateTenantDto, OnboardingWizardDto } from './dto/tenant.dto';
-import * as bcrypt from 'bcryptjs';
+import { generateTemporaryPassword, hashSecret } from '../../core/auth/credentials';
+import { resolveTenantLogo } from './tenant-logo';
+import { createStarterStandards, createStarterTemplate } from './starter-content';
+
+/** Who is acting and in which tenant context the request runs (inline uploads are stored there first). */
+export interface TenantActor {
+  userId: string;
+  tenantId: string;
+}
+
+const STATUS_LABEL: Record<string, string> = { ACTIVE: 'active', TRIAL: 'trial', SUSPENDED: 'suspended', CANCELLED: 'cancelled' };
 
 @Injectable()
 export class TenantsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly subscription: SubscriptionService,
+    private readonly files: FilesService,
+  ) {}
 
-  async assertSuperAdmin(userId?: string) {
-    if (!userId) return;
+  async assertSuperAdmin(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { isSuperAdmin: true, email: true },
+      select: { isSuperAdmin: true },
     });
-    if (user && !user.isSuperAdmin && user.email !== 'superadmin@skilglobal.com') {
+    if (!user?.isSuperAdmin) {
       throw new ForbiddenException('Access Restricted: Only SaaS Platform Super Administrators can manage tenant organizations.');
     }
   }
 
-  async createTenant(dto: CreateTenantDto, userId?: string) {
+  async createTenant(dto: CreateTenantDto, actor: TenantActor) {
+    const userId = actor.userId;
     await this.assertSuperAdmin(userId);
     const existing = await this.prisma.tenant.findUnique({
       where: { slug: dto.slug },
@@ -32,15 +48,21 @@ export class TenantsService {
         name: dto.name,
         slug: dto.slug,
         industry: dto.industry || 'Manufacturing',
-        logoUrl: dto.logoUrl,
         storageQuotaMb: dto.storageQuotaMb || 5120,
       },
+    });
+    // New organizations start on the default plan's free trial; an explicit quota overrides the plan's
+    const trial = await this.subscription.trialDefaults();
+    const logoUrl = await resolveTenantLogo(this.prisma, this.files, { callerTenantId: actor.tenantId, targetTenantId: tenant.id, uploadedById: userId, value: dto.logoUrl });
+    await this.prisma.tenant.update({
+      where: { id: tenant.id },
+      data: { ...trial, ...(dto.storageQuotaMb ? { storageQuotaMb: dto.storageQuotaMb } : {}), ...(logoUrl ? { logoUrl } : {}) },
     });
 
     // Seed default RBAC roles for this new tenant
     await this.seedDefaultRoles(tenant.id);
 
-    return tenant;
+    return this.prisma.tenant.findUnique({ where: { id: tenant.id } });
   }
 
   async getAllTenants() {
@@ -49,14 +71,15 @@ export class TenantsService {
       include: {
         _count: {
           select: {
-            users: true,
-            locations: true,
-            orgNodes: true,
+            users: { where: { deletedAt: null } },
+            locations: { where: { deletedAt: null } },
+            orgNodes: { where: { deletedAt: null } },
           },
         },
       },
     });
-    return tenants;
+    // Each logo lives in its own tenant's storage, so it is signed for that tenant, not the operator's
+    return tenants.map((t) => ({ ...t, logoUrl: t.logoUrl ? this.files.signString(t.logoUrl, t.id) : t.logoUrl }));
   }
 
   async getTenantById(id: string) {
@@ -65,9 +88,9 @@ export class TenantsService {
       include: {
         _count: {
           select: {
-            users: true,
-            locations: true,
-            orgNodes: true,
+            users: { where: { deletedAt: null } },
+            locations: { where: { deletedAt: null } },
+            orgNodes: { where: { deletedAt: null } },
           },
         },
       },
@@ -78,45 +101,101 @@ export class TenantsService {
     return tenant;
   }
 
-  async updateTenant(id: string, dto: UpdateTenantDto, userId?: string) {
-    await this.assertSuperAdmin(userId);
-    await this.getTenantById(id);
+  async updateTenant(id: string, dto: UpdateTenantDto, actor: TenantActor) {
+    await this.assertSuperAdmin(actor.userId);
+    const tenant = await this.getTenantById(id);
+    const logoUrl = await resolveTenantLogo(this.prisma, this.files, { callerTenantId: actor.tenantId, targetTenantId: id, uploadedById: actor.userId, value: dto.logoUrl });
+    const status = dto.status !== undefined ? await this.nextStatus(tenant, dto.status) : undefined;
     return this.prisma.tenant.update({
       where: { id },
-      data: dto,
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
+        ...(dto.industry !== undefined ? { industry: dto.industry.trim() } : {}),
+        ...(dto.storageQuotaMb !== undefined ? { storageQuotaMb: dto.storageQuotaMb } : {}),
+        ...(dto.hierarchyConfig !== undefined ? { hierarchyConfig: dto.hierarchyConfig } : {}),
+        ...(dto.settings !== undefined ? { settings: dto.settings } : {}),
+        ...(logoUrl !== undefined ? { logoUrl } : {}),
+        ...(status !== undefined ? { status } : {}),
+      },
     });
   }
 
-  async toggleStatus(id: string, status: string, userId?: string) {
+  /** Suspends an ACTIVE / TRIAL organization or reactivates a suspended one (see nextStatus). */
+  async toggleStatus(id: string, status: string, userId: string) {
     await this.assertSuperAdmin(userId);
-    await this.getTenantById(id);
+    const tenant = await this.getTenantById(id);
     return this.prisma.tenant.update({
       where: { id },
-      data: { status },
+      data: { status: await this.nextStatus(tenant, status) },
     });
   }
 
-  async executeOnboarding(dto: OnboardingWizardDto, userId?: string) {
-    await this.assertSuperAdmin(userId);
-    // 1. Create or retrieve Tenant
-    let tenant = await this.prisma.tenant.findUnique({
-      where: { slug: dto.orgSlug },
-    });
+  /**
+   * Status changes allowed outside the subscription editor: suspend (ACTIVE / TRIAL -> SUSPENDED) and
+   * reactivate (SUSPENDED -> the status it had before). A trial or cancelled organization is never turned
+   * into a paying ACTIVE one here; that is a plan decision made in the subscription editor.
+   */
+  private async nextStatus(tenant: { id: string; status: string; trialEndsAt: Date | null; currentPeriodEnd: Date | null }, requested: string) {
+    if (requested === tenant.status) return requested;
+    if (requested === 'SUSPENDED') {
+      if (tenant.status !== 'ACTIVE' && tenant.status !== 'TRIAL') {
+        throw new BadRequestException(`A ${STATUS_LABEL[tenant.status] ?? tenant.status} organization cannot be suspended.`);
+      }
+      return 'SUSPENDED';
+    }
+    if (requested === 'ACTIVE' || requested === 'TRIAL') {
+      if (tenant.status !== 'SUSPENDED') {
+        throw new BadRequestException('Only a suspended organization can be reactivated here. Change the plan or status in the subscription editor.');
+      }
+      return this.statusBeforeSuspension(tenant);
+    }
+    throw new BadRequestException('Cancel an organization from the subscription editor.');
+  }
 
-    if (!tenant) {
-      tenant = await this.prisma.tenant.create({
-        data: {
-          name: dto.orgName,
-          slug: dto.orgSlug,
-          industry: dto.industry || 'Manufacturing',
-          logoUrl: dto.logoUrl,
-        },
-      });
-      await this.seedDefaultRoles(tenant.id);
-    } else if (dto.logoUrl) {
+  /** The status recorded just before the last suspension, else the one its subscription dates imply. */
+  private async statusBeforeSuspension(tenant: { id: string; trialEndsAt: Date | null; currentPeriodEnd: Date | null }): Promise<string> {
+    const entries = await this.prisma.activityLog.findMany({
+      where: { entityType: 'Tenant', entityId: tenant.id, outcome: 'SUCCESS', changes: { contains: '"status"' } },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: { changes: true },
+    });
+    for (const entry of entries) {
+      try {
+        const change = JSON.parse(entry.changes ?? '{}')?.diff?.status as { from?: unknown; to?: unknown } | undefined;
+        if (change?.to === 'SUSPENDED' && (change.from === 'ACTIVE' || change.from === 'TRIAL')) return change.from;
+      } catch {
+        // unreadable entry: keep looking
+      }
+    }
+    if (tenant.currentPeriodEnd) return 'ACTIVE';
+    return tenant.trialEndsAt ? 'TRIAL' : 'ACTIVE';
+  }
+
+  async executeOnboarding(dto: OnboardingWizardDto, actor: TenantActor) {
+    const userId = actor.userId;
+    await this.assertSuperAdmin(userId);
+    // 1. Create the organization (an existing code is refused rather than silently reused)
+    if (await this.prisma.tenant.findUnique({ where: { slug: dto.orgSlug }, select: { id: true } })) {
+      throw new ConflictException(`An organization with the code '${dto.orgSlug}' already exists. Choose another code.`);
+    }
+    let tenant = await this.prisma.tenant.create({
+      data: {
+        name: dto.orgName,
+        slug: dto.orgSlug,
+        ...(dto.industry ? { industry: dto.industry } : {}),
+        ...(await this.subscription.trialDefaults()),
+      },
+    });
+    await this.seedDefaultRoles(tenant.id);
+    // The wizard's upload was stored in the operator's tenant context; it is copied into the new organization
+    const logoUrl = dto.logoUrl
+      ? await resolveTenantLogo(this.prisma, this.files, { callerTenantId: actor.tenantId, targetTenantId: tenant.id, uploadedById: userId, value: dto.logoUrl })
+      : undefined;
+    if (logoUrl) {
       tenant = await this.prisma.tenant.update({
         where: { id: tenant.id },
-        data: { logoUrl: dto.logoUrl },
+        data: { logoUrl },
       });
     }
 
@@ -142,19 +221,20 @@ export class TenantsService {
     }
 
     // 3. Create Admin User
-    const adminEmail = dto.adminEmail || `admin@${dto.orgSlug}.com`;
-    const passwordHash = await bcrypt.hash('Admin@123456', 10);
-    const adminUser = await this.prisma.user.upsert({
-      where: { tenantId_email: { tenantId, email: adminEmail } },
-      update: {},
-      create: {
+    const adminEmail = (dto.adminEmail || `admin@${dto.orgSlug}.com`).toLowerCase();
+    const existingAdmin = await this.prisma.user.findFirst({
+      where: { tenantId, email: { equals: adminEmail, mode: 'insensitive' } },
+      select: { id: true },
+    });
+    // A one-time password is generated only for a newly provisioned admin and returned once
+    const adminTemporaryPassword = existingAdmin ? undefined : generateTemporaryPassword();
+    const adminUser = existingAdmin ?? await this.prisma.user.create({
+      data: {
         tenantId,
         email: adminEmail,
-        passwordHash,
+        passwordHash: await hashSecret(adminTemporaryPassword),
         firstName: dto.adminName ? dto.adminName.split(' ')[0] : 'Organization',
         lastName: dto.adminName ? dto.adminName.split(' ').slice(1).join(' ') || 'Admin' : 'Admin',
-        jobTitle: '5S Operations Director',
-        department: 'Operations & Quality',
         isSuperAdmin: false,
       },
     });
@@ -178,21 +258,18 @@ export class TenantsService {
       }
     }
 
-    // 4. Create Sample Plants & Departments
-    const sites = dto.sites && dto.sites.length > 0 ? dto.sites : ['Main Plant Alpha', 'Plant Beta Logistics'];
-    const departments = dto.departments && dto.departments.length > 0 ? dto.departments : ['Machining & Fabrication', 'Assembly Line 1', 'Quality Assurance', 'Warehouse & Stores'];
+    // 4. Sites and departments exactly as entered (departments go under the first site); areas are added later
+    const sites = (dto.sites ?? []).map((n) => n.trim()).filter(Boolean);
+    const departments = (dto.departments ?? []).map((n) => n.trim()).filter(Boolean);
+    let departmentsCreated = 0;
 
     for (let i = 0; i < sites.length; i++) {
-      const siteName = sites[i];
       const siteCode = `${dto.orgSlug.toUpperCase()}-PLANT-${i + 1}`;
-
-      const plantNode = await this.prisma.orgNode.upsert({
-        where: { tenantId_code: { tenantId, code: siteCode } },
-        update: {},
-        create: {
+      const plantNode = await this.prisma.orgNode.create({
+        data: {
           tenantId,
           parentId: rootNode.id,
-          name: siteName,
+          name: sites[i],
           code: siteCode,
           nodeType: 'PLANT',
           path: `${rootNode.path}${siteCode}/`,
@@ -200,20 +277,14 @@ export class TenantsService {
           sortOrder: i + 1,
         },
       });
-
-      // Create Departments under first plant
       if (i === 0) {
         for (let j = 0; j < departments.length; j++) {
-          const deptName = departments[j];
           const deptCode = `${siteCode}-DEPT-${j + 1}`;
-
-          const deptNode = await this.prisma.orgNode.upsert({
-            where: { tenantId_code: { tenantId, code: deptCode } },
-            update: {},
-            create: {
+          await this.prisma.orgNode.create({
+            data: {
               tenantId,
               parentId: plantNode.id,
-              name: deptName,
+              name: departments[j],
               code: deptCode,
               nodeType: 'DEPARTMENT',
               path: `${plantNode.path}${deptCode}/`,
@@ -221,64 +292,27 @@ export class TenantsService {
               sortOrder: j + 1,
             },
           });
-
-          // Create Sample Location under first department
-          if (j === 0) {
-            const areaCode = `LOC-${siteCode.slice(-4)}-${deptCode.slice(-4)}-01`;
-            const sampleLocation = await this.prisma.location.upsert({
-              where: { tenantId_areaCode: { tenantId, areaCode } },
-              update: {},
-              create: {
-                tenantId,
-                orgNodeId: deptNode.id,
-                areaCode,
-                name: `${deptName} - Primary Cell 01`,
-                locationType: 'PRODUCTION_LINE',
-                riskLevel: 'MEDIUM',
-                auditFrequency: 'WEEKLY',
-                building: 'Building A',
-                floor: 'Ground Floor',
-                description: 'Primary machining & CNC cell with shadow tool boards and designated scrap area.',
-                ownerId: adminUser.id,
-                qrCodeData: `5s://${dto.orgSlug}/locations/${areaCode}`,
-              },
-            });
-
-            // Create initial Location Timeline milestones
-            const now = new Date();
-            const milestones = [
-              { name: '1S Sort & Red Tag Sorting Campaign', offsetDays: 7, status: 'COMPLETED', progress: 100 },
-              { name: '2S Set-In-Order Shadow Boards & Floor Markings', offsetDays: 14, status: 'IN_PROGRESS', progress: 65 },
-              { name: '3S Shine Cleaning Schedule & Inspection Routine', offsetDays: 21, status: 'NOT_STARTED', progress: 0 },
-              { name: '4S Standard Operating Procedures Rollout', offsetDays: 28, status: 'NOT_STARTED', progress: 0 },
-              { name: '5S Sustain Audit Launch & Leaderboards', offsetDays: 35, status: 'NOT_STARTED', progress: 0 },
-            ];
-
-            for (const m of milestones) {
-              const plannedEnd = new Date(now.getTime() + m.offsetDays * 86400000);
-              await this.prisma.locationTimeline.create({
-                data: {
-                  tenantId,
-                  locationId: sampleLocation.id,
-                  milestoneName: m.name,
-                  plannedStartDate: now,
-                  plannedEndDate: plannedEnd,
-                  progressPercent: m.progress,
-                  status: m.status,
-                  notes: `Automated onboarding milestone for ${m.name}`,
-                },
-              });
-            }
-          }
+          departmentsCreated++;
         }
       }
     }
+
+    // 5. Optional starter content, all or nothing
+    const starter = await this.prisma.$transaction(async (tx) => ({
+      templateId: dto.starterTemplate ? await createStarterTemplate(tx, tenantId) : null,
+      standardsCreated: dto.starterStandards ? await createStarterStandards(tx, tenantId, adminUser.id) : 0,
+    }));
 
     return {
       message: 'Onboarding completed successfully',
       tenantId: tenant.id,
       tenantSlug: tenant.slug,
       adminEmail,
+      adminTemporaryPassword,
+      sitesCreated: sites.length,
+      departmentsCreated,
+      starterTemplateCreated: starter.templateId !== null,
+      starterStandardsCreated: starter.standardsCreated,
     };
   }
 
@@ -293,6 +327,7 @@ export class TenantsService {
       { code: 'AUDITOR', name: 'Certified 5S Auditor', desc: 'Conducts mobile audits, records observations, and captures photographic evidence.' },
       { code: 'EMPLOYEE', name: 'General Shop-floor Employee', desc: 'View visual standards, report abnormalities, and access Red Tag campaigns.' },
       { code: 'EXTERNAL_AUDITOR', name: 'External Consultant / Auditor', desc: 'Time-bound read-only assessment access.' },
+      { code: 'EXECUTIVE', name: 'Executive Management', desc: 'Read-only dashboards, summaries, trends and comparisons across the organization.' },
     ];
 
     for (const r of roles) {

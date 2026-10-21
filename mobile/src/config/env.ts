@@ -83,22 +83,9 @@ const resolveApiBaseUrl = (): string => {
   return 'http://localhost:3001/api/v1';
 };
 
-// Dynamic Tenant Resolution
-const resolveTenantId = (): string => {
-  if (process.env.EXPO_PUBLIC_TENANT_ID) {
-    return process.env.EXPO_PUBLIC_TENANT_ID;
-  }
-  const extraTenant = Constants.expoConfig?.extra?.tenantId;
-  if (extraTenant) {
-    return extraTenant;
-  }
-  return 'skilglobal-mfg';
-};
-
 export const ENV = {
   // Network & Endpoints
   API_BASE_URL: resolveApiBaseUrl(),
-  TENANT_ID: resolveTenantId(),
   REQUEST_TIMEOUT_MS: 15000,
 
   // App Metadata
@@ -108,18 +95,4 @@ export const ENV = {
   BUILD_ENV: process.env.NODE_ENV || 'production',
   IS_PRODUCTION: process.env.NODE_ENV === 'production',
   IS_WEB: Platform.OS === 'web',
-
-  // Storage Keys
-  STORAGE_KEYS: {
-    ACTIVE_USER: '@5s_session_user_v1',
-    ACTIVE_TENANT: '@5s_session_tenant_v1',
-    AUTH_TOKEN: '@5s_auth_token_v1',
-    AUDITS: '@5s_mobile_audits_v1',
-    LOCATIONS: '@5s_mobile_locations_v1',
-    RED_TAGS: '@5s_mobile_red_tags_v1',
-    TEMPLATES: '@5s_mobile_templates_v1',
-    OFFLINE_QUEUE: '@5s_mobile_sync_queue_v1',
-    IS_OFFLINE_FORCED: '@5s_mobile_is_offline_simulated_v1',
-    USER_PREFERENCES: '@5s_user_preferences_v1',
-  },
 } as const;

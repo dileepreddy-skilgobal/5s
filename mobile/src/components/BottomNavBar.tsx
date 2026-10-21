@@ -1,7 +1,7 @@
 import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, SHADOWS } from '../constants/theme';
+import { COLORS, RADIUS, SHADOWS, SPACING, TYPE } from '../constants/theme';
 import { useResponsive } from '../hooks/useResponsive';
 
 export type TabType = 'home' | 'audits' | 'locations' | 'profile';
@@ -12,122 +12,61 @@ interface BottomNavBarProps {
   onCenterActionPress: () => void;
 }
 
-export const BottomNavBar: React.FC<BottomNavBarProps> = ({
-  activeTab,
-  onTabChange,
-  onCenterActionPress,
-}) => {
+type IconName = React.ComponentProps<typeof Ionicons>['name'];
+
+const TABS: Array<{ key: TabType; label: string; icon: IconName; activeIcon: IconName }> = [
+  { key: 'home', label: 'Home', icon: 'home-outline', activeIcon: 'home' },
+  { key: 'audits', label: 'Audits', icon: 'clipboard-outline', activeIcon: 'clipboard' },
+  { key: 'locations', label: 'Areas', icon: 'location-outline', activeIcon: 'location' },
+  { key: 'profile', label: 'Profile', icon: 'person-outline', activeIcon: 'person' },
+];
+
+/** Height of the bar itself (the app shell keeps the device's bottom safe area below it). */
+export const BOTTOM_NAV_HEIGHT = 64;
+
+const TabButton: React.FC<{ tab: (typeof TABS)[number]; active: boolean; onPress: () => void }> = ({ tab, active, onPress }) => (
+  <Pressable
+    style={({ pressed }) => [styles.tabItem, pressed && styles.pressed]}
+    onPress={onPress}
+    accessibilityRole="tab"
+    accessibilityLabel={tab.label}
+    accessibilityState={{ selected: active }}
+  >
+    <View style={[styles.iconPill, active && styles.iconPillActive]}>
+      <Ionicons name={active ? tab.activeIcon : tab.icon} size={22} color={active ? COLORS.primary : COLORS.textMuted} />
+    </View>
+    <Text style={[styles.tabLabel, active ? styles.tabLabelActive : styles.tabLabelInactive]} numberOfLines={1}>
+      {tab.label}
+    </Text>
+  </Pressable>
+);
+
+/** Bottom tab bar with a central scan button. Sits at the bottom of the app shell, above the safe area. */
+export const BottomNavBar: React.FC<BottomNavBarProps> = ({ activeTab, onTabChange, onCenterActionPress }) => {
   const { isTablet } = useResponsive();
+  const [first, second, third, fourth] = TABS;
 
   return (
-    <View style={styles.wrapper}>
-      <View
-        style={[
-          styles.container,
-          SHADOWS.nav,
-          isTablet && styles.tabletContainer,
-        ]}
-      >
-        {/* Tab 1: Home */}
-        <TouchableOpacity
-          style={styles.tabItem}
-          onPress={() => onTabChange('home')}
-          activeOpacity={0.8}
-        >
-          <Ionicons
-            name={activeTab === 'home' ? 'home' : 'home-outline'}
-            size={22}
-            color={activeTab === 'home' ? COLORS.textDark : COLORS.textMuted}
-          />
-          <Text
-            style={[
-              styles.tabLabel,
-              activeTab === 'home' ? styles.tabLabelActive : styles.tabLabelInactive,
-            ]}
-          >
-            Home
-          </Text>
-          {activeTab === 'home' && <View style={styles.activeIndicator} />}
-        </TouchableOpacity>
+    <View style={styles.wrapper} pointerEvents="box-none">
+      <View style={[styles.container, isTablet && styles.tabletContainer]} accessibilityRole="tablist">
+        <TabButton tab={first} active={activeTab === first.key} onPress={() => onTabChange(first.key)} />
+        <TabButton tab={second} active={activeTab === second.key} onPress={() => onTabChange(second.key)} />
 
-        {/* Tab 2: Audits */}
-        <TouchableOpacity
-          style={styles.tabItem}
-          onPress={() => onTabChange('audits')}
-          activeOpacity={0.8}
+        {/* Central scan button */}
+        <Pressable
+          style={({ pressed }) => [styles.tabItem, pressed && styles.pressed]}
+          onPress={onCenterActionPress}
+          accessibilityRole="button"
+          accessibilityLabel="Scan an area QR code"
         >
-          <Ionicons
-            name={activeTab === 'audits' ? 'clipboard' : 'clipboard-outline'}
-            size={22}
-            color={activeTab === 'audits' ? COLORS.textDark : COLORS.textMuted}
-          />
-          <Text
-            style={[
-              styles.tabLabel,
-              activeTab === 'audits' ? styles.tabLabelActive : styles.tabLabelInactive,
-            ]}
-          >
-            Audits
-          </Text>
-          {activeTab === 'audits' && <View style={styles.activeIndicator} />}
-        </TouchableOpacity>
+          <View style={styles.centerButton}>
+            <Ionicons name="scan-outline" size={22} color={COLORS.textInverse} />
+          </View>
+          <Text style={[styles.tabLabel, styles.tabLabelActive]}>Scan</Text>
+        </Pressable>
 
-        {/* Center Floating Elevated Action Button: Scan QR / Execute */}
-        <View style={styles.centerButtonWrapper}>
-          <TouchableOpacity
-            style={[styles.centerButton, styles.centerButtonShadow]}
-            onPress={onCenterActionPress}
-            activeOpacity={0.88}
-            accessibilityLabel="Scan Area QR Code"
-          >
-            <Ionicons name="scan-outline" size={20} color="#FFFFFF" />
-          </TouchableOpacity>
-          <Text style={styles.centerButtonLabel}>Scan</Text>
-        </View>
-
-        {/* Tab 4: Locations / Shopfloor */}
-        <TouchableOpacity
-          style={styles.tabItem}
-          onPress={() => onTabChange('locations')}
-          activeOpacity={0.8}
-        >
-          <Ionicons
-            name={activeTab === 'locations' ? 'location' : 'location-outline'}
-            size={22}
-            color={activeTab === 'locations' ? COLORS.textDark : COLORS.textMuted}
-          />
-          <Text
-            style={[
-              styles.tabLabel,
-              activeTab === 'locations' ? styles.tabLabelActive : styles.tabLabelInactive,
-            ]}
-          >
-            Locations
-          </Text>
-          {activeTab === 'locations' && <View style={styles.activeIndicator} />}
-        </TouchableOpacity>
-
-        {/* Tab 5: Profile */}
-        <TouchableOpacity
-          style={styles.tabItem}
-          onPress={() => onTabChange('profile')}
-          activeOpacity={0.8}
-        >
-          <Ionicons
-            name={activeTab === 'profile' ? 'person' : 'person-outline'}
-            size={22}
-            color={activeTab === 'profile' ? COLORS.textDark : COLORS.textMuted}
-          />
-          <Text
-            style={[
-              styles.tabLabel,
-              activeTab === 'profile' ? styles.tabLabelActive : styles.tabLabelInactive,
-            ]}
-          >
-            Profile
-          </Text>
-          {activeTab === 'profile' && <View style={styles.activeIndicator} />}
-        </TouchableOpacity>
+        <TabButton tab={third} active={activeTab === third.key} onPress={() => onTabChange(third.key)} />
+        <TabButton tab={fourth} active={activeTab === fourth.key} onPress={() => onTabChange(fourth.key)} />
       </View>
     </View>
   );
@@ -139,94 +78,51 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: 'transparent',
   },
   container: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-around',
-    backgroundColor: '#FFFFFF',
-    paddingTop: 6,
-    paddingBottom: Platform.OS === 'ios' ? 12 : 4,
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    borderWidth: 1,
-    borderColor: '#F0F2F5',
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: -3 },
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    elevation: 8,
-  },
-  tabItem: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 60,
-    position: 'relative',
-    paddingVertical: 2,
-  },
-  tabLabel: {
-    fontSize: 10,
-    marginTop: 2,
-  },
-  tabLabelActive: {
-    color: COLORS.textDark,
-    fontWeight: '700',
-  },
-  tabLabelInactive: {
-    color: COLORS.textMuted,
-    fontWeight: '500',
-  },
-  activeIndicator: {
-    position: 'absolute',
-    bottom: -2,
-    width: 14,
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: COLORS.primary,
-  },
-  centerButtonWrapper: {
-    alignItems: 'center',
-    top: -5,
-  },
-  centerButton: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 3,
-    borderColor: '#FFFFFF',
-  },
-  centerButtonShadow: {
-    shadowColor: '#FF6433',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.22,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-  centerButtonLabel: {
-    fontSize: 9.5,
-    fontWeight: '700',
-    color: COLORS.primary,
-    marginTop: 2,
+    alignItems: 'stretch',
+    height: BOTTOM_NAV_HEIGHT,
+    backgroundColor: COLORS.card,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingHorizontal: SPACING.xs,
+    ...SHADOWS.nav,
   },
   tabletContainer: {
     maxWidth: 620,
     width: '90%',
     alignSelf: 'center',
-    borderRadius: 24,
-    marginBottom: 12,
-    paddingHorizontal: 24,
-    paddingTop: 8,
-    paddingBottom: 8,
+    borderRadius: RADIUS.xl,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
-    shadowColor: '#0F172A',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.12,
-    shadowRadius: 16,
-    elevation: 10,
+    borderColor: COLORS.border,
+    marginBottom: SPACING.md,
   },
+  tabItem: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  pressed: { opacity: 0.7 },
+  iconPill: {
+    width: 48,
+    height: 30,
+    borderRadius: RADIUS.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconPillActive: { backgroundColor: COLORS.primarySoft },
+  centerButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...SHADOWS.floating,
+  },
+  tabLabel: { ...TYPE.caption },
+  tabLabelActive: { color: COLORS.primary, fontWeight: '600' },
+  tabLabelInactive: { color: COLORS.textMedium },
 });

@@ -1,700 +1,389 @@
-import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { isAxiosError } from 'axios';
 import { useApp } from '../../context/AppContext';
-import { api } from '../../services/api';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import { api, getApiErrorMessage } from '../../services/api';
+import { masterDataApi } from '../../services/masterDataApi';
 import { Standard, OrgNode, Location } from '../../types';
 import { Card } from '../../components/ui/Card';
+import { PageHeader } from '../../components/ui/PageHeader';
+import { SummaryCard, SummaryGrid } from '../../components/ui/SummaryCard';
+import { FilterBar, SearchInput } from '../../components/ui/FormField';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
 import { Modal } from '../../components/ui/Modal';
 import { ImageWithFallback } from '../../components/ui/ImageWithFallback';
+import { EmptyState, ErrorState, LoadingState } from '../../components/ui/StateViews';
+import { PILLARS, pillarLabel, pillarVariant } from '../../constants/labels';
 import {
-  FileText,
-  Plus,
-  Search,
-  Filter,
-  CheckCircle2,
-  Clock,
-  Layers,
-  Sparkles,
-  ExternalLink,
-  BookOpen,
-  Image as ImageIcon,
-  Video,
-  ChevronRight,
-  RefreshCw,
-  LayoutGrid,
-  List,
-  ShieldCheck,
-  AlertTriangle,
-  Trash2,
-  Printer,
-  Eye,
-} from 'lucide-react';
-import { FIVE_S_IMAGES } from '../../constants/images';
+  EDITABLE_SCOPES,
+  PhotoListField,
+  isRejected,
+  PhotoValue,
+  emptyPhoto,
+  RulesEditor,
+  ScopeTargetField,
+  SCOPE_LABELS,
+  STANDARD_STATUS_LABELS,
+  displayedRevision,
+  fieldErrorStyle,
+  isHttpUrl,
+  pendingRevision,
+  photoOf,
+  scopeLabel,
+  scopeTargetError,
+  scopeTargetText,
+  standardStatusVariant,
+  toReferencePhotos,
+} from './standardShared';
+import { FileText, Plus, CheckCircle2, Clock, Layers, BookOpen, Image as ImageIcon, Video, ChevronRight, RefreshCw, LayoutGrid, List } from 'lucide-react';
+
+interface CreateForm {
+  code: string;
+  title: string;
+  category: string;
+  scopeType: string;
+  targetOrgNodeId: string;
+  targetLocationId: string;
+  description: string;
+  rules: string[];
+  standardPhotos: PhotoValue[];
+  defectPhotos: PhotoValue[];
+  videoUrl: string;
+  sopDocumentUrl: string;
+}
+
+type CreateErrors = Partial<Record<'code' | 'title' | 'description' | 'rules' | 'target' | 'sop' | 'video' | 'photo' | 'form', string>>;
+
+const emptyForm = (): CreateForm => ({
+  code: '',
+  title: '',
+  category: 'S1_SORT',
+  scopeType: 'GLOBAL',
+  targetOrgNodeId: '',
+  targetLocationId: '',
+  description: '',
+  rules: [''],
+  standardPhotos: [emptyPhoto()],
+  defectPhotos: [emptyPhoto()],
+  videoUrl: '',
+  sopDocumentUrl: '',
+});
+
+/** Revision badge used in both views: what is in force, or that the first revision awaits approval. */
+const RevisionBadge: React.FC<{ std: Standard }> = ({ std }) => {
+  const rev = displayedRevision(std);
+  if (!rev) return <Badge variant="neutral">No revision</Badge>;
+  // A draft whose latest revision was rejected waits for the author to draft a new one
+  if (std.status === 'DRAFT' && isRejected(rev) && !pendingRevision(std)) return <Badge variant="danger">Rev {rev.revisionNumber} rejected</Badge>;
+  if (std.status === 'DRAFT') return <Badge variant="warning">Rev {rev.revisionNumber} awaiting approval</Badge>;
+  if (std.status === 'ARCHIVED') return <Badge variant="neutral">Rev {rev.revisionNumber} (archived)</Badge>;
+  return <Badge variant="success">Rev {rev.revisionNumber}</Badge>;
+};
 
 export const StandardsPage: React.FC = () => {
   const navigate = useNavigate();
-  const { currentTenant, addToast } = useApp();
+  const { currentTenant, addToast, can } = useApp();
+  const canAuthor = can('PROGRAM_MANAGERS');
 
   const [standards, setStandards] = useState<Standard[]>([]);
   const [orgNodes, setOrgNodes] = useState<OrgNode[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // Filters & Controls
   const [search, setSearch] = useState('');
+  // Query the API only after typing pauses, not on every keystroke
+  const debouncedSearch = useDebouncedValue(search);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [selectedStatus, setSelectedStatus] = useState<string>('ALL');
   const [selectedScope, setSelectedScope] = useState<string>('ALL');
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
 
-  // Modals & Drawers
-  const [createDrawerOpen, setCreateDrawerOpen] = useState(false);
-  const [deleteModalStandard, setDeleteModalStandard] = useState<Standard | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState<CreateForm>(emptyForm);
+  const [errors, setErrors] = useState<CreateErrors>({});
 
-  // Form State for new standard
-  const [formData, setFormData] = useState({
-    code: '',
-    title: '',
-    category: 'S1_SORT',
-    scopeType: 'GLOBAL',
-    targetOrgNodeId: '',
-    targetLocationId: '',
-    description: '',
-    rules: [
-      'Workstations must be cleared of all non-essential tooling and unlabelled materials.',
-      'Obsolete parts and unapproved scrap must be moved to the Red Tag holding area.',
-    ],
-    standardPhotoUrl: '/assets/5s/shadow_board_std.jpg',
-    currentPhotoUrl: '/assets/5s/shadow_board_clutter.jpg',
-    videoUrl: '',
-    sopDocumentUrl: 'https://docs.skilglobal.com/sop-5s-standard.pdf',
-    publishDirectly: true,
-  });
-
-  const loadData = async () => {
-    if (!currentTenant) return;
+  const loadData = useCallback(async () => {
+    if (!currentTenant) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
+    setLoadError(null);
     try {
-      const [standardsData, orgData, locData] = await Promise.all([
-        api.getStandards({
+      setStandards(
+        await api.getStandards({
           category: selectedCategory !== 'ALL' ? selectedCategory : undefined,
           status: selectedStatus !== 'ALL' ? selectedStatus : undefined,
           scopeType: selectedScope !== 'ALL' ? selectedScope : undefined,
-          search: search || undefined,
+          search: debouncedSearch || undefined,
         }),
-        api.getOrgNodes(),
-        api.getLocations(),
-      ]);
-      setStandards(standardsData);
-      setOrgNodes(orgData);
-      setLocations(locData);
-    } catch (err: any) {
-      addToast({
-        type: 'error',
-        title: 'Error Loading Standards',
-        message: err?.response?.data?.message || 'Could not load 5S visual standards library.',
-      });
+      );
+    } catch (err) {
+      setLoadError(getApiErrorMessage(err, 'The standards could not be loaded.'));
     } finally {
       setLoading(false);
     }
-  };
+  }, [currentTenant, selectedCategory, selectedStatus, selectedScope, debouncedSearch]);
 
   useEffect(() => {
     loadData();
-  }, [currentTenant, selectedCategory, selectedStatus, selectedScope, search]);
+  }, [loadData]);
 
-  const handleAddRule = () => {
-    setFormData((prev) => ({ ...prev, rules: [...prev.rules, ''] }));
-  };
-
-  const handleRuleChange = (index: number, val: string) => {
-    const updated = [...formData.rules];
-    updated[index] = val;
-    setFormData((prev) => ({ ...prev, rules: updated }));
-  };
-
-  const handleRemoveRule = (index: number) => {
-    if (formData.rules.length <= 1) return;
-    const updated = formData.rules.filter((_, i) => i !== index);
-    setFormData((prev) => ({ ...prev, rules: updated }));
+  const openCreate = async () => {
+    setForm(emptyForm());
+    setErrors({});
+    setCreateOpen(true);
+    // Scope targets are only needed for authoring
+    if (orgNodes.length || locations.length) return;
+    try {
+      const [nodes, locs] = await Promise.all([api.getOrgNodes(), api.getLocations()]);
+      setOrgNodes(nodes);
+      setLocations(locs);
+    } catch (err) {
+      setErrors({ form: getApiErrorMessage(err, 'Organization units and locations could not be loaded; only whole-organization standards can be created.') });
+    }
   };
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.code || !formData.title || !formData.description) return;
+    const next: CreateErrors = {};
+    if (!form.code.trim()) next.code = 'Enter a code.';
+    if (!form.title.trim()) next.title = 'Enter a title.';
+    if (!form.description.trim()) next.description = 'Describe what the standard requires.';
+    if (!form.rules.some((r) => r.trim())) next.rules = 'Add at least one rule.';
+    const targetError = scopeTargetError(form.scopeType, form.targetOrgNodeId, form.targetLocationId);
+    if (targetError) next.target = targetError;
+    if (form.sopDocumentUrl.trim() && !isHttpUrl(form.sopDocumentUrl)) next.sop = 'Enter a full link starting with https://.';
+    if (form.videoUrl.trim() && !isHttpUrl(form.videoUrl)) next.video = 'Enter a full link starting with https://.';
+    setErrors(next);
+    if (Object.keys(next).length) return;
+
     setSaving(true);
     try {
-      const payload = {
-        code: formData.code.trim().toUpperCase(),
-        title: formData.title.trim(),
-        category: formData.category,
-        scopeType: formData.scopeType,
-        targetOrgNodeId: formData.targetOrgNodeId || undefined,
-        targetLocationId: formData.targetLocationId || undefined,
-        description: formData.description,
-        rules: formData.rules.filter((r) => r.trim().length > 0),
-        referencePhotos: [
-          {
-            type: 'STANDARD_CONDITION',
-            photoUrl: formData.standardPhotoUrl,
-            label: 'Standard Target Condition (Compliant)',
-            description: 'Clear demarcations, tools arranged on shadow board, clean surface.',
-          },
-          {
-            type: 'CURRENT_CONDITION',
-            photoUrl: formData.currentPhotoUrl,
-            label: 'Defect Example / Non-compliance',
-            description: 'Loose cables, unlabelled containers, and accumulated clutter.',
-          },
-        ],
-        videoUrl: formData.videoUrl || undefined,
-        sopDocumentUrl: formData.sopDocumentUrl || undefined,
-      };
-
-      const newStd = await api.createStandard(payload);
+      const created = await masterDataApi.createStandard({
+        code: form.code.trim().toUpperCase(),
+        title: form.title.trim(),
+        category: form.category,
+        scopeType: form.scopeType,
+        targetOrgNodeId: form.targetOrgNodeId || undefined,
+        targetLocationId: form.targetLocationId || undefined,
+        description: form.description.trim(),
+        rules: form.rules.map((r) => r.trim()).filter(Boolean),
+        referencePhotos: toReferencePhotos(form.standardPhotos, form.defectPhotos),
+        videoUrl: form.videoUrl.trim() || undefined,
+        sopDocumentUrl: form.sopDocumentUrl.trim() || undefined,
+      });
       addToast({
         type: 'success',
-        title: 'Visual Standard Published',
-        message: `Standard '${newStd.title}' (${newStd.code}) created with baseline Rev 1.0 snapshot.`,
+        title: 'Standard saved for approval',
+        message: `${created.code} is a draft until a standard approver approves revision 1.0.`,
       });
-
-      setCreateDrawerOpen(false);
-      setFormData({
-        code: '',
-        title: '',
-        category: 'S1_SORT',
-        scopeType: 'GLOBAL',
-        targetOrgNodeId: '',
-        targetLocationId: '',
-        description: '',
-        rules: [
-          'Workstations must be cleared of all non-essential tooling and unlabelled materials.',
-          'Obsolete parts and unapproved scrap must be moved to the Red Tag holding area.',
-        ],
-        standardPhotoUrl: FIVE_S_IMAGES.standards.shadowBoardStandard,
-        currentPhotoUrl: FIVE_S_IMAGES.standards.shadowBoardClutter,
-        videoUrl: '',
-        sopDocumentUrl: 'https://docs.skilglobal.com/sop-5s-standard.pdf',
-        publishDirectly: true,
-      });
-      await loadData();
-    } catch (err: any) {
-      addToast({
-        type: 'error',
-        title: 'Publication Failed',
-        message: err?.response?.data?.message || 'Could not publish standard.',
-      });
+      setCreateOpen(false);
+      navigate(`/standards/${created.id}`);
+    } catch (err) {
+      const message = getApiErrorMessage(err, 'The standard could not be saved.');
+      if (isAxiosError(err) && err.response?.status === 409) setErrors({ code: message });
+      else setErrors({ form: message });
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDeleteConfirm = async () => {
-    if (!deleteModalStandard) return;
-    try {
-      await api.deleteStandard(deleteModalStandard.id);
-      addToast({
-        type: 'success',
-        title: 'Standard Removed',
-        message: `Standard '${deleteModalStandard.code}' has been removed from library.`,
-      });
-      setDeleteModalStandard(null);
-      await loadData();
-    } catch (err: any) {
-      addToast({
-        type: 'error',
-        title: 'Delete Failed',
-        message: err?.response?.data?.message || 'Could not remove standard.',
-      });
-    }
-  };
-
-  // 6 Pillars Metadata
-  const categoryPillars = [
-    { id: 'ALL', label: 'All Pillars', count: standards.length },
-    { id: 'S1_SORT', label: '1S - Sort', badgeVariant: 'warning' as const },
-    { id: 'S2_SET_IN_ORDER', label: '2S - Set in Order', badgeVariant: 'purple' as const },
-    { id: 'S3_SHINE', label: '3S - Shine', badgeVariant: 'info' as const },
-    { id: 'S4_STANDARDIZE', label: '4S - Standardize', badgeVariant: 'neutral' as const },
-    { id: 'S5_SUSTAIN', label: '5S - Sustain', badgeVariant: 'success' as const },
-    { id: 'S6_SAFETY', label: '6S - Safety', badgeVariant: 'danger' as const },
-  ];
-
-  const getPillarBadge = (cat: string) => {
-    switch (cat) {
-      case 'S1_SORT':
-        return <Badge variant="warning">1S Sort</Badge>;
-      case 'S2_SET_IN_ORDER':
-        return <Badge variant="purple">2S Set In Order</Badge>;
-      case 'S3_SHINE':
-        return <Badge variant="info">3S Shine</Badge>;
-      case 'S4_STANDARDIZE':
-        return <Badge variant="neutral">4S Standardize</Badge>;
-      case 'S5_SUSTAIN':
-        return <Badge variant="success">5S Sustain</Badge>;
-      case 'S6_SAFETY':
-        return <Badge variant="danger">6S Safety</Badge>;
-      default:
-        return <Badge variant="neutral">{cat}</Badge>;
-    }
-  };
-
-  // Metrics
-  const totalStandards = standards.length;
   const publishedStandards = standards.filter((s) => s.status === 'PUBLISHED').length;
-  const activeRevisionsCount = standards.reduce((acc, s) => acc + (s.revisions?.length || 1), 0);
-  const coveredPillars = new Set(standards.map((s) => s.category)).size;
+  const awaitingApproval = standards.filter((s) => pendingRevision(s)).length;
+  const coveredPillars = new Set(standards.filter((s) => s.status === 'PUBLISHED').map((s) => s.category)).size;
+  const filtersActive = !!search || selectedCategory !== 'ALL' || selectedStatus !== 'ALL' || selectedScope !== 'ALL';
+  const clearFilters = () => {
+    setSearch('');
+    setSelectedCategory('ALL');
+    setSelectedStatus('ALL');
+    setSelectedScope('ALL');
+  };
 
   return (
     <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      {/* Top Banner & Action Header */}
-      <div className="page-header">
-        <div className="page-header-content">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
-            <span className="code-tag" style={{ background: 'var(--color-primary)', color: '#FFFFFF', padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: '11px', fontWeight: 700 }}>
-              Visual Standards
-            </span>
-            <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-              Operational Governance & Visual Controls
-            </span>
-          </div>
-          <h1 style={{ fontSize: '24px', fontWeight: 800, color: 'var(--text-primary)', margin: 0, letterSpacing: '-0.02em' }}>
-            5S Visual Standards Library
-          </h1>
-        </div>
+      <PageHeader
+        title="5S standards"
+        description="The agreed condition of each area: rules, a standard photo and a defect example. Audit questions can link to a standard."
+        actions={
+          <>
+            <Button variant="secondary" icon={<RefreshCw size={16} />} onClick={loadData} loading={loading && standards.length > 0}>
+              Refresh
+            </Button>
+            {canAuthor && (
+              <Button variant="primary" icon={<Plus size={16} />} onClick={openCreate}>
+                New standard
+              </Button>
+            )}
+          </>
+        }
+      />
 
-        <div className="page-header-actions">
-          <Button
-            variant="secondary"
-            icon={<RefreshCw size={15} />}
-            onClick={() => loadData()}
-          >
-            Refresh
-          </Button>
-          <Button
-            variant="primary"
-            icon={<Plus size={16} />}
-            onClick={() => setCreateDrawerOpen(true)}
-          >
-            Author New 5S Standard
-          </Button>
-        </div>
-      </div>
+      <SummaryGrid>
+        <SummaryCard icon={<BookOpen size={18} />} tone="primary" label={filtersActive ? 'Standards (filtered)' : 'Standards'} value={standards.length} hint="In this list" />
+        <SummaryCard icon={<CheckCircle2 size={18} />} tone="success" label="Published" value={publishedStandards} hint="Approved and in force" />
+        <SummaryCard icon={<Clock size={18} />} tone={awaitingApproval ? 'warning' : 'neutral'} label="Awaiting approval" value={awaitingApproval} hint="New standards or revisions to approve" />
+        <SummaryCard
+          icon={<Layers size={18} />}
+          tone="info"
+          label="Pillars covered"
+          value={
+            <>
+              {coveredPillars} <span style={{ fontSize: '14px', fontWeight: 500, color: 'var(--text-tertiary)' }}>/ {PILLARS.length}</span>
+            </>
+          }
+          hint="Pillars with a published standard"
+        />
+      </SummaryGrid>
 
-      {/* Friendly Section Explainer Banner */}
-      <div className="section-intro-banner">
-        <div className="section-intro-content">
-          <div className="section-intro-icon">
-            <BookOpen size={22} />
-          </div>
-          <div>
-            <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', margin: '0 0 2px 0' }}>
-              5S Shopfloor Visual Standards & Benchmark Repository
-            </h3>
-            <p style={{ fontSize: '12.5px', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.4 }}>
-              Define side-by-side photographic target conditions (Golden Standard) vs defect examples across 1S through 6S pillars. These standards dynamically power your audit checklists and SOP documentation.
-            </p>
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <Button
-            size="sm"
-            variant="primary"
-            icon={<Plus size={14} />}
-            onClick={() => setCreateDrawerOpen(true)}
-          >
-            Author Standard
-          </Button>
-        </div>
-      </div>
-
-      {/* KPI Metric Summary Cards */}
-      <div className="grid grid-cols-4 gap-4">
-        <div className="metric-card accent-primary">
-          <div className="metric-header">
-            <div className="metric-label">Total Standards</div>
-            <div className="metric-icon primary">
-              <BookOpen size={16} />
-            </div>
-          </div>
-          <div className="metric-value">{totalStandards}</div>
-          <div className="metric-subtext">Active visual guidelines</div>
-        </div>
-
-        <div className="metric-card accent-success">
-          <div className="metric-header">
-            <div className="metric-label">Published Benchmarks</div>
-            <div className="metric-icon success">
-              <CheckCircle2 size={16} />
-            </div>
-          </div>
-          <div className="metric-value" style={{ color: 'var(--color-success)' }}>
-            {publishedStandards}
-          </div>
-          <div className="metric-subtext">Enforced in audit templates</div>
-        </div>
-
-        <div className="metric-card accent-purple">
-          <div className="metric-header">
-            <div className="metric-label">Approved Revisions</div>
-            <div className="metric-icon purple">
-              <Layers size={16} />
-            </div>
-          </div>
-          <div className="metric-value" style={{ color: 'var(--color-purple)' }}>
-            {activeRevisionsCount}
-          </div>
-          <div className="metric-subtext">Immutable revision history</div>
-        </div>
-
-        <div className="metric-card accent-warning">
-          <div className="metric-header">
-            <div className="metric-label">6S Pillar Coverage</div>
-            <div className="metric-icon warning">
-              <Sparkles size={16} />
-            </div>
-          </div>
-          <div className="metric-value" style={{ color: coveredPillars >= 5 ? 'var(--color-success)' : 'var(--color-warning)' }}>
-            {coveredPillars} <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-tertiary)' }}>/ 6 Pillars</span>
-          </div>
-          <div className="metric-subtext">Pillars with active standards</div>
-        </div>
-      </div>
-
-      {/* Category Tabs Strip */}
-      <div
-        style={{
-          display: 'flex',
-          gap: '8px',
-          overflowX: 'auto',
-          paddingBottom: '4px',
-        }}
-      >
-        {categoryPillars.map((p) => {
-          const isSelected = selectedCategory === p.id;
-          return (
-            <button
-              key={p.id}
-              onClick={() => setSelectedCategory(p.id)}
-              className={`pillar-tab-pill ${isSelected ? 'active' : ''}`}
-            >
+      <FilterBar label="Filter standards">
+        <div role="group" aria-label="Filter by pillar" style={{ flex: '1 1 100%', display: 'flex', gap: '8px', overflowX: 'auto', paddingBottom: '2px' }}>
+          {[{ id: 'ALL', label: 'All pillars' }, ...PILLARS.map((p) => ({ id: p, label: pillarLabel(p) }))].map((p) => (
+            <button key={p.id} type="button" aria-pressed={selectedCategory === p.id} onClick={() => setSelectedCategory(p.id)} className={`pillar-tab-pill ${selectedCategory === p.id ? 'active' : ''}`}>
               <span>{p.label}</span>
-              {p.count !== undefined && (
-                <span
-                  style={{
-                    fontSize: '11px',
-                    padding: '1px 7px',
-                    borderRadius: 'var(--radius-full)',
-                    background: isSelected ? 'rgba(255, 255, 255, 0.25)' : 'var(--bg-surface-subtle)',
-                    color: isSelected ? '#FFFFFF' : 'var(--text-secondary)',
-                    fontWeight: 700,
-                  }}
-                >
-                  {p.count}
-                </span>
-              )}
             </button>
-          );
-        })}
-      </div>
-
-      {/* Filter & View Toolbar */}
-      <Card noPadding>
-        <div
-          style={{
-            padding: '16px 20px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: '14px',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1, minWidth: '300px' }}>
-            <div style={{ position: 'relative', flex: 1 }}>
-              <Search
-                size={16}
-                style={{
-                  position: 'absolute',
-                  left: '12px',
-                  top: '50%',
-                  transform: 'translateY(-50%)',
-                  color: 'var(--text-tertiary)',
-                }}
-              />
-              <input
-                type="text"
-                placeholder="Search standard by code (e.g. STD-5S-01) or title..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="form-input"
-                style={{ paddingLeft: '36px' }}
-              />
-            </div>
-
-            {/* Scope Filter */}
-            <select
-              value={selectedScope}
-              onChange={(e) => setSelectedScope(e.target.value)}
-              className="form-select"
-              style={{ width: '180px' }}
-            >
-              <option value="ALL">All Scopes</option>
-              <option value="GLOBAL">Global Enterprise</option>
-              <option value="PLANT">Plant Specific</option>
-              <option value="DEPARTMENT">Department Specific</option>
-              <option value="LOCATION_TYPE">Location Type</option>
-              <option value="SPECIFIC_LOCATION">Specific Area</option>
-            </select>
-
-            {/* Status Filter */}
-            <select
-              value={selectedStatus}
-              onChange={(e) => setSelectedStatus(e.target.value)}
-              className="form-select"
-              style={{ width: '150px' }}
-            >
-              <option value="ALL">All Statuses</option>
-              <option value="PUBLISHED">Published</option>
-              <option value="DRAFT">Draft Mode</option>
-              <option value="ARCHIVED">Archived</option>
-            </select>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <button
-              onClick={() => setViewMode('grid')}
-              style={{
-                padding: '7px 10px',
-                borderRadius: 'var(--radius-sm)',
-                border: '1px solid var(--border-subtle)',
-                background: viewMode === 'grid' ? 'var(--color-primary-light)' : 'var(--bg-surface)',
-                color: viewMode === 'grid' ? 'var(--color-primary)' : 'var(--text-secondary)',
-                cursor: 'pointer',
-              }}
-              title="Grid Cards View"
-            >
-              <LayoutGrid size={16} />
-            </button>
-            <button
-              onClick={() => setViewMode('table')}
-              style={{
-                padding: '7px 10px',
-                borderRadius: 'var(--radius-sm)',
-                border: '1px solid var(--border-subtle)',
-                background: viewMode === 'table' ? 'var(--color-primary-light)' : 'var(--bg-surface)',
-                color: viewMode === 'table' ? 'var(--color-primary)' : 'var(--text-secondary)',
-                cursor: 'pointer',
-              }}
-              title="Detailed Table View"
-            >
-              <List size={16} />
-            </button>
-          </div>
+          ))}
         </div>
-      </Card>
-
-      {/* Main Content Area */}
-      {loading ? (
-        <div style={{ padding: '60px', textAlign: 'center', color: 'var(--text-secondary)' }}>
-          <RefreshCw size={28} className="spin-animation" style={{ marginBottom: '12px' }} />
-          <div>Loading visual standards repository...</div>
+        <SearchInput label="Search standards" placeholder="Search by code or title" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <select aria-label="Scope" value={selectedScope} onChange={(e) => setSelectedScope(e.target.value)} className="form-select">
+          <option value="ALL">All scopes</option>
+          {EDITABLE_SCOPES.map((s) => <option key={s} value={s}>{SCOPE_LABELS[s]}</option>)}
+        </select>
+        <select aria-label="Status" value={selectedStatus} onChange={(e) => setSelectedStatus(e.target.value)} className="form-select">
+          <option value="ALL">All statuses</option>
+          {(Object.keys(STANDARD_STATUS_LABELS) as Standard['status'][]).map((s) => <option key={s} value={s}>{STANDARD_STATUS_LABELS[s]}</option>)}
+        </select>
+        {filtersActive && <Button variant="ghost" onClick={clearFilters} style={{ flex: '0 0 auto' }}>Clear filters</Button>}
+        <div role="group" aria-label="View" style={{ display: 'flex', alignItems: 'center', gap: '4px', flex: '0 0 auto' }}>
+          {([
+            { id: 'grid', label: 'Cards', icon: <LayoutGrid size={16} /> },
+            { id: 'table', label: 'Table', icon: <List size={16} /> },
+          ] as const).map((v) => (
+            <button
+              key={v.id}
+              type="button"
+              aria-pressed={viewMode === v.id}
+              aria-label={`${v.label} view`}
+              title={`${v.label} view`}
+              onClick={() => setViewMode(v.id)}
+              className={`pillar-tab-pill${viewMode === v.id ? ' active' : ''}`}
+              style={{ width: '40px', height: '40px', padding: 0, justifyContent: 'center' }}
+            >
+              {v.icon}
+            </button>
+          ))}
         </div>
+      </FilterBar>
+
+      {loading && standards.length === 0 ? (
+        <Card><LoadingState label="Loading standards…" /></Card>
+      ) : loadError ? (
+        <Card><ErrorState message={loadError} onRetry={loadData} /></Card>
       ) : standards.length === 0 ? (
         <Card>
-          <div style={{ textAlign: 'center', padding: '60px 20px' }}>
-            <div
-              style={{
-                width: '64px',
-                height: '64px',
-                borderRadius: 'var(--radius-full)',
-                background: 'var(--color-primary-light)',
-                color: 'var(--color-primary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                margin: '0 auto 16px auto',
-              }}
-            >
-              <BookOpen size={30} />
-            </div>
-            <h3 style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '6px' }}>
-              No 5S Standards Found
-            </h3>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', maxWidth: '440px', margin: '0 auto 20px auto' }}>
-              {search || selectedCategory !== 'ALL'
-                ? 'No visual standards match your active search or pillar filters.'
-                : 'Establish baseline visual standards with standard-vs-defect photo pairs and operating rules.'}
-            </p>
-            <Button
-              variant="primary"
-              icon={<Plus size={16} />}
-              onClick={() => setCreateDrawerOpen(true)}
-            >
-              Author First 5S Standard
-            </Button>
-          </div>
+          <EmptyState
+            icon={<BookOpen size={28} />}
+            title={filtersActive ? 'No standards match these filters' : 'No standards yet'}
+            description={filtersActive ? 'Change or clear the filters.' : 'Write down the agreed condition of an area: rules, a standard photo and a defect example.'}
+            action={
+              filtersActive ? (
+                <Button size="sm" variant="secondary" onClick={clearFilters}>Clear filters</Button>
+              ) : canAuthor ? (
+                <Button size="sm" icon={<Plus size={16} />} onClick={openCreate}>New standard</Button>
+              ) : undefined
+            }
+          />
         </Card>
       ) : viewMode === 'grid' ? (
-        /* GRID VIEW */
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '20px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(340px, 100%), 1fr))', gap: '16px' }}>
           {standards.map((std) => {
-            const currentRev = std.currentRevision || std.revisions?.[0];
-            const stdPhoto = currentRev?.referencePhotos?.find((p: any) => p.type === 'STANDARD_CONDITION')?.photoUrl || FIVE_S_IMAGES.standards.shadowBoardStandard;
-            const curPhoto = currentRev?.referencePhotos?.find((p: any) => p.type === 'CURRENT_CONDITION')?.photoUrl || FIVE_S_IMAGES.standards.shadowBoardClutter;
-            const rulesCount = currentRev?.rules?.length || 0;
-
+            const rev = displayedRevision(std);
+            const stdPhoto = photoOf(rev, 'STANDARD_CONDITION');
+            const defectPhoto = photoOf(rev, 'CURRENT_CONDITION');
+            const rulesCount = rev?.rules?.length ?? 0;
             return (
-              <div
-                key={std.id}
-                className="card"
-                style={{
-                  padding: 0,
-                  overflow: 'hidden',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  transition: 'transform 0.15s ease, box-shadow 0.15s ease',
-                  cursor: 'pointer',
-                }}
-                onClick={() => navigate(`/standards/${std.id}`)}
-              >
-                {/* Header Strip */}
+              <Link key={std.id} to={`/standards/${std.id}`} className="card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', color: 'inherit', textDecoration: 'none', minWidth: 0 }}>
                 <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-surface)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span className="code-tag">{std.code}</span>
-                      {getPillarBadge(std.category)}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                      <span className="code-tag" style={{ whiteSpace: 'nowrap' }}>{std.code}</span>
+                      <Badge variant={pillarVariant(std.category)}>{pillarLabel(std.category)}</Badge>
                     </div>
-                    <Badge variant={std.status === 'PUBLISHED' ? 'success' : 'warning'}>
-                      Rev {currentRev?.revisionNumber || '1.0'}
-                    </Badge>
+                    <RevisionBadge std={std} />
                   </div>
-
-                  <h3 style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', margin: '4px 0 2px 0', lineHeight: 1.4 }}>
-                    {std.title}
-                  </h3>
-                  <div style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
-                    Scope: <strong>{std.scopeType}</strong> {std.targetOrgNode ? `(${std.targetOrgNode.name})` : ''}
-                  </div>
+                  <h2 style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text-primary)', margin: '4px 0 2px 0', lineHeight: 1.4 }}>{std.title}</h2>
+                  <div style={{ fontSize: '12.5px', color: 'var(--text-tertiary)' }}>{scopeTargetText(std)}</div>
                 </div>
 
-                {/* Paired Photo Thumbnail Strip */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', height: '140px', background: 'var(--bg-surface-subtle)', position: 'relative' }}>
-                  <ImageWithFallback
-                    src={stdPhoto}
-                    alt="Standard Condition"
-                    badgeText="STANDARD"
-                    badgeVariant="success"
-                    enableLightbox={false}
-                    containerStyle={{ borderRadius: 0, border: 'none', borderRight: '1px solid var(--border-subtle)' }}
-                  />
-                  <ImageWithFallback
-                    src={curPhoto}
-                    alt="Current Condition (Defect)"
-                    badgeText="DEFECT"
-                    badgeVariant="danger"
-                    enableLightbox={false}
-                    containerStyle={{ borderRadius: 0, border: 'none' }}
-                  />
+                <div className="keep-cols" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', height: '140px', background: 'var(--bg-surface-subtle)' }}>
+                  <ImageWithFallback src={stdPhoto?.photoUrl} alt={`Standard condition of ${std.title}`} badgeText={stdPhoto ? 'Standard' : undefined} badgeVariant="success" enableLightbox={false} containerStyle={{ borderRadius: 0, border: 'none', borderRight: '1px solid var(--border-subtle)' }} />
+                  <ImageWithFallback src={defectPhoto?.photoUrl} alt={`Defect example for ${std.title}`} badgeText={defectPhoto ? 'Defect' : undefined} badgeVariant="danger" enableLightbox={false} containerStyle={{ borderRadius: 0, border: 'none' }} />
                 </div>
 
-                {/* Body Details */}
                 <div style={{ padding: '16px 20px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                    {currentRev?.description || 'Operational 5S visual guideline standard.'}
+                  <p style={{ fontSize: '13px', color: rev?.description ? 'var(--text-secondary)' : 'var(--text-tertiary)', margin: '0 0 12px 0', lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                    {rev?.description || 'No description'}
                   </p>
-
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-tertiary)', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                      <span><strong>{rulesCount}</strong> Check Rules</span>
-                      {currentRev?.sopDocumentUrl && <span>• <strong>SOP</strong> Attached</span>}
-                      {currentRev?.videoUrl && <span>• <strong>Video</strong> Guide</span>}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', fontSize: '12.5px', color: 'var(--text-tertiary)', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                      <span><strong>{rulesCount}</strong> {rulesCount === 1 ? 'rule' : 'rules'}</span>
+                      {rev?.sopDocumentUrl && <span>• SOP</span>}
+                      {rev?.videoUrl && <span>• Video</span>}
                     </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', color: 'var(--color-primary)', fontWeight: 600 }}>
-                      <span>Inspect</span>
-                      <ChevronRight size={14} />
-                    </div>
+                    <span style={{ display: 'flex', alignItems: 'center', color: 'var(--color-primary)', fontWeight: 600 }}>
+                      Open <ChevronRight size={14} aria-hidden="true" />
+                    </span>
                   </div>
                 </div>
-              </div>
+              </Link>
             );
           })}
         </div>
       ) : (
-        /* TABLE VIEW */
         <Card noPadding>
           <div className="enterprise-table-container">
             <table className="enterprise-table">
               <thead>
                 <tr>
-                  <th>Standard Code</th>
-                  <th>Title & Description</th>
-                  <th>5S Pillar</th>
+                  <th>Code</th>
+                  <th>Title</th>
+                  <th>Pillar</th>
                   <th>Scope</th>
-                  <th>Active Revision</th>
-                  <th>Rules</th>
+                  <th>Status</th>
+                  <th>Revision</th>
+                  <th className="num">Rules</th>
                   <th>Media</th>
-                  <th style={{ textAlign: 'right' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {standards.map((std) => {
-                  const currentRev = std.currentRevision || std.revisions?.[0];
+                  const rev = displayedRevision(std);
                   return (
-                    <tr
-                      key={std.id}
-                      onClick={() => navigate(`/standards/${std.id}`)}
-                      style={{ cursor: 'pointer' }}
-                    >
-                      <td>
-                        <span className="code-tag">{std.code}</span>
+                    <tr key={std.id}>
+                      <td style={{ whiteSpace: 'nowrap' }}><span className="code-tag">{std.code}</span></td>
+                      <td style={{ minWidth: '200px' }}>
+                        <Link to={`/standards/${std.id}`} style={{ fontWeight: 600, color: 'var(--color-primary)' }}>{std.title}</Link>
+                        {rev?.description && (
+                          <div style={{ fontSize: '12.5px', color: 'var(--text-secondary)', marginTop: '2px', maxWidth: '360px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{rev.description}</div>
+                        )}
                       </td>
+                      <td><Badge variant={pillarVariant(std.category)}>{pillarLabel(std.category)}</Badge></td>
+                      <td style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{scopeLabel(std.scopeType)}</td>
+                      <td><Badge variant={standardStatusVariant(std.status)}>{STANDARD_STATUS_LABELS[std.status] ?? std.status}</Badge></td>
+                      <td><RevisionBadge std={std} /></td>
+                      <td className="num">{rev?.rules?.length ?? 0}</td>
                       <td>
-                        <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '13px' }}>
-                          {std.title}
+                        <div style={{ display: 'flex', gap: '8px', color: 'var(--text-secondary)' }}>
+                          {rev?.referencePhotos?.length ? <span title="Photos"><ImageIcon size={16} aria-hidden="true" /><span className="sr-only">Has photos</span></span> : null}
+                          {rev?.sopDocumentUrl ? <span title="SOP"><FileText size={16} aria-hidden="true" /><span className="sr-only">Has SOP</span></span> : null}
+                          {rev?.videoUrl ? <span title="Video"><Video size={16} aria-hidden="true" /><span className="sr-only">Has video</span></span> : null}
+                          {!rev?.referencePhotos?.length && !rev?.sopDocumentUrl && !rev?.videoUrl && <span style={{ color: 'var(--text-tertiary)' }}>—</span>}
                         </div>
-                        <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px', maxWidth: '360px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {currentRev?.description || 'Visual standard specification'}
-                        </div>
-                      </td>
-                      <td>{getPillarBadge(std.category)}</td>
-                      <td>
-                        <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                          {std.scopeType}
-                        </span>
-                      </td>
-                      <td>
-                        <Badge variant="success">
-                          v{currentRev?.revisionNumber || '1.0'}
-                        </Badge>
-                      </td>
-                      <td>
-                        <span style={{ fontSize: '12px', fontWeight: 600 }}>
-                          {currentRev?.rules?.length || 0}
-                        </span>
-                      </td>
-                      <td>
-                        <div style={{ display: 'flex', gap: '6px' }}>
-                          {currentRev?.referencePhotos?.length ? <span title="Paired Photos"><ImageIcon size={14} color="var(--color-primary)" /></span> : null}
-                          {currentRev?.sopDocumentUrl ? <span title="SOP Attached"><FileText size={14} color="var(--color-success)" /></span> : null}
-                          {currentRev?.videoUrl ? <span title="Video Available"><Video size={14} color="var(--color-warning)" /></span> : null}
-                        </div>
-                      </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            navigate(`/standards/${std.id}`);
-                          }}
-                        >
-                          View
-                        </Button>
                       </td>
                     </tr>
                   );
@@ -705,226 +394,92 @@ export const StandardsPage: React.FC = () => {
         </Card>
       )}
 
-      {/* Author New Standard Modal */}
       <Modal
-        isOpen={createDrawerOpen}
-        onClose={() => setCreateDrawerOpen(false)}
-        title="Author New 5S Visual Standard"
-        subtitle="Define golden-standard criteria, compliance statements, and side-by-side photos"
+        isOpen={createOpen}
+        onClose={() => !saving && setCreateOpen(false)}
+        title="New standard"
+        subtitle="The standard is saved as a draft. It is published when a standard approver approves it."
         maxWidth="680px"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setCreateOpen(false)} disabled={saving}>Cancel</Button>
+            <Button variant="primary" type="submit" form="standard-create-form" loading={saving}>Save for approval</Button>
+          </>
+        }
       >
-        <form onSubmit={handleCreateSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          {/* Metadata Section */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+        <form id="standard-create-form" onSubmit={handleCreateSubmit} noValidate style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+          <div className="grid-auto" style={{ ['--min' as string]: '220px', gap: '14px' } as React.CSSProperties}>
             <div className="form-group">
-              <label className="form-label">Standard Code *</label>
-              <input
-                type="text"
-                placeholder="e.g. STD-5S-MACH-01"
-                value={formData.code}
-                onChange={(e) => setFormData({ ...formData, code: e.target.value })}
-                className="form-control"
-                required
-              />
+              <label className="form-label" htmlFor="std-code">Code <span className="required">*</span></label>
+              <input id="std-code" type="text" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} className="form-input" aria-invalid={!!errors.code} aria-describedby={errors.code ? 'std-code-error' : undefined} />
+              {errors.code && <div id="std-code-error" className="form-error" style={fieldErrorStyle}>{errors.code}</div>}
             </div>
-
             <div className="form-group">
-              <label className="form-label">5S Pillar Category *</label>
-              <select
-                value={formData.category}
-                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                className="form-control"
-                required
-              >
-                <option value="S1_SORT">1S - Sort</option>
-                <option value="S2_SET_IN_ORDER">2S - Set in Order</option>
-                <option value="S3_SHINE">3S - Shine</option>
-                <option value="S4_STANDARDIZE">4S - Standardize</option>
-                <option value="S5_SUSTAIN">5S - Sustain</option>
-                <option value="S6_SAFETY">6S - Safety</option>
+              <label className="form-label" htmlFor="std-category">Pillar <span className="required">*</span></label>
+              <select id="std-category" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="form-select">
+                {PILLARS.map((p) => <option key={p} value={p}>{pillarLabel(p)}</option>)}
               </select>
             </div>
           </div>
 
           <div className="form-group">
-            <label className="form-label">Standard Title *</label>
-            <input
-              type="text"
-              placeholder="e.g. CNC Machine Tooling & Shadow Board Demarcation Standard"
-              value={formData.title}
-              onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-              className="form-control"
-              required
+            <label className="form-label" htmlFor="std-title">Title <span className="required">*</span></label>
+            <input id="std-title" type="text" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className="form-input" aria-invalid={!!errors.title} aria-describedby={errors.title ? 'std-title-error' : undefined} />
+            {errors.title && <div id="std-title-error" className="form-error" style={fieldErrorStyle}>{errors.title}</div>}
+          </div>
+
+          <div className="grid-auto" style={{ ['--min' as string]: '220px', gap: '14px' } as React.CSSProperties}>
+            <div className="form-group">
+              <label className="form-label" htmlFor="std-scope">Applies to</label>
+              <select id="std-scope" value={form.scopeType} onChange={(e) => setForm({ ...form, scopeType: e.target.value, targetOrgNodeId: '', targetLocationId: '' })} className="form-select">
+                {EDITABLE_SCOPES.map((s) => <option key={s} value={s}>{SCOPE_LABELS[s]}</option>)}
+              </select>
+            </div>
+            <ScopeTargetField
+              id="std-target"
+              scope={form.scopeType}
+              orgNodes={orgNodes}
+              locations={locations}
+              targetOrgNodeId={form.targetOrgNodeId}
+              targetLocationId={form.targetLocationId}
+              onChange={(t) => setForm({ ...form, ...t })}
+              error={errors.target}
             />
           </div>
 
           <div className="form-group">
-            <label className="form-label">Standard Scope & Enforcement</label>
-            <select
-              value={formData.scopeType}
-              onChange={(e) => setFormData({ ...formData, scopeType: e.target.value })}
-              className="form-control"
-            >
-              <option value="GLOBAL">Global Enterprise (All Plants & Units)</option>
-              <option value="PLANT">Plant Specific</option>
-              <option value="DEPARTMENT">Department Specific</option>
-              <option value="SPECIFIC_LOCATION">Specific Area Only</option>
-            </select>
+            <label className="form-label" htmlFor="std-description">Description <span className="required">*</span></label>
+            <textarea id="std-description" rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="form-textarea" aria-invalid={!!errors.description} aria-describedby={errors.description ? 'std-description-error' : undefined} />
+            {errors.description && <div id="std-description-error" className="form-error" style={fieldErrorStyle}>{errors.description}</div>}
           </div>
 
-          <div className="form-group">
-            <label className="form-label">Standard Purpose & Qualitative Description *</label>
-            <textarea
-              rows={3}
-              placeholder="Describe the target visual state, cleanliness threshold, and operational sustainment rules..."
-              value={formData.description}
-              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              className="form-control"
-              required
-            />
-          </div>
+          <RulesEditor idPrefix="std-create" rules={form.rules} onChange={(rules) => setForm({ ...form, rules })} error={errors.rules} />
 
-          {/* Rules Configuration */}
-          <div className="form-group">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <label className="form-label" style={{ margin: 0 }}>Specific Compliance Check Statements *</label>
-              <Button size="sm" variant="secondary" icon={<Plus size={13} />} onClick={handleAddRule}>
-                Add Rule
-              </Button>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {formData.rules.map((rule, idx) => (
-                <div key={idx} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                  <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-tertiary)', width: '20px' }}>
-                    {idx + 1}.
-                  </span>
-                  <input
-                    type="text"
-                    value={rule}
-                    onChange={(e) => handleRuleChange(idx, e.target.value)}
-                    placeholder={`Rule statement ${idx + 1}...`}
-                    className="form-control"
-                    required
-                  />
-                  {formData.rules.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveRule(idx)}
-                      style={{ background: 'none', border: 'none', color: 'var(--color-danger)', cursor: 'pointer', padding: '4px' }}
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Photo Pair Configuration */}
           <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: '16px' }}>
-            <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '10px' }}>
-              Side-by-Side Visual Photo Pair
+            <div className="form-section-title" style={{ margin: '0 0 12px', borderBottom: 'none', paddingBottom: 0 }}>Photos (optional, several per kind)</div>
+            <div className="grid-auto" style={{ ['--min' as string]: '220px', gap: '14px', alignItems: 'start' } as React.CSSProperties}>
+              <PhotoListField id="std-photo-standard" label="Standard condition" tone="success" values={form.standardPhotos} onChange={(v) => setForm((f) => ({ ...f, standardPhotos: v }))} onError={(m) => setErrors((x) => ({ ...x, photo: m ?? undefined }))} />
+              <PhotoListField id="std-photo-defect" label="Defect example" tone="danger" values={form.defectPhotos} onChange={(v) => setForm((f) => ({ ...f, defectPhotos: v }))} onError={(m) => setErrors((x) => ({ ...x, photo: m ?? undefined }))} />
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
-              <div className="form-group">
-                <label className="form-label" style={{ color: 'var(--color-success)' }}>
-                  ✓ Standard Condition Photo (Compliant)
-                </label>
-                <input
-                  type="text"
-                  placeholder="https://.../standard-condition.jpg"
-                  value={formData.standardPhotoUrl}
-                  onChange={(e) => setFormData({ ...formData, standardPhotoUrl: e.target.value })}
-                  className="form-control"
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label" style={{ color: 'var(--color-danger)' }}>
-                  ✗ Defect Example Photo (Non-compliant)
-                </label>
-                <input
-                  type="text"
-                  placeholder="https://.../defect-condition.jpg"
-                  value={formData.currentPhotoUrl}
-                  onChange={(e) => setFormData({ ...formData, currentPhotoUrl: e.target.value })}
-                  className="form-control"
-                />
-              </div>
-            </div>
+            {errors.photo && <div role="alert" className="form-error" style={fieldErrorStyle}>{errors.photo}</div>}
           </div>
 
-          {/* Media Links */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+          <div className="grid-auto" style={{ ['--min' as string]: '220px', gap: '14px' } as React.CSSProperties}>
             <div className="form-group">
-              <label className="form-label">Attached SOP PDF Document Link</label>
-              <input
-                type="text"
-                placeholder="https://docs.corp.com/sop-01.pdf"
-                value={formData.sopDocumentUrl}
-                onChange={(e) => setFormData({ ...formData, sopDocumentUrl: e.target.value })}
-                className="form-control"
-              />
+              <label className="form-label" htmlFor="std-sop">SOP document link</label>
+              <input id="std-sop" type="url" placeholder="https://" value={form.sopDocumentUrl} onChange={(e) => setForm({ ...form, sopDocumentUrl: e.target.value })} className="form-input" aria-invalid={!!errors.sop} aria-describedby={errors.sop ? 'std-sop-error' : undefined} />
+              {errors.sop && <div id="std-sop-error" className="form-error" style={fieldErrorStyle}>{errors.sop}</div>}
             </div>
-
             <div className="form-group">
-              <label className="form-label">Video Work Instruction URL</label>
-              <input
-                type="text"
-                placeholder="https://youtube.com/watch?v=..."
-                value={formData.videoUrl}
-                onChange={(e) => setFormData({ ...formData, videoUrl: e.target.value })}
-                className="form-control"
-              />
+              <label className="form-label" htmlFor="std-video">Video link</label>
+              <input id="std-video" type="url" placeholder="https://" value={form.videoUrl} onChange={(e) => setForm({ ...form, videoUrl: e.target.value })} className="form-input" aria-invalid={!!errors.video} aria-describedby={errors.video ? 'std-video-error' : undefined} />
+              {errors.video && <div id="std-video-error" className="form-error" style={fieldErrorStyle}>{errors.video}</div>}
             </div>
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '12px' }}>
-            <Button variant="secondary" onClick={() => setCreateDrawerOpen(false)}>
-              Cancel
-            </Button>
-            <Button variant="primary" type="submit" loading={saving} icon={<Sparkles size={15} />}>
-              Publish Visual Standard
-            </Button>
-          </div>
+          {errors.form && <p role="alert" className="form-error" style={{ margin: 0 }}>{errors.form}</p>}
         </form>
       </Modal>
-
-      {/* Delete Confirmation Modal */}
-      {deleteModalStandard && (
-        <Modal
-          isOpen={true}
-          onClose={() => setDeleteModalStandard(null)}
-          title="Delete 5S Standard"
-        >
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <div style={{ padding: '10px', borderRadius: 'var(--radius-full)', background: 'rgba(220, 38, 38, 0.1)', color: 'var(--color-danger)' }}>
-                <AlertTriangle size={24} />
-              </div>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: '15px', color: 'var(--text-primary)' }}>
-                  Are you sure you want to delete this standard?
-                </div>
-                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                  {deleteModalStandard.code} — {deleteModalStandard.title}
-                </div>
-              </div>
-            </div>
-            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-              This will remove the standard definition from the library. Historical audit answers referencing previous published snapshots will remain preserved.
-            </p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-              <Button variant="secondary" onClick={() => setDeleteModalStandard(null)}>
-                Cancel
-              </Button>
-              <Button variant="danger" icon={<Trash2 size={15} />} onClick={handleDeleteConfirm}>
-                Delete Standard
-              </Button>
-            </div>
-          </div>
-        </Modal>
-      )}
     </div>
   );
 };

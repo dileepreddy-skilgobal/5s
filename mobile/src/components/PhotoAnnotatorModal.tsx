@@ -4,51 +4,182 @@ import {
   Text,
   Modal,
   StyleSheet,
-  TouchableOpacity,
-  TextInput,
+  Pressable,
   Image,
   ScrollView,
   Alert,
-  Platform,
   LayoutChangeEvent,
   GestureResponderEvent,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { COLORS, SHADOWS } from '../constants/theme';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { COLORS, RADIUS, SPACING, TOUCH_TARGET, TYPE } from '../constants/theme';
 import { PhotoAnnotation } from '../types';
 import { useResponsive } from '../hooks/useResponsive';
+import { clampPct, DEFAULT_BOX_PCT, DEFAULT_CIRCLE_RADIUS_PCT, roundPct, toPercentAnnotations } from '../services/annotations';
+import { Button, TextField } from './ui';
 
 interface PhotoAnnotatorModalProps {
   visible: boolean;
   photoUri: string | null;
   onClose: () => void;
-  onSave: (annotations: PhotoAnnotation[], updatedPhotoUri?: string) => void;
+  /**
+   * Called with the shapes and, when the photo was replaced inside the annotator, the new photo's URI and
+   * pixel size (so the caller can downscale it correctly).
+   */
+  onSave: (annotations: PhotoAnnotation[], updatedPhotoUri?: string, updatedPhotoSize?: { width: number; height: number }) => void;
   initialAnnotations?: PhotoAnnotation[];
   title?: string;
 }
 
+type Tool = PhotoAnnotation['type'];
+
+/** Markup colours are drawn onto the photo itself, so they are fixed high-contrast colours, not theme tokens. */
 const COLOR_PALETTE = [
-  { label: 'Critical Red', color: '#EF4444' },
-  { label: 'Warning Amber', color: '#F59E0B' },
-  { label: 'Caution Yellow', color: '#EAB308' },
-  { label: 'Good Practice Green', color: '#10B981' },
-  { label: 'Highlight Blue', color: '#2563EB' },
-  { label: 'Annotation White', color: '#FFFFFF' },
+  { label: 'Red', color: '#EF4444' },
+  { label: 'Amber', color: '#F59E0B' },
+  { label: 'Yellow', color: '#EAB308' },
+  { label: 'Green', color: '#10B981' },
+  { label: 'Blue', color: '#2563EB' },
+  { label: 'White', color: '#FFFFFF' },
 ];
 
-const PRESET_TAGS = [
-  'Non-Conformance',
-  'Oil Leak',
-  'Unsorted Item',
-  'Missing Label',
-  'Safety Hazard',
-  'Clean Standard',
+const PRESET_TAGS = ['Non-conformance', 'Oil leak', 'Unsorted item', 'Missing label', 'Safety hazard', 'Clean standard'];
+
+const TOOLS: { key: Tool; label: string; icon: React.ComponentProps<typeof Ionicons>['name'] }[] = [
+  { key: 'circle', label: 'Circle', icon: 'ellipse-outline' },
+  { key: 'arrow', label: 'Arrow', icon: 'arrow-forward' },
+  { key: 'box', label: 'Box', icon: 'square-outline' },
+  { key: 'text', label: 'Label', icon: 'text' },
 ];
 
-// High-resolution realistic shopfloor backdrop fallback if no photo is taken yet
-const DEFAULT_SHOPFLOOR_SAMPLE =
-  'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?w=800&auto=format&fit=crop&q=80';
+const TOOL_NAMES: Record<Tool, string> = { circle: 'Circle', arrow: 'Arrow', box: 'Box', text: 'Label' };
+
+/** Fallback aspect ratio (width / height) until the photo's real size is known. */
+const DEFAULT_ASPECT = 4 / 3;
+
+/** A straight line between two points (px), drawn as a rotated bar. */
+const Segment: React.FC<{ x1: number; y1: number; x2: number; y2: number; thickness: number; color: string }> = ({
+  x1,
+  y1,
+  x2,
+  y2,
+  thickness,
+  color,
+}) => {
+  const length = Math.hypot(x2 - x1, y2 - y1);
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  return (
+    <View
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        left: (x1 + x2) / 2 - length / 2,
+        top: (y1 + y2) / 2 - thickness / 2,
+        width: length,
+        height: thickness,
+        borderRadius: thickness / 2,
+        backgroundColor: color,
+        transform: [{ rotate: `${angle}rad` }],
+      }}
+    />
+  );
+};
+
+/**
+ * Draws percent-based annotations over a photo rendered at `width` x `height` px with the photo's own
+ * aspect ratio — the same geometry, stroke and label placement the server uses when it burns the
+ * shapes into the image, so the preview matches the stored annotated photo.
+ */
+export const AnnotationLayer: React.FC<{ annotations: PhotoAnnotation[]; width: number; height: number }> = ({
+  annotations,
+  width: W,
+  height: H,
+}) => {
+  const px = (p?: number) => ((p ?? 0) / 100) * W;
+  const py = (p?: number) => ((p ?? 0) / 100) * H;
+  const stroke = Math.max(2, W * 0.006);
+  const font = Math.max(8, W * 0.03);
+
+  const label = (x: number, y: number, text: string, color: string, key: string) => (
+    <View
+      key={key}
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        left: Math.max(0, Math.min(x, W - font * 2)),
+        top: Math.max(0, Math.min(y, H - font * 1.5)),
+        height: font * 1.5,
+        paddingHorizontal: font * 0.4,
+        borderRadius: (font * 1.5) / 4,
+        backgroundColor: color,
+        opacity: 0.9,
+        justifyContent: 'center',
+        maxWidth: W,
+      }}
+    >
+      <Text style={{ color: '#FFFFFF', fontSize: font, fontWeight: '700' }} numberOfLines={1}>
+        {text}
+      </Text>
+    </View>
+  );
+
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+      {toPercentAnnotations(annotations).map((a) => {
+        const color = a.color || '#EF4444';
+        const text = a.text?.trim();
+        if (a.type === 'box') {
+          const x = px(a.x);
+          const y = py(a.y);
+          const w = px(a.width ?? DEFAULT_BOX_PCT.width);
+          const h = py(a.height ?? DEFAULT_BOX_PCT.height);
+          return (
+            <React.Fragment key={a.id}>
+              <View style={{ position: 'absolute', left: x, top: y, width: w, height: h, borderWidth: stroke, borderColor: color }} />
+              {text ? label(x, y - font * 1.6, text, color, `${a.id}-l`) : null}
+            </React.Fragment>
+          );
+        }
+        if (a.type === 'circle') {
+          const cx = px(a.x);
+          const cy = py(a.y);
+          const r = px(a.radius ?? DEFAULT_CIRCLE_RADIUS_PCT);
+          return (
+            <React.Fragment key={a.id}>
+              <View
+                style={{ position: 'absolute', left: cx - r, top: cy - r, width: r * 2, height: r * 2, borderRadius: r, borderWidth: stroke, borderColor: color }}
+              />
+              {text ? label(cx - r, cy - r - font * 1.6, text, color, `${a.id}-l`) : null}
+            </React.Fragment>
+          );
+        }
+        if (a.type === 'arrow') {
+          const x1 = px(a.fromX ?? a.x);
+          const y1 = py(a.fromY ?? a.y);
+          const x2 = px(a.toX ?? a.x);
+          const y2 = py(a.toY ?? a.y);
+          const angle = Math.atan2(y2 - y1, x2 - x1);
+          const head = stroke * 5;
+          const hx1 = x2 - head * Math.cos(angle - Math.PI / 7);
+          const hy1 = y2 - head * Math.sin(angle - Math.PI / 7);
+          const hx2 = x2 - head * Math.cos(angle + Math.PI / 7);
+          const hy2 = y2 - head * Math.sin(angle + Math.PI / 7);
+          return (
+            <React.Fragment key={a.id}>
+              <Segment x1={x1} y1={y1} x2={x2} y2={y2} thickness={stroke} color={color} />
+              <Segment x1={x2} y1={y2} x2={hx1} y2={hy1} thickness={stroke} color={color} />
+              <Segment x1={x2} y1={y2} x2={hx2} y2={hy2} thickness={stroke} color={color} />
+              {text ? label(x1, y1 + font * 0.4, text, color, `${a.id}-l`) : null}
+            </React.Fragment>
+          );
+        }
+        return text ? label(px(a.x), py(a.y), text, color, a.id) : null;
+      })}
+    </View>
+  );
+};
 
 export const PhotoAnnotatorModal: React.FC<PhotoAnnotatorModalProps> = ({
   visible,
@@ -56,18 +187,29 @@ export const PhotoAnnotatorModal: React.FC<PhotoAnnotatorModalProps> = ({
   onClose,
   onSave,
   initialAnnotations = [],
-  title = 'Photo Evidence & Defect Canvas',
+  title = 'Mark up photo',
 }) => {
   const { isTablet } = useResponsive();
   const [currentPhotoUri, setCurrentPhotoUri] = useState<string | null>(photoUri);
+  /** Pixel size of a photo taken or picked inside the annotator (replacing the one passed in). */
+  const [replacedSize, setReplacedSize] = useState<{ width: number; height: number } | undefined>(undefined);
   const [annotations, setAnnotations] = useState<PhotoAnnotation[]>(initialAnnotations);
-  const [activeTool, setActiveTool] = useState<'circle' | 'arrow' | 'box' | 'text'>('circle');
+  const [activeTool, setActiveTool] = useState<Tool>('circle');
   const [activeColor, setActiveColor] = useState<string>('#EF4444');
-  const [annotationText, setAnnotationText] = useState<string>('Non-Conformance');
-  const [canvasSize, setCanvasSize] = useState<{ width: number; height: number }>({
-    width: 340,
-    height: isTablet ? 380 : 240,
-  });
+  const [annotationText, setAnnotationText] = useState<string>('Non-conformance');
+  // The canvas always has the photo's aspect ratio so percent geometry maps 1:1 onto the photo
+  const [photoAspect, setPhotoAspect] = useState<number>(DEFAULT_ASPECT);
+  const [containerWidth, setContainerWidth] = useState<number>(340);
+  const maxCanvasHeight = isTablet ? 520 : 420;
+  const canvasSize = (() => {
+    let width = Math.max(containerWidth, 100);
+    let height = width / photoAspect;
+    if (height > maxCanvasHeight) {
+      height = maxCanvasHeight;
+      width = height * photoAspect;
+    }
+    return { width: Math.round(width), height: Math.round(height) };
+  })();
 
   // Touch drawing state for live drag gestures
   const [touchStart, setTouchStart] = useState<{ x: number; y: number } | null>(null);
@@ -77,27 +219,48 @@ export const PhotoAnnotatorModal: React.FC<PhotoAnnotatorModalProps> = ({
   // Sync photoUri when opened
   useEffect(() => {
     if (visible) {
-      if (photoUri && photoUri !== 'mock-evidence-camera') {
-        setCurrentPhotoUri(photoUri);
-      } else if (!currentPhotoUri) {
-        setCurrentPhotoUri(DEFAULT_SHOPFLOOR_SAMPLE);
-      }
-      setAnnotations(initialAnnotations);
+      if (photoUri) setCurrentPhotoUri(photoUri);
+      setReplacedSize(undefined);
+      setAnnotations(toPercentAnnotations(initialAnnotations));
       setTouchStart(null);
       setTouchCurrent(null);
       setIsDrawing(false);
     }
   }, [visible, photoUri]);
 
+  // Real photo size → canvas aspect ratio
+  useEffect(() => {
+    if (!currentPhotoUri) {
+      setPhotoAspect(DEFAULT_ASPECT);
+      return;
+    }
+    let cancelled = false;
+    Image.getSize(
+      currentPhotoUri,
+      (w, h) => {
+        if (!cancelled && w > 0 && h > 0) setPhotoAspect(w / h);
+      },
+      () => {
+        if (!cancelled) setPhotoAspect(DEFAULT_ASPECT);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [currentPhotoUri]);
+
+  const applyPickedAsset = (asset?: ImagePicker.ImagePickerAsset) => {
+    if (!asset?.uri) return;
+    setCurrentPhotoUri(asset.uri);
+    setReplacedSize(asset.width && asset.height ? { width: asset.width, height: asset.height } : undefined);
+  };
+
   // Launch Mobile Camera to capture live evidence
   const handleLaunchCamera = async () => {
     try {
       const perm = await ImagePicker.requestCameraPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert(
-          'Camera Permission Needed',
-          'Please allow camera access in device settings to take defect photos.'
-        );
+        Alert.alert('Camera access needed', 'Allow camera access in your device settings to take photos.');
         return;
       }
 
@@ -107,12 +270,10 @@ export const PhotoAnnotatorModal: React.FC<PhotoAnnotatorModalProps> = ({
         quality: 0.85,
       });
 
-      if (!result.canceled && result.assets && result.assets[0]?.uri) {
-        setCurrentPhotoUri(result.assets[0].uri);
-      }
+      if (!result.canceled) applyPickedAsset(result.assets?.[0]);
     } catch (err) {
       console.warn('Camera capture error:', err);
-      Alert.alert('Camera Error', 'Could not open camera.');
+      Alert.alert('Camera unavailable', 'The camera could not be opened.');
     }
   };
 
@@ -121,10 +282,7 @@ export const PhotoAnnotatorModal: React.FC<PhotoAnnotatorModalProps> = ({
     try {
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert(
-          'Photo Library Permission Needed',
-          'Please allow photo library access to choose inspection photos.'
-        );
+        Alert.alert('Photo access needed', 'Allow photo library access in your device settings to choose a photo.');
         return;
       }
 
@@ -134,19 +292,17 @@ export const PhotoAnnotatorModal: React.FC<PhotoAnnotatorModalProps> = ({
         quality: 0.85,
       });
 
-      if (!result.canceled && result.assets && result.assets[0]?.uri) {
-        setCurrentPhotoUri(result.assets[0].uri);
-      }
+      if (!result.canceled) applyPickedAsset(result.assets?.[0]);
     } catch (err) {
       console.warn('Gallery pick error:', err);
-      Alert.alert('Gallery Error', 'Could not open photo library.');
+      Alert.alert('Gallery unavailable', 'The photo library could not be opened.');
     }
   };
 
-  const handleCanvasLayout = (e: LayoutChangeEvent) => {
-    const { width, height } = e.nativeEvent.layout;
-    if (width > 0 && height > 0) {
-      setCanvasSize({ width, height });
+  const handleContainerLayout = (e: LayoutChangeEvent) => {
+    const { width } = e.nativeEvent.layout;
+    if (width > 0 && Math.abs(width - containerWidth) > 1) {
+      setContainerWidth(width);
     }
   };
 
@@ -174,85 +330,54 @@ export const PhotoAnnotatorModal: React.FC<PhotoAnnotatorModalProps> = ({
     const endY = touchCurrent ? touchCurrent.y : e.nativeEvent.locationY;
     const dist = Math.hypot(endX - touchStart.x, endY - touchStart.y);
 
-    const safeW = Math.max(canvasSize.width, 100);
-    const safeH = Math.max(canvasSize.height, 100);
+    const safeW = Math.max(canvasSize.width, 1);
+    const safeH = Math.max(canvasSize.height, 1);
+    // All geometry is stored as a percentage of the photo (`unit: 'pct'`); radius is a percentage of the width
+    const pctX = (v: number) => roundPct(clampPct((v / safeW) * 100));
+    const pctY = (v: number) => roundPct(clampPct((v / safeH) * 100));
+    const sx = pctX(touchStart.x);
+    const sy = pctY(touchStart.y);
+    const common = {
+      id: `ann-${Date.now()}`,
+      unit: 'pct' as const,
+      color: activeColor,
+      text: annotationText.trim() || undefined,
+    };
 
     let newAnnotation: PhotoAnnotation;
 
     if (dist < 10) {
-      // Tap placement
-      const xPct = Math.round((touchStart.x / safeW) * 100);
-      const yPct = Math.round((touchStart.y / safeH) * 100);
-      newAnnotation = {
-        id: `ann-${Date.now()}`,
-        type: activeTool,
-        x: Math.min(Math.max(xPct, 5), 95),
-        y: Math.min(Math.max(yPct, 5), 95),
-        color: activeColor,
-        text: annotationText.trim() || undefined,
-      };
-    } else {
-      // Drag placement with dynamic dimensions
+      // Tap placement: default-sized shape centred on the tap
       if (activeTool === 'circle') {
-        const radius = Math.round(dist);
-        const xPct = Math.round((touchStart.x / safeW) * 100);
-        const yPct = Math.round((touchStart.y / safeH) * 100);
-        newAnnotation = {
-          id: `ann-${Date.now()}`,
-          type: 'circle',
-          x: Math.min(Math.max(xPct, 5), 95),
-          y: Math.min(Math.max(yPct, 5), 95),
-          radius: Math.min(radius, 120),
-          color: activeColor,
-          text: annotationText.trim() || undefined,
-        };
+        newAnnotation = { ...common, type: 'circle', x: sx, y: sy, radius: DEFAULT_CIRCLE_RADIUS_PCT };
       } else if (activeTool === 'box') {
-        const minX = Math.min(touchStart.x, endX);
-        const minY = Math.min(touchStart.y, endY);
-        const w = Math.abs(endX - touchStart.x);
-        const h = Math.abs(endY - touchStart.y);
-        const xPct = Math.round((minX / safeW) * 100);
-        const yPct = Math.round((minY / safeH) * 100);
-        newAnnotation = {
-          id: `ann-${Date.now()}`,
-          type: 'box',
-          x: Math.min(Math.max(xPct, 5), 95),
-          y: Math.min(Math.max(yPct, 5), 95),
-          width: Math.round(w),
-          height: Math.round(h),
-          color: activeColor,
-          text: annotationText.trim() || undefined,
-        };
+        const x = roundPct(clampPct(Math.min(sx - DEFAULT_BOX_PCT.width / 2, 100 - DEFAULT_BOX_PCT.width)));
+        const y = roundPct(clampPct(Math.min(sy - DEFAULT_BOX_PCT.height / 2, 100 - DEFAULT_BOX_PCT.height)));
+        newAnnotation = { ...common, type: 'box', x, y, width: DEFAULT_BOX_PCT.width, height: DEFAULT_BOX_PCT.height };
       } else if (activeTool === 'arrow') {
-        const fromXPct = Math.round((touchStart.x / safeW) * 100);
-        const fromYPct = Math.round((touchStart.y / safeH) * 100);
-        const toXPct = Math.round((endX / safeW) * 100);
-        const toYPct = Math.round((endY / safeH) * 100);
-        newAnnotation = {
-          id: `ann-${Date.now()}`,
-          type: 'arrow',
-          x: fromXPct,
-          y: fromYPct,
-          fromX: fromXPct,
-          fromY: fromYPct,
-          toX: toXPct,
-          toY: toYPct,
-          color: activeColor,
-          text: annotationText.trim() || undefined,
-        };
+        // Arrow pointing at the tapped spot from the upper left
+        const fromX = roundPct(clampPct(sx - 12));
+        const fromY = roundPct(clampPct(sy - 12 * (safeW / safeH)));
+        newAnnotation = { ...common, type: 'arrow', x: fromX, y: fromY, fromX, fromY, toX: sx, toY: sy };
       } else {
-        // Text tag
-        const xPct = Math.round((touchStart.x / safeW) * 100);
-        const yPct = Math.round((touchStart.y / safeH) * 100);
-        newAnnotation = {
-          id: `ann-${Date.now()}`,
-          type: 'text',
-          x: Math.min(Math.max(xPct, 5), 95),
-          y: Math.min(Math.max(yPct, 5), 95),
-          color: activeColor,
-          text: annotationText.trim() || undefined,
-        };
+        newAnnotation = { ...common, type: 'text', x: sx, y: sy };
       }
+    } else if (activeTool === 'circle') {
+      // Drag from the centre outwards
+      newAnnotation = { ...common, type: 'circle', x: sx, y: sy, radius: roundPct((dist / safeW) * 100) };
+    } else if (activeTool === 'box') {
+      const x1 = pctX(Math.min(touchStart.x, endX));
+      const y1 = pctY(Math.min(touchStart.y, endY));
+      const x2 = pctX(Math.max(touchStart.x, endX));
+      const y2 = pctY(Math.max(touchStart.y, endY));
+      newAnnotation = { ...common, type: 'box', x: x1, y: y1, width: roundPct(x2 - x1), height: roundPct(y2 - y1) };
+    } else if (activeTool === 'arrow') {
+      const toX = pctX(endX);
+      const toY = pctY(endY);
+      newAnnotation = { ...common, type: 'arrow', x: sx, y: sy, fromX: sx, fromY: sy, toX, toY };
+    } else {
+      // Text tag anchored where the drag started
+      newAnnotation = { ...common, type: 'text', x: sx, y: sy };
     }
 
     setAnnotations((prev) => [...prev, newAnnotation]);
@@ -278,861 +403,376 @@ export const PhotoAnnotatorModal: React.FC<PhotoAnnotatorModalProps> = ({
 
   // Save evidence photo & annotations
   const handleSave = () => {
-    onSave(annotations, currentPhotoUri || undefined);
+    if (!currentPhotoUri) return;
+    const replaced = currentPhotoUri !== photoUri;
+    onSave(annotations, currentPhotoUri, replaced ? replacedSize : undefined);
     onClose();
   };
 
+  const radius = touchStart && touchCurrent ? Math.hypot(touchCurrent.x - touchStart.x, touchCurrent.y - touchStart.y) : 0;
+
   return (
-    <Modal visible={visible} animationType="slide" transparent>
-      <View style={styles.backdrop}>
-        <View style={[styles.sheetContainer, isTablet && styles.tabletSheetContainer]}>
-          {/* Header Bar */}
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom', 'left', 'right']}>
+        <View style={[styles.container, isTablet && styles.tabletContainer]}>
+          {/* Header */}
           <View style={styles.header}>
-            <View style={styles.headerLeft}>
-              <Text style={styles.title}>{title}</Text>
-              <Text style={styles.subtitle}>Tap or drag to highlight 5S defect or standard</Text>
+            <Pressable onPress={onClose} style={styles.iconBtn} accessibilityRole="button" accessibilityLabel="Close without saving">
+              <Ionicons name="close" size={24} color={COLORS.textDark} />
+            </Pressable>
+            <View style={styles.headerText}>
+              <Text style={styles.title} accessibilityRole="header" numberOfLines={1}>
+                {title}
+              </Text>
+              <Text style={styles.subtitle} numberOfLines={2}>
+                Tap or drag on the photo to mark the problem
+              </Text>
             </View>
-            <TouchableOpacity onPress={onClose} style={styles.closeBtn} activeOpacity={0.7}>
-              <Ionicons name="close" size={22} color={COLORS.textDark} />
-            </TouchableOpacity>
           </View>
 
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollBody}>
-            {/* 1. Photo Source Action Bar (Camera & Upload) */}
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollBody} keyboardShouldPersistTaps="handled">
+            {/* Canvas (same aspect ratio as the photo) */}
+            <View style={styles.canvasContainer} onLayout={handleContainerLayout}>
+              {currentPhotoUri ? (
+                <View
+                  onStartShouldSetResponder={() => true}
+                  onMoveShouldSetResponder={() => true}
+                  onResponderGrant={handleTouchStart}
+                  onResponderMove={handleTouchMove}
+                  onResponderRelease={handleTouchEnd}
+                  onResponderTerminate={() => setIsDrawing(false)}
+                  style={[styles.canvasSurface, { width: canvasSize.width, height: canvasSize.height }]}
+                  accessibilityLabel="Photo drawing area"
+                >
+                  {/* Background Photo */}
+                  <Image source={{ uri: currentPhotoUri }} style={styles.canvasImage} resizeMode="stretch" />
+
+                  {/* Rendered Annotations Layer (percent geometry, as burned by the server) */}
+                  <AnnotationLayer annotations={annotations} width={canvasSize.width} height={canvasSize.height} />
+
+                  {/* Live Drawing Preview Ghost */}
+                  {isDrawing && touchStart && touchCurrent && (
+                    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+                      {activeTool === 'circle' && (
+                        <View
+                          style={[
+                            styles.ghost,
+                            {
+                              left: touchStart.x - radius,
+                              top: touchStart.y - radius,
+                              width: radius * 2,
+                              height: radius * 2,
+                              borderRadius: radius,
+                              borderColor: activeColor,
+                            },
+                          ]}
+                        />
+                      )}
+                      {activeTool === 'box' && (
+                        <View
+                          style={[
+                            styles.ghost,
+                            {
+                              left: Math.min(touchStart.x, touchCurrent.x),
+                              top: Math.min(touchStart.y, touchCurrent.y),
+                              width: Math.abs(touchCurrent.x - touchStart.x),
+                              height: Math.abs(touchCurrent.y - touchStart.y),
+                              borderColor: activeColor,
+                            },
+                          ]}
+                        />
+                      )}
+                      {activeTool === 'arrow' && (
+                        <Segment x1={touchStart.x} y1={touchStart.y} x2={touchCurrent.x} y2={touchCurrent.y} thickness={2} color={activeColor} />
+                      )}
+                    </View>
+                  )}
+                </View>
+              ) : (
+                <View style={[styles.canvasEmpty, { width: canvasSize.width, height: canvasSize.height }]}>
+                  <Ionicons name="image-outline" size={28} color={COLORS.textMuted} />
+                  <Text style={styles.canvasEmptyText}>Take or choose a photo to mark it up</Text>
+                </View>
+              )}
+            </View>
+
+            {/* Replace photo */}
             <View style={styles.sourceBar}>
-              <TouchableOpacity
-                style={styles.sourceBtn}
+              <Button
+                label={currentPhotoUri ? 'Retake' : 'Take photo'}
+                icon="camera-outline"
+                variant="secondary"
+                size="sm"
                 onPress={handleLaunchCamera}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="camera" size={16} color={COLORS.primary} />
-                <Text style={styles.sourceBtnText}>Take Photo</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.sourceBtn}
-                onPress={handlePickFromGallery}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="images-outline" size={16} color={COLORS.primary} />
-                <Text style={styles.sourceBtnText}>Choose from Gallery</Text>
-              </TouchableOpacity>
+                style={styles.flex}
+              />
+              <Button label="Choose from gallery" icon="images-outline" variant="secondary" size="sm" onPress={handlePickFromGallery} style={styles.flex} />
             </View>
 
-            {/* 2. Interactive Tool Selector Bar (Circle, Arrow, Box, Text Tag) */}
+            {/* Tool selector */}
+            <Text style={styles.sectionLabel}>Shape</Text>
             <View style={styles.toolBar}>
-              <TouchableOpacity
-                style={[styles.toolBtn, activeTool === 'circle' && styles.toolBtnActive]}
-                onPress={() => setActiveTool('circle')}
-                activeOpacity={0.8}
-              >
-                <Ionicons
-                  name="radio-button-on"
-                  size={16}
-                  color={activeTool === 'circle' ? '#FFFFFF' : COLORS.textDark}
-                />
-                <Text style={[styles.toolText, activeTool === 'circle' && styles.toolTextActive]}>
-                  Circle
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.toolBtn, activeTool === 'arrow' && styles.toolBtnActive]}
-                onPress={() => setActiveTool('arrow')}
-                activeOpacity={0.8}
-              >
-                <Ionicons
-                  name="arrow-up-circle"
-                  size={16}
-                  color={activeTool === 'arrow' ? '#FFFFFF' : COLORS.textDark}
-                />
-                <Text style={[styles.toolText, activeTool === 'arrow' && styles.toolTextActive]}>
-                  Arrow
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.toolBtn, activeTool === 'box' && styles.toolBtnActive]}
-                onPress={() => setActiveTool('box')}
-                activeOpacity={0.8}
-              >
-                <Ionicons
-                  name="square-outline"
-                  size={16}
-                  color={activeTool === 'box' ? '#FFFFFF' : COLORS.textDark}
-                />
-                <Text style={[styles.toolText, activeTool === 'box' && styles.toolTextActive]}>
-                  Box
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.toolBtn, activeTool === 'text' && styles.toolBtnActive]}
-                onPress={() => setActiveTool('text')}
-                activeOpacity={0.8}
-              >
-                <Ionicons
-                  name="text"
-                  size={16}
-                  color={activeTool === 'text' ? '#FFFFFF' : COLORS.textDark}
-                />
-                <Text style={[styles.toolText, activeTool === 'text' && styles.toolTextActive]}>
-                  Text Tag
-                </Text>
-              </TouchableOpacity>
+              {TOOLS.map((t) => {
+                const selected = activeTool === t.key;
+                return (
+                  <Pressable
+                    key={t.key}
+                    style={({ pressed }) => [styles.toolBtn, selected && styles.toolBtnActive, pressed && !selected && styles.pressed]}
+                    onPress={() => setActiveTool(t.key)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${t.label} tool`}
+                    accessibilityState={{ selected }}
+                  >
+                    <Ionicons name={t.icon} size={18} color={selected ? COLORS.textInverse : COLORS.textDark} />
+                    <Text style={[styles.toolText, selected && styles.toolTextActive]}>{t.label}</Text>
+                  </Pressable>
+                );
+              })}
             </View>
 
-            {/* 3. 6-Enterprise Color Palette Bar */}
+            {/* Colour + undo / clear */}
             <View style={styles.paletteRow}>
-              <Text style={styles.paletteLabel}>Color:</Text>
               <View style={styles.paletteList}>
                 {COLOR_PALETTE.map((p) => {
                   const isSelected = activeColor === p.color;
                   return (
-                    <TouchableOpacity
+                    <Pressable
                       key={p.color}
-                      style={[
-                        styles.colorCircle,
-                        { backgroundColor: p.color },
-                        isSelected && styles.colorCircleActive,
-                      ]}
                       onPress={() => setActiveColor(p.color)}
-                      activeOpacity={0.8}
-                    />
+                      hitSlop={4}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${p.label} colour`}
+                      accessibilityState={{ selected: isSelected }}
+                      style={[styles.colorRing, isSelected && styles.colorRingActive]}
+                    >
+                      <View style={[styles.colorCircle, { backgroundColor: p.color }]} />
+                    </Pressable>
                   );
                 })}
               </View>
 
-              {/* Undo & Clear Buttons */}
               <View style={styles.editActions}>
-                <TouchableOpacity
+                <Pressable
                   style={[styles.editBtn, annotations.length === 0 && styles.editBtnDisabled]}
                   onPress={handleUndo}
                   disabled={annotations.length === 0}
-                  activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel="Undo last mark"
+                  accessibilityState={{ disabled: annotations.length === 0 }}
                 >
-                  <Ionicons
-                    name="arrow-undo"
-                    size={15}
-                    color={annotations.length > 0 ? COLORS.textDark : '#CBD5E1'}
-                  />
-                </TouchableOpacity>
-
-                <TouchableOpacity
+                  <Ionicons name="arrow-undo" size={18} color={COLORS.textDark} />
+                </Pressable>
+                <Pressable
                   style={[styles.editBtn, annotations.length === 0 && styles.editBtnDisabled]}
                   onPress={handleClear}
                   disabled={annotations.length === 0}
-                  activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel="Remove all marks"
+                  accessibilityState={{ disabled: annotations.length === 0 }}
                 >
-                  <Ionicons
-                    name="trash-outline"
-                    size={15}
-                    color={annotations.length > 0 ? '#DC2626' : '#CBD5E1'}
-                  />
-                </TouchableOpacity>
+                  <Ionicons name="trash-outline" size={18} color={COLORS.danger} />
+                </Pressable>
               </View>
             </View>
 
-            {/* 4. Quick Tag Preset Chips */}
-            <View style={styles.tagSection}>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tagScroll}>
-                {PRESET_TAGS.map((tag) => {
-                  const isSelected = annotationText === tag;
-                  return (
-                    <TouchableOpacity
-                      key={tag}
-                      style={[styles.tagChip, isSelected && styles.tagChipActive]}
-                      onPress={() => setAnnotationText(tag)}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={[styles.tagChipText, isSelected && styles.tagChipTextActive]}>
-                        {tag}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
+            {/* Label text for new marks */}
+            <Text style={styles.sectionLabel}>Label for new marks</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tagScroll}>
+              {PRESET_TAGS.map((tag) => {
+                const isSelected = annotationText === tag;
+                return (
+                  <Pressable
+                    key={tag}
+                    style={[styles.tagChip, isSelected && styles.tagChipActive]}
+                    onPress={() => setAnnotationText(tag)}
+                    hitSlop={{ top: 4, bottom: 4 }}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: isSelected }}
+                  >
+                    <Text style={[styles.tagChipText, isSelected && styles.tagChipTextActive]}>{tag}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <TextField
+              value={annotationText}
+              onChangeText={setAnnotationText}
+              placeholder="Or type your own label (optional)"
+              accessibilityLabel="Label for new marks"
+              returnKeyType="done"
+            />
 
-              <TextInput
-                style={styles.customTagInput}
-                value={annotationText}
-                onChangeText={setAnnotationText}
-                placeholder="Or type custom defect note..."
-                placeholderTextColor={COLORS.textMuted}
-              />
-            </View>
-
-            {/* 5. Interactive Canvas Board */}
-            <View style={styles.canvasContainer}>
-              <View
-                onLayout={handleCanvasLayout}
-                onStartShouldSetResponder={() => true}
-                onMoveShouldSetResponder={() => true}
-                onResponderGrant={handleTouchStart}
-                onResponderMove={handleTouchMove}
-                onResponderRelease={handleTouchEnd}
-                onResponderTerminate={() => setIsDrawing(false)}
-                style={[styles.canvasSurface, isTablet && styles.tabletCanvasSurface]}
-              >
-                {/* Background Photo */}
-                <Image
-                  source={{ uri: currentPhotoUri || DEFAULT_SHOPFLOOR_SAMPLE }}
-                  style={styles.canvasImage}
-                  resizeMode="cover"
-                />
-
-                {/* Grid Overlay Guide */}
-                <View style={styles.gridOverlay} pointerEvents="none" />
-
-                {/* Rendered Annotations Layer */}
-                {annotations.map((ann) => {
-                  const hasCustomSize = Boolean(
-                    (ann.type === 'circle' && ann.radius) ||
-                    (ann.type === 'box' && ann.width && ann.height)
-                  );
-
-                  return (
-                    <View
-                      key={ann.id}
-                      style={[
-                        styles.annotationBox,
-                        {
-                          left: `${ann.x}%`,
-                          top: `${ann.y}%`,
-                        },
-                        hasCustomSize ? { transform: [] } : undefined,
-                      ]}
-                      pointerEvents="none"
-                    >
-                      {/* Circle Tool Marker */}
-                      {ann.type === 'circle' && (
-                        <View
-                          style={[
-                            styles.markerCircle,
-                            ann.radius
-                              ? {
-                                  width: Math.max(ann.radius * 2, 38),
-                                  height: Math.max(ann.radius * 2, 38),
-                                  borderRadius: Math.max(ann.radius, 19),
-                                }
-                              : {},
-                            { borderColor: ann.color || activeColor },
-                          ]}
-                        >
-                          {ann.text && (
-                            <View
-                              style={[
-                                styles.tagBadge,
-                                { backgroundColor: ann.color || activeColor },
-                              ]}
-                            >
-                              <Text style={styles.tagBadgeText} numberOfLines={1}>
-                                {ann.text}
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-                      )}
-
-                      {/* Box Tool Marker */}
-                      {ann.type === 'box' && (
-                        <View
-                          style={[
-                            styles.markerBox,
-                            ann.width && ann.height
-                              ? {
-                                  width: Math.max(ann.width, 36),
-                                  height: Math.max(ann.height, 26),
-                                }
-                              : {},
-                            { borderColor: ann.color || activeColor },
-                          ]}
-                        >
-                          {ann.text && (
-                            <View
-                              style={[
-                                styles.tagBadge,
-                                { backgroundColor: ann.color || activeColor },
-                              ]}
-                            >
-                              <Text style={styles.tagBadgeText} numberOfLines={1}>
-                                {ann.text}
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-                      )}
-
-                      {/* Arrow Tool Marker */}
-                      {ann.type === 'arrow' && (
-                        <View
-                          style={[
-                            styles.arrowMarkerWrap,
-                            ann.fromX !== undefined && ann.toX !== undefined
-                              ? {
-                                  transform: [
-                                    {
-                                      rotate: `${
-                                        Math.atan2(
-                                          (ann.toY! - ann.fromY!) * (canvasSize.height / 100),
-                                          (ann.toX! - ann.fromX!) * (canvasSize.width / 100)
-                                        ) *
-                                          (180 / Math.PI) -
-                                        90
-                                      }deg`,
-                                    },
-                                  ],
-                                }
-                              : {},
-                          ]}
-                        >
-                          <Ionicons
-                            name="arrow-up"
-                            size={28}
-                            color={ann.color || activeColor}
-                            style={styles.arrowDropShadow}
-                          />
-                          {ann.text && (
-                            <View
-                              style={[
-                                styles.tagBadge,
-                                { backgroundColor: ann.color || activeColor },
-                              ]}
-                            >
-                              <Text style={styles.tagBadgeText} numberOfLines={1}>
-                                {ann.text}
-                              </Text>
-                            </View>
-                          )}
-                        </View>
-                      )}
-
-                      {/* Text Tag Marker */}
-                      {ann.type === 'text' && (
-                        <View
-                          style={[
-                            styles.textMarkerPill,
-                            { borderColor: ann.color || activeColor },
-                          ]}
-                        >
-                          <View
-                            style={[
-                              styles.colorDot,
-                              { backgroundColor: ann.color || activeColor },
-                            ]}
-                          />
-                          <Text style={styles.textMarkerLabel} numberOfLines={1}>
-                            {ann.text || 'Defect'}
-                          </Text>
-                        </View>
-                      )}
-                    </View>
-                  );
-                })}
-
-                {/* Live Drawing Preview Ghost */}
-                {isDrawing && touchStart && touchCurrent && (
-                  <View style={StyleSheet.absoluteFill} pointerEvents="none">
-                    {activeTool === 'circle' && (
-                      <View
-                        style={{
-                          position: 'absolute',
-                          left:
-                            touchStart.x -
-                            Math.hypot(
-                              touchCurrent.x - touchStart.x,
-                              touchCurrent.y - touchStart.y
-                            ),
-                          top:
-                            touchStart.y -
-                            Math.hypot(
-                              touchCurrent.x - touchStart.x,
-                              touchCurrent.y - touchStart.y
-                            ),
-                          width:
-                            Math.hypot(
-                              touchCurrent.x - touchStart.x,
-                              touchCurrent.y - touchStart.y
-                            ) * 2,
-                          height:
-                            Math.hypot(
-                              touchCurrent.x - touchStart.x,
-                              touchCurrent.y - touchStart.y
-                            ) * 2,
-                          borderRadius: Math.hypot(
-                            touchCurrent.x - touchStart.x,
-                            touchCurrent.y - touchStart.y
-                          ),
-                          borderWidth: 2,
-                          borderColor: activeColor,
-                          borderStyle: 'dashed',
-                          backgroundColor: 'rgba(255,255,255,0.1)',
-                        }}
-                      />
-                    )}
-                    {activeTool === 'box' && (
-                      <View
-                        style={{
-                          position: 'absolute',
-                          left: Math.min(touchStart.x, touchCurrent.x),
-                          top: Math.min(touchStart.y, touchCurrent.y),
-                          width: Math.abs(touchCurrent.x - touchStart.x),
-                          height: Math.abs(touchCurrent.y - touchStart.y),
-                          borderWidth: 2,
-                          borderColor: activeColor,
-                          borderStyle: 'dashed',
-                          borderRadius: 6,
-                          backgroundColor: 'rgba(255,255,255,0.1)',
-                        }}
-                      />
-                    )}
-                    {activeTool === 'arrow' && (
-                      <View
-                        style={{
-                          position: 'absolute',
-                          left: touchStart.x - 14,
-                          top: touchStart.y - 14,
-                          transform: [
-                            {
-                              rotate: `${
-                                Math.atan2(
-                                  touchCurrent.y - touchStart.y,
-                                  touchCurrent.x - touchStart.x
-                                ) *
-                                  (180 / Math.PI) -
-                                90
-                              }deg`,
-                            },
-                          ],
-                          alignItems: 'center',
-                        }}
-                      >
-                        <Ionicons name="arrow-up" size={28} color={activeColor} />
-                      </View>
-                    )}
-                  </View>
-                )}
-              </View>
-
-              <Text style={styles.canvasHint}>
-                {annotations.length === 0
-                  ? 'Tap or drag anywhere on the photo to draw markups'
-                  : `${annotations.length} defect markup(s) placed`}
-              </Text>
-            </View>
-
-            {/* 6. Active Markups Breakdown with Quick Remove */}
+            {/* Placed marks with quick remove */}
             {annotations.length > 0 && (
-              <View style={styles.activeMarkupsSection}>
-                <Text style={styles.activeMarkupsTitle}>Placed Markups ({annotations.length})</Text>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.activeMarkupsScroll}
-                >
+              <View>
+                <Text style={styles.sectionLabel}>Marks on this photo ({annotations.length})</Text>
+                <View style={styles.markupWrap}>
                   {annotations.map((ann, idx) => (
                     <View key={ann.id || idx} style={styles.activeMarkupPill}>
-                      <View
-                        style={[styles.markupDot, { backgroundColor: ann.color || activeColor }]}
-                      />
+                      <View style={[styles.markupDot, { backgroundColor: ann.color || activeColor }]} />
                       <Text style={styles.activeMarkupText} numberOfLines={1}>
-                        {ann.type.toUpperCase()}: {ann.text || 'Defect'}
+                        {TOOL_NAMES[ann.type]}
+                        {ann.text ? `: ${ann.text}` : ''}
                       </Text>
-                      <TouchableOpacity
+                      <Pressable
                         onPress={() => handleDeleteAnnotation(ann.id)}
                         style={styles.markupDeleteBtn}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        hitSlop={6}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Remove mark ${idx + 1}`}
                       >
-                        <Ionicons name="close" size={12} color="#64748B" />
-                      </TouchableOpacity>
+                        <Ionicons name="close" size={16} color={COLORS.textMedium} />
+                      </Pressable>
                     </View>
                   ))}
-                </ScrollView>
+                </View>
               </View>
             )}
-
-            {/* 7. Footer Actions: Cancel & Save Evidence */}
-            <View style={styles.footerRow}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={onClose} activeOpacity={0.8}>
-                <Text style={styles.cancelBtnText}>Cancel</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.saveBtn} onPress={handleSave} activeOpacity={0.85}>
-                <Ionicons name="checkmark-circle" size={18} color="#FFFFFF" />
-                <Text style={styles.saveBtnText}>
-                  Save Evidence ({annotations.length})
-                </Text>
-              </TouchableOpacity>
-            </View>
           </ScrollView>
+
+          {/* Footer actions */}
+          <View style={styles.footerRow}>
+            <Button label="Cancel" variant="secondary" onPress={onClose} />
+            <Button
+              label={annotations.length > 0 ? `Save photo (${annotations.length} mark${annotations.length === 1 ? '' : 's'})` : 'Save photo'}
+              icon="checkmark"
+              onPress={handleSave}
+              disabled={!currentPhotoUri}
+              style={styles.flex}
+            />
+          </View>
         </View>
-      </View>
+      </SafeAreaView>
     </Modal>
   );
 };
 
 const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
-    justifyContent: 'flex-end',
-  },
-  sheetContainer: {
-    backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 28,
-    maxHeight: '92%',
-  },
+  safe: { flex: 1, backgroundColor: COLORS.card },
+  container: { flex: 1 },
+  tabletContainer: { width: '100%', maxWidth: 840, alignSelf: 'center' },
+  flex: { flex: 1 },
+  pressed: { opacity: 0.85 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingBottom: 12,
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.sm,
     borderBottomWidth: 1,
-    borderBottomColor: '#F1F5F9',
+    borderBottomColor: COLORS.border,
   },
-  headerLeft: {
-    flex: 1,
+  iconBtn: { width: TOUCH_TARGET, height: TOUCH_TARGET, alignItems: 'center', justifyContent: 'center', borderRadius: TOUCH_TARGET / 2 },
+  headerText: { flex: 1, minWidth: 0 },
+  title: { ...TYPE.heading, color: COLORS.textDark },
+  subtitle: { ...TYPE.caption, color: COLORS.textMedium, marginTop: 2 },
+  scrollBody: { padding: SPACING.screen, paddingBottom: SPACING.xxl },
+  canvasContainer: { alignItems: 'center', width: '100%' },
+  canvasSurface: {
+    borderRadius: RADIUS.lg,
+    overflow: 'hidden',
+    position: 'relative',
+    backgroundColor: COLORS.textDark,
   },
-  title: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: COLORS.textDark,
-  },
-  subtitle: {
-    fontSize: 11,
-    color: COLORS.textMedium,
-    marginTop: 2,
-  },
-  closeBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  scrollBody: {
-    paddingTop: 12,
-  },
-  sourceBar: {
-    flexDirection: 'row',
-    gap: 8,
-    marginBottom: 10,
-  },
-  sourceBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: '#FFF4EE',
+  canvasImage: { width: '100%', height: '100%' },
+  canvasEmpty: {
+    borderRadius: RADIUS.lg,
     borderWidth: 1,
-    borderColor: '#FED7AA',
-    paddingVertical: 9,
-    borderRadius: 12,
+    borderStyle: 'dashed',
+    borderColor: COLORS.borderDark,
+    backgroundColor: COLORS.cardSecondary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.sm,
+    padding: SPACING.lg,
   },
-  sourceBtnText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
-  toolBar: {
-    flexDirection: 'row',
-    gap: 6,
-    marginBottom: 10,
-  },
+  canvasEmptyText: { ...TYPE.label, color: COLORS.textMedium, textAlign: 'center' },
+  ghost: { position: 'absolute', borderWidth: 2, borderStyle: 'dashed', backgroundColor: 'rgba(255,255,255,0.1)' },
+  sourceBar: { flexDirection: 'row', gap: SPACING.sm, marginTop: SPACING.md },
+  sectionLabel: { ...TYPE.label, color: COLORS.textDark, marginTop: SPACING.lg, marginBottom: SPACING.sm },
+  toolBar: { flexDirection: 'row', gap: SPACING.sm },
   toolBtn: {
     flex: 1,
-    flexDirection: 'row',
+    minHeight: 52,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 8,
-    borderRadius: 12,
-    backgroundColor: '#F1F5F9',
-    gap: 4,
+    gap: 2,
+    paddingVertical: SPACING.xs,
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.card,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    borderColor: COLORS.borderDark,
   },
-  toolBtnActive: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
-  },
-  toolText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  toolTextActive: {
-    color: '#FFFFFF',
-  },
+  toolBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  toolText: { ...TYPE.captionStrong, color: COLORS.textDark },
+  toolTextActive: { color: COLORS.textInverse },
   paletteRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#F8FAFC',
-    borderRadius: 14,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
+    gap: SPACING.sm,
+    marginTop: SPACING.md,
   },
-  paletteLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.textDark,
-  },
-  paletteList: {
-    flexDirection: 'row',
+  paletteList: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: SPACING.xs, flex: 1 },
+  colorRing: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
-    gap: 8,
-  },
-  colorCircle: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    borderWidth: 1.5,
-    borderColor: '#CBD5E1',
-  },
-  colorCircleActive: {
-    transform: [{ scale: 1.25 }],
-    borderColor: COLORS.textDark,
-    borderWidth: 2.5,
-  },
-  editActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  editBtn: {
-    padding: 6,
-    borderRadius: 8,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-  },
-  editBtnDisabled: {
-    opacity: 0.4,
-  },
-  tagSection: {
-    marginBottom: 10,
-  },
-  tagScroll: {
-    flexDirection: 'row',
-    marginBottom: 8,
-  },
-  tagChip: {
-    backgroundColor: '#F1F5F9',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-    marginRight: 6,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  tagChipActive: {
-    backgroundColor: '#FFF2EB',
-    borderColor: COLORS.primary,
-  },
-  tagChipText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: COLORS.textMedium,
-  },
-  tagChipTextActive: {
-    color: COLORS.primary,
-    fontWeight: '700',
-  },
-  customTagInput: {
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    fontSize: 12,
-    color: COLORS.textDark,
-  },
-  canvasContainer: {
-    alignItems: 'center',
-    marginVertical: 4,
-  },
-  canvasSurface: {
-    width: '100%',
-    height: 240,
-    borderRadius: 18,
-    overflow: 'hidden',
-    position: 'relative',
-    backgroundColor: '#0F172A',
+    justifyContent: 'center',
     borderWidth: 2,
-    borderColor: '#CBD5E1',
+    borderColor: 'transparent',
   },
-  canvasImage: {
-    width: '100%',
-    height: '100%',
-  },
-  gridOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.08)',
-  },
-  annotationBox: {
-    position: 'absolute',
-    transform: [{ translateX: -20 }, { translateY: -20 }],
-  },
-  markerCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    borderWidth: 3,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+  colorRingActive: { borderColor: COLORS.primary },
+  colorCircle: { width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: COLORS.borderDark },
+  editActions: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
+  editBtn: {
+    width: TOUCH_TARGET,
+    height: TOUCH_TARGET,
     alignItems: 'center',
     justifyContent: 'center',
+    borderRadius: RADIUS.md,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.borderDark,
   },
-  markerBox: {
-    width: 50,
-    height: 38,
-    borderRadius: 6,
-    borderWidth: 3,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    alignItems: 'center',
+  editBtnDisabled: { opacity: 0.4 },
+  tagScroll: { gap: SPACING.sm, paddingRight: SPACING.screen, marginBottom: SPACING.sm },
+  tagChip: {
+    minHeight: 36,
     justifyContent: 'center',
+    paddingHorizontal: SPACING.md,
+    borderRadius: RADIUS.pill,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
-  arrowMarkerWrap: {
-    alignItems: 'center',
-  },
-  arrowDropShadow: {
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.6,
-    shadowRadius: 3,
-  },
-  tagBadge: {
-    position: 'absolute',
-    top: -16,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  tagBadgeText: {
-    color: '#FFFFFF',
-    fontSize: 8.5,
-    fontWeight: '800',
-  },
-  textMarkerPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(15, 23, 42, 0.88)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    borderWidth: 1.5,
-    gap: 4,
-  },
-  colorDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  textMarkerLabel: {
-    color: '#FFFFFF',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  canvasHint: {
-    fontSize: 10.5,
-    color: COLORS.textMuted,
-    marginTop: 6,
-    fontWeight: '500',
-  },
-  activeMarkupsSection: {
-    marginTop: 8,
-    marginBottom: 4,
-  },
-  activeMarkupsTitle: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.textMedium,
-    marginBottom: 4,
-  },
-  activeMarkupsScroll: {
-    flexDirection: 'row',
-  },
+  tagChipActive: { backgroundColor: COLORS.primarySoft, borderColor: COLORS.primary },
+  tagChipText: { ...TYPE.label, fontWeight: '500', color: COLORS.textMedium },
+  tagChipTextActive: { color: COLORS.primary, fontWeight: '600' },
+  markupWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.sm },
   activeMarkupPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#F1F5F9',
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    marginRight: 6,
+    gap: 6,
+    backgroundColor: COLORS.cardSecondary,
+    borderRadius: RADIUS.sm,
+    paddingLeft: SPACING.sm,
+    minHeight: 40,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    borderColor: COLORS.border,
+    maxWidth: '100%',
   },
-  markupDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-  },
-  activeMarkupText: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: COLORS.textDark,
-    maxWidth: 120,
-  },
-  markupDeleteBtn: {
-    padding: 1,
-    marginLeft: 2,
-  },
+  markupDot: { width: 10, height: 10, borderRadius: 5, borderWidth: 1, borderColor: COLORS.borderDark },
+  activeMarkupText: { ...TYPE.caption, color: COLORS.textDark, flexShrink: 1 },
+  markupDeleteBtn: { width: 36, height: 40, alignItems: 'center', justifyContent: 'center' },
   footerRow: {
     flexDirection: 'row',
-    gap: 10,
-    marginTop: 14,
-  },
-  cancelBtn: {
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 14,
-    backgroundColor: '#F1F5F9',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cancelBtnText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.textMedium,
-  },
-  saveBtn: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: COLORS.primary,
-    paddingVertical: 12,
-    borderRadius: 14,
-  },
-  saveBtnText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#FFFFFF',
-  },
-  tabletSheetContainer: {
-    maxWidth: 840,
-    width: '92%',
-    alignSelf: 'center',
-    borderRadius: 24,
-    marginBottom: 20,
-  },
-  tabletCanvasSurface: {
-    height: 380,
+    gap: SPACING.sm,
+    paddingHorizontal: SPACING.screen,
+    paddingVertical: SPACING.md,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    backgroundColor: COLORS.card,
   },
 });
