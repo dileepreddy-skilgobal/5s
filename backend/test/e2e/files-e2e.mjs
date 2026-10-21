@@ -79,7 +79,8 @@ check('echoed signed URL stored canonically', afterEcho.annotatedPhotoUrl === st
 r = await req('POST', '/observations', { token: OWNER, body: { locationId: loc.id, title: 'ISO bad photo', description: 'x', category: 'S1_SORT', severity: 'MINOR', beforePhotoUrl: 'data:image/png;base64,PHN2Zz48L3N2Zz4=' } });
 check('inline non-image rejected', r.status === 400, msg(r));
 const log = (await req('GET', `/activity-logs?entityType=Observation&action=CREATE_OBSERVATION&pageSize=3`, { token: ADMIN })).data.items;
-const rawLog = await db.activityLog.findFirst({ where: { entityType: 'Observation', action: 'CREATE_OBSERVATION' }, orderBy: { sequence: 'desc' }, select: { changes: true } });
+// The entry for this observation (sequence numbers are per organization chain, so "highest sequence" is not "latest")
+const rawLog = await db.activityLog.findFirst({ where: { entityType: 'Observation', action: 'CREATE_OBSERVATION', entityId: obs.id }, select: { changes: true } });
 check('activity log stores the file reference, not base64', /\/api\/v1\/files\/[0-9a-f-]{36}/.test(rawLog?.changes ?? '') && !(rawLog?.changes ?? '').includes('base64'), rawLog?.changes?.slice(0, 120));
 check('trail API returns a clickable signed link', /\/api\/v1\/files\/.+sig=/.test(log[0]?.changes?.request?.beforePhotoUrl ?? ''));
 

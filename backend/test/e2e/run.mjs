@@ -50,6 +50,10 @@ if (suites.includes('mobile')) {
   }
 }
 
+// The demo seed has one organization; tenant-isolation checks need a second one to attack
+const fixture = spawnSync(process.execPath, [join(here, 'support', 'second-tenant.cjs'), backend], { cwd: backend, stdio: 'inherit' });
+if (fixture.status !== 0) process.exit(2);
+
 const results = [];
 for (const suite of suites) {
   spawnSync(process.execPath, [join(here, 'support', 'cleanup.cjs'), backend], { cwd: backend, stdio: 'ignore' });
@@ -57,7 +61,8 @@ for (const suite of suites) {
   const r = spawnSync(process.execPath, [join(here, available.get(suite))], { cwd: backend, encoding: 'utf8', env: process.env });
   const output = `${r.stdout ?? ''}${r.stderr ?? ''}`;
   const summary = /(\d+) passed, (\d+) failed/.exec(output);
-  const ok = r.status === 0;
+  // Some suites print "N passed, M failed" without setting an exit code, so a failed check also fails the suite
+  const ok = r.status === 0 && (!summary || Number(summary[2]) === 0);
   results.push({ suite, ok, passed: Number(summary?.[1] ?? 0), failed: Number(summary?.[2] ?? (ok ? 0 : 1)), ms: Date.now() - started });
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${suite.padEnd(14)} ${summary ? `${summary[1]} passed, ${summary[2]} failed` : ''} (${((Date.now() - started) / 1000).toFixed(1)}s)`);
   if (!ok) console.log(output.split('\n').filter((l) => l.startsWith('FAIL') || /Error/.test(l)).slice(0, 20).join('\n'));

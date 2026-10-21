@@ -208,13 +208,13 @@ async function main() {
     data: { tenantId, name: 'SkilGlobal Precision Manufacturing Ltd', code: 'SKILGLOBAL', nodeType: 'ENTERPRISE', path: `/${tenantId}/SKILGLOBAL/`, depth: 0 },
   });
   const plant = await prisma.orgNode.create({
-    data: { tenantId, parentId: company.id, name: 'Bengaluru Plant', code: 'BLR', nodeType: 'PLANT', path: `${company.path}BLR/`, depth: 1, sortOrder: 1 },
+    data: { tenantId, parentId: company.id, name: 'Bengaluru Plant', code: 'BLR-PLANT-01', nodeType: 'PLANT', path: `${company.path}BLR-PLANT-01/`, depth: 1, sortOrder: 1 },
   });
   const machining = await prisma.orgNode.create({
-    data: { tenantId, parentId: plant.id, name: 'Machining', code: 'BLR-MACH', nodeType: 'DEPARTMENT', path: `${plant.path}BLR-MACH/`, depth: 2, sortOrder: 1 },
+    data: { tenantId, parentId: plant.id, name: 'Machining', code: 'BLR-DEPT-MACH', nodeType: 'DEPARTMENT', path: `${plant.path}BLR-DEPT-MACH/`, depth: 2, sortOrder: 1 },
   });
   const assembly = await prisma.orgNode.create({
-    data: { tenantId, parentId: plant.id, name: 'Assembly', code: 'BLR-ASM', nodeType: 'DEPARTMENT', path: `${plant.path}BLR-ASM/`, depth: 2, sortOrder: 2 },
+    data: { tenantId, parentId: plant.id, name: 'Assembly', code: 'BLR-DEPT-ASM', nodeType: 'DEPARTMENT', path: `${plant.path}BLR-DEPT-ASM/`, depth: 2, sortOrder: 2 },
   });
   const scopeNodes = { plant: plant.id, machining: machining.id };
 
