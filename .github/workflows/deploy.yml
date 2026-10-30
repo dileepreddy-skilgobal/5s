@@ -1,0 +1,46 @@
+name: Deploy
+
+# Deploys main to the DigitalOcean Droplet after CI passes; can also be run by hand from the Actions tab.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      seed_demo_data:
+        description: 'Type RESET to replace ALL data on the server with the demo sample data (leave empty for a normal deploy)'
+        required: false
+        default: ''
+
+# One deploy at a time; a newer push waits instead of cancelling a deploy halfway
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to DigitalOcean
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DROPLET_HOST }}
+          DEPLOY_USER: ${{ secrets.DROPLET_USER }}
+          # The commit CI tested (manual runs deploy the latest main)
+          COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+          SEED_DEMO_DATA: ${{ github.event.inputs.seed_demo_data == 'RESET' && 'true' || 'false' }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" \
+            "set -e; cd /var/www/5s && git fetch --prune origin main && git reset --hard $COMMIT && SEED_DEMO_DATA=$SEED_DEMO_DATA bash scripts/deploy.sh"
