@@ -73,7 +73,10 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const ACTIVE_TENANT_KEY = '5s_active_tenant';
 const LAST_ORG_SLUG_KEY = '5s_last_org_slug';
-const THEME_STORAGE_KEY = '5s_theme';
+// Holds only a theme the user picked with the toggle; light is the default
+const THEME_STORAGE_KEY = '5s_theme_choice';
+// Earlier builds saved the system preference here on every visit, so it is not a real choice; removed on startup
+const LEGACY_THEME_KEY = '5s_theme';
 // Keys written by earlier builds that trusted client-side identity; removed on startup.
 const LEGACY_KEYS = ['5s_user_session', '5s_active_user_role'];
 
@@ -127,21 +130,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [authStatus, setAuthStatus] = useState<AuthStatus>(() => (getAuthToken() ? 'checking' : 'anonymous'));
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     try {
+      localStorage.removeItem(LEGACY_THEME_KEY);
       const stored = localStorage.getItem(THEME_STORAGE_KEY);
       if (stored === 'light' || stored === 'dark') return stored;
     } catch {
-      // Storage unavailable: fall through to the system preference
+      // Storage unavailable: fall through to the default
     }
-    return typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    // Light is the primary theme regardless of the system preference; dark only when chosen with the toggle
+    return 'light';
   });
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    try {
-      localStorage.setItem(THEME_STORAGE_KEY, theme);
-    } catch {
-      // Not persisted (private window); the theme still applies for this visit
-    }
   }, [theme]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [activeUserRole, setActiveUserRoleState] = useState<string>('');
@@ -165,7 +165,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const toggleTheme = () => {
-    setTheme((current) => (current === 'light' ? 'dark' : 'light'));
+    setTheme((current) => {
+      const next = current === 'light' ? 'dark' : 'light';
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, next);
+      } catch {
+        // Not persisted (private window); the theme still applies for this visit
+      }
+      return next;
+    });
   };
 
   const clearSession = useCallback(() => {
